@@ -509,7 +509,7 @@ impl EngineState {
             if is_sub_all || table_names.contains(&table_name.as_str()) {
                 if count >= tick_count {
                     let list = serde6::deserialize(&msg, &mut 0, false)?;
-                    let res = self.eval(&mut Stack::default(), &list);
+                    let res = self.eval(&mut Stack::default(), &list, "");
                     if res.is_err() {
                         let err = res.err().unwrap();
                         error!("failed to replay {} message, error: {}", i, err);
@@ -599,7 +599,7 @@ impl EngineState {
                                 .str()?,
                         )
                     {
-                        let res = self.eval(&mut Stack::default(), &list);
+                        let res = self.eval(&mut Stack::default(), &list, "");
                         if res.is_err() {
                             let err = res.err().unwrap();
                             error!(
@@ -1376,13 +1376,18 @@ impl EngineState {
             .map_err(|e| SpicyError::EvalErr(format!("'{}'\n{}", full_path, e)))
     }
 
-    pub fn eval(&self, stack: &mut Stack, args: &SpicyObj) -> SpicyResult<SpicyObj> {
+    pub fn eval(
+        &self,
+        stack: &mut Stack,
+        args: &SpicyObj,
+        src_path: &str,
+    ) -> SpicyResult<SpicyObj> {
         match args {
             SpicyObj::String(source) => {
                 let nodes = self
                     .parse("", source)
                     .map_err(|e| SpicyError::EvalErr(e.to_string()))?;
-                self.eval_ast(nodes, "", "")
+                self.eval_ast(nodes, src_path, source)
             }
             SpicyObj::MixedList(_) if args.size() == 0 => Ok(SpicyObj::Null),
             SpicyObj::Series(_) if args.is_syms() || args.is_str_or_strs() => {
@@ -1571,9 +1576,15 @@ impl EngineState {
 
         if !active_jobs.is_empty() {
             for (id, job) in active_jobs.iter_mut() {
+                let src_path = if self.repl_lang == Language::Chili {
+                    format!("job{}.chi", id)
+                } else {
+                    format!("job{}.pep", id)
+                };
                 let obj = self.eval(
                     &mut Stack::new(None, 0, 0, ""),
                     &SpicyObj::String(self.repl_lang.format_call(&job.fn_name, &[])),
+                    &src_path,
                 );
                 if let Err(e) = obj {
                     error!(

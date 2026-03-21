@@ -237,7 +237,12 @@ pub fn handle_q_conn(
 
         debug!("evaluate q IPC message: {:?}", obj);
         stack.clear_vars();
-        let res = state.eval(&mut stack, &obj);
+        let src_path = if state.is_repl_use_chili_syntax() {
+            format!("ipc{}.chi", handle)
+        } else {
+            format!("ipc{}.pep", handle)
+        };
+        let res = state.eval(&mut stack, &obj, &src_path);
         debug!("evaluated result: {:?}", res);
 
         if message_type == MessageType::Sync {
@@ -273,7 +278,7 @@ pub fn handle_q_conn(
             SpicyObj::Symbol(callback.clone()),
             SpicyObj::I64(handle),
         ]);
-        let mut res = state.eval(&mut Stack::default(), &f);
+        let mut res = state.eval(&mut Stack::default(), &f, "");
         let mut retry = 1;
         while res.is_err() {
             let delay = 2_u64.pow(retry);
@@ -285,7 +290,7 @@ pub fn handle_q_conn(
                 res.err().unwrap(),
             );
             std::thread::sleep(Duration::from_secs(delay));
-            res = state.eval(&mut Stack::default(), &f);
+            res = state.eval(&mut Stack::default(), &f, "");
             if retry < 6 {
                 retry += 1;
             }
@@ -330,9 +335,14 @@ pub fn handle_chili_conn(
             }
         };
 
+        let src_path = if state.is_repl_use_chili_syntax() {
+            format!("ipc{}.chi", handle)
+        } else {
+            format!("ipc{}.pep", handle)
+        };
         debug!("eval chili IPC message: {:?}", any);
         stack.clear_vars();
-        let res = state.eval(&mut stack, &any);
+        let res = state.eval(&mut stack, &any, &src_path);
 
         if message_type == MessageType::Sync {
             match res {
@@ -360,7 +370,7 @@ pub fn handle_chili_conn(
             SpicyObj::Symbol(callback.clone()),
             SpicyObj::I64(handle),
         ]);
-        let mut res = state.eval(&mut Stack::default(), &f);
+        let mut res = state.eval(&mut Stack::default(), &f, "");
         let mut retry = 1;
         while res.is_err() {
             let delay = 2_u64.pow(retry);
@@ -372,7 +382,7 @@ pub fn handle_chili_conn(
                 res.err().unwrap(),
             );
             std::thread::sleep(Duration::from_secs(delay));
-            res = state.eval(&mut Stack::default(), &f);
+            res = state.eval(&mut Stack::default(), &f, "");
             if retry < 6 {
                 retry += 1;
             }

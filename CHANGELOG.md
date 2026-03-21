@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.4] - 2026-03-21
+
+### Added
+
+- Cache source code from REPL and IPC connections for printing error messages
+
 ## [0.7.2] - 2026-02-24
 
 ### Removed
