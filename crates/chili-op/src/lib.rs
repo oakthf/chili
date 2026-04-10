@@ -13,3 +13,5 @@ mod sys;
 mod temporal;
 mod util;
 pub use built_in_fn::BUILT_IN_FN;
+pub use io::write_partition_py;
+pub use io::map_str_to_polars_dtype;

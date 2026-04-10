@@ -1,0 +1,18 @@
+[package]
+name = "chili-py"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Python bindings for the Chili language runtime"
+
+[lib]
+name = "chili"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { workspace = true }
+chili-core = { path = "../chili-core" }
+chili-op = { path = "../chili-op" }
+polars = { workspace = true, default-features = true, features = ["ipc_streaming", "lazy"] }
+log = "0.4"
+chrono = "0.4"

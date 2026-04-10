@@ -1,0 +1,16 @@
+[build-system]
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "chili"
+version = "0.7.4"
+description = "Python bindings for the Chili language runtime"
+requires-python = ">=3.8"
+dependencies = ["pyarrow>=14.0", "polars>=0.20"]
+
+[tool.maturin]
+bindings = "pyo3"
+manifest-path = "Cargo.toml"
+module-name = "chili"
+python-source = "python"

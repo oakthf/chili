@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **Headless mode** (`--headless` flag) to run Chili as a stable daemon without TTY. Automatically triggered when `--port > 0` and stdin is not a TTY (subprocess/pipe/systemd). IPC server threads remain active while main thread is parked.
+- **Python bindings** (`crates/chili-py`) via PyO3 + maturin. New `Engine` class exposes `load()`, `eval()`, and `wpar()` for direct Python access to the Chili runtime. DataFrames cross the Rust/Python boundary as Arrow IPC bytes (compatible with py-polars).
+
 ## [0.7.4] - 2026-03-21
 
 ### Added

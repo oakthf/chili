@@ -464,6 +464,192 @@ pub fn write_partition(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
     }
 }
 
+/// Native-Rust variant of `write_partition` used by the Python bindings.
+/// Accepts native Rust types so callers do not need to construct SpicyObj
+/// arg slices that satisfy the `SymOrSyms` validation constraint for
+/// sort_columns.  When `sort_columns` is empty no sorting is performed.
+pub fn write_partition_py(
+    hdb_path: &str,
+    partition: &SpicyObj,
+    table_name: &str,
+    df: &polars::prelude::DataFrame,
+    sort_columns: &[&str],
+    rechunk: bool,
+) -> SpicyResult<SpicyObj> {
+    let sort_options = SortMultipleOptions::default();
+    let hdb_path = fs::canonicalize(hdb_path).map_err(|e| SpicyError::Err(e.to_string()))?;
+
+    let mut column_names = df.get_column_names_owned();
+    let mut lf = df.clone().lazy();
+    if !sort_columns.is_empty() {
+        lf = lf.sort(sort_columns.to_vec(), sort_options.clone());
+    }
+
+    let par_str = match partition {
+        SpicyObj::Date(_) => {
+            if !column_names.contains(&"date".into()) {
+                column_names.insert(0, "date".into());
+                lf = lf.with_column(partition.as_expr().unwrap().alias("date"));
+                lf = lf.select(column_names.into_iter().map(col).collect::<Vec<_>>());
+            }
+            partition.to_string()
+        }
+        SpicyObj::I64(year) => {
+            if *year >= 1000 && *year <= 3999 {
+                if !column_names.contains(&"year".into()) {
+                    column_names.insert(0, "year".into());
+                    lf = lf.with_column(partition.as_expr().unwrap().alias("year"));
+                    lf = lf.select(column_names.into_iter().map(col).collect::<Vec<_>>());
+                }
+                year.to_string()
+            } else {
+                return Err(SpicyError::Err(format!(
+                    "Requires year between 1000 and 3999, got '{}'",
+                    year
+                )));
+            }
+        }
+        SpicyObj::Null => {
+            let table_path = hdb_path.join(table_name);
+            if table_path.exists() && table_path.is_dir() {
+                return Err(SpicyError::Err(format!(
+                    "{} is a directory, cannot write single dataframe to it",
+                    table_name
+                )));
+            } else {
+                return util::write_parquet_to_filepath(
+                    table_path.to_string_lossy().as_ref(),
+                    df,
+                )
+                .map(|size| SpicyObj::I64(size as i64));
+            }
+        }
+        _ => {
+            return Err(SpicyError::Err(format!(
+                "Requires date or i64 or 0n as partition, got '{}'",
+                partition.get_type_name()
+            )));
+        }
+    };
+
+    let df = lf
+        .collect()
+        .map_err(|e| SpicyError::EvalErr(e.to_string()))?;
+
+    let table_path = hdb_path.join(table_name);
+    if !table_path.exists() {
+        fs::create_dir(&table_path).map_err(|e| SpicyError::Err(e.to_string()))?;
+    }
+    let par_path = if table_path.is_dir() {
+        table_path.join(&par_str)
+    } else {
+        return Err(SpicyError::Err(format!(
+            "{} is not a directory",
+            table_path.display()
+        )));
+    };
+
+    let schema_path = table_path.join("schema");
+    if !schema_path.exists() {
+        let schema = df.clear();
+        util::write_parquet_to_filepath(schema_path.to_string_lossy().as_ref(), &schema)?;
+    } else {
+        let f = File::open(schema_path).map_err(|e| SpicyError::Err(e.to_string()))?;
+        let schema_df = ParquetReader::new(f)
+            .finish()
+            .map_err(|e| SpicyError::Err(e.to_string()))?;
+        if !schema_df.get_column_names().eq(&df.get_column_names()) {
+            return Err(SpicyError::Err(format!(
+                "Column names mismatch:\n\
+                   - expected: {:?}\n\
+                   - got:      {:?}",
+                schema_df.get_column_names(),
+                df.get_column_names()
+            )));
+        }
+        let mut err_msg = String::new();
+        schema_df
+            .columns()
+            .iter()
+            .zip(df.columns().iter())
+            .for_each(|(col0, col1)| {
+                if col0.dtype() != col1.dtype() {
+                    err_msg.push_str(&format!(
+                        "Column '{}' has different data type: expected {:?}, got {:?}",
+                        col0.name(),
+                        col0.dtype(),
+                        col1.dtype()
+                    ));
+                }
+            });
+        if !err_msg.is_empty() {
+            return Err(SpicyError::Err(err_msg));
+        }
+    }
+
+    let par_wild_path = format!("{}_*", par_path.display());
+    let max_par = glob::glob(&par_wild_path)
+        .map_err(|e| SpicyError::Err(e.to_string()))?
+        .count();
+
+    if max_par == 0 {
+        let sub_par_path = format!("{}_0000", par_path.display());
+        util::write_parquet_to_filepath(&sub_par_path, &df).map(|size| SpicyObj::I64(size as i64))
+    } else {
+        let mut par = max_par;
+        let mut sub_par_path = format!("{}_{:04}", par_path.display(), par);
+        while PathBuf::from_str(&sub_par_path).unwrap().exists() && par < 10000 {
+            par += 1;
+            sub_par_path = format!("{}_{:04}", par_path.display(), par);
+        }
+        if par == 10000 {
+            Err(SpicyError::Err(
+                "Exceed maximum sub partition number 9999".to_string(),
+            ))
+        } else {
+            let size = util::write_parquet_to_filepath(&sub_par_path, &df)?;
+            if rechunk {
+                let tmp_path = table_path.join("tmp");
+                let args = ScanArgsParquet::default();
+                let file_format =
+                    FileWriteFormat::Parquet(Arc::new(ParquetWriteOptions::default()));
+                let mut rechunk_lf = LazyFrame::scan_parquet(
+                    PlRefPath::new(Path::new(&par_wild_path).to_str().unwrap_or_default()),
+                    args,
+                )
+                .map_err(|e| SpicyError::EvalErr(e.to_string()))?;
+                if !sort_columns.is_empty() {
+                    rechunk_lf = rechunk_lf.sort(sort_columns.to_vec(), sort_options);
+                }
+                let _ = rechunk_lf.sink(
+                    SinkDestination::File {
+                        target: SinkTarget::Path(PlRefPath::new(
+                            Path::new(&tmp_path).to_str().unwrap_or_default(),
+                        )),
+                    },
+                    file_format,
+                    UnifiedSinkArgs::default(),
+                )
+                .map_err(|e| SpicyError::EvalErr(e.to_string()))?
+                .collect();
+                for path in glob::glob(&par_wild_path).unwrap() {
+                    match path {
+                        Ok(path) => {
+                            fs::remove_file(path).map_err(|e| SpicyError::Err(e.to_string()))?
+                        }
+                        Err(e) => return Err(SpicyError::Err(e.to_string())),
+                    }
+                }
+                fs::rename(tmp_path, table_path.join(format!("{}_0000", par_str)))
+                    .map_err(|e| SpicyError::Err(e.to_string()))
+                    .map(|_| SpicyObj::I64(size as i64))
+            } else {
+                Ok(SpicyObj::I64(size as i64))
+            }
+        }
+    }
+}
+
 // file path, txt, append
 pub fn write_txt(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
     validate_args(args, &[ArgType::StrOrSym, ArgType::Str, ArgType::Boolean])?;
