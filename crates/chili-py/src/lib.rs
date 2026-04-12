@@ -11,13 +11,65 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::{Arc, LazyLock};
 
-use chili_core::{EngineState, Func, SpicyObj, SpicyResult, Stack};
+use chili_core::{EngineState, Func, SpicyError, SpicyObj, SpicyResult, Stack};
 use chili_op::{write_partition_py, BUILT_IN_FN};
 use polars::io::{SerReader, SerWriter};
 use polars::io::ipc::{IpcStreamReader, IpcStreamWriter};
 use polars::prelude::DataFrame;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
+use pyo3::PyTypeInfo;
+
+// ---------------------------------------------------------------------------
+// Phase 13 — Structured exception hierarchy (WL 3.3)
+//
+// ChiliError is the base class, extending RuntimeError for backwards
+// compatibility (existing `except RuntimeError` catches still work).
+// Subclasses let callers catch specific failure modes:
+//
+//   try:
+//       engine.eval("select from ohlcv_1d")
+//   except chili.PartitionError:
+//       print("missing date predicate")
+//   except chili.PepperParseError:
+//       print("syntax error")
+//   except chili.ChiliError:
+//       print("some other chili error")
+//   except RuntimeError:
+//       print("still caught by RuntimeError too")
+// ---------------------------------------------------------------------------
+pyo3::create_exception!(chili, ChiliError, pyo3::exceptions::PyRuntimeError);
+pyo3::create_exception!(chili, PepperParseError, ChiliError);
+pyo3::create_exception!(chili, PepperEvalError, ChiliError);
+pyo3::create_exception!(chili, PartitionError, ChiliError);
+pyo3::create_exception!(chili, TypeMismatchError, ChiliError);
+pyo3::create_exception!(chili, NameError, ChiliError);
+pyo3::create_exception!(chili, SerializationError, ChiliError);
+
+/// Map a SpicyError to the most specific Python exception class.
+fn spicy_err_to_py(err: &SpicyError) -> PyErr {
+    match err {
+        SpicyError::ParserErr(_) => PepperParseError::new_err(err.to_string()),
+        SpicyError::EvalErr(msg) => {
+            // Detect the specific "requires 'ByDate' condition" pattern so
+            // callers can catch PartitionError separately.
+            if msg.contains("condition for this partitioned") {
+                PartitionError::new_err(err.to_string())
+            } else {
+                PepperEvalError::new_err(err.to_string())
+            }
+        }
+        SpicyError::NameErr(_) => NameError::new_err(err.to_string()),
+        SpicyError::MismatchedTypeErr(..)
+        | SpicyError::MismatchedArgTypeErr(..)
+        | SpicyError::MismatchedArgNumErr(..)
+        | SpicyError::MismatchedArgNumFnErr(..) => TypeMismatchError::new_err(err.to_string()),
+        SpicyError::NotAbleToSerializeErr(_)
+        | SpicyError::DeserializationErr(_)
+        | SpicyError::NotAbleToDeserializeErr(_) => SerializationError::new_err(err.to_string()),
+        _ => ChiliError::new_err(err.to_string()),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Log built-in functions (mirrors chili-bin/src/logger.rs)
@@ -206,7 +258,7 @@ impl Engine {
         py.allow_threads(move || {
             state
                 .load_par_df(&path)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+                .map_err(|e| spicy_err_to_py(&e))
         })
     }
 
@@ -231,29 +283,30 @@ impl Engine {
         self.check_fork()?;
         let state = Arc::clone(&self.state);
         let query = query.to_owned();
-        // Run the entire query OFF the GIL.
-        let bytes = py.allow_threads(move || -> Result<Vec<u8>, String> {
+        // Run the entire query OFF the GIL, carrying the full SpicyError
+        // out of the closure so we can map it to a structured Python
+        // exception on the GIL side (Phase 13).
+        let bytes = py.allow_threads(move || -> Result<Vec<u8>, SpicyError> {
             let query_obj = SpicyObj::String(query);
             let mut stack = Stack::new(None, 0, 0, "");
             let obj = state
-                .eval(&mut stack, &query_obj, "py.chi")
-                .map_err(|e| e.to_string())?;
+                .eval(&mut stack, &query_obj, "py.chi")?;
             let mut df = match obj {
                 SpicyObj::DataFrame(df) => df,
-                SpicyObj::LazyFrame(lf) => lf.collect().map_err(|e| e.to_string())?,
+                SpicyObj::LazyFrame(lf) => lf
+                    .collect()
+                    .map_err(|e| SpicyError::EvalErr(e.to_string()))?,
                 other => {
-                    return Err(format!(
+                    return Err(SpicyError::EvalErr(format!(
                         "eval returned {}, expected DataFrame",
                         other.get_type_name()
-                    ));
+                    )));
                 }
             };
-            // df_to_ipc_bytes returns PyResult; map the PyErr to a String
-            // here so we don't try to construct a PyErr while the GIL is
-            // released. Re-wrap on the GIL side below.
-            df_to_ipc_bytes_unchecked(&mut df).map_err(|e| e.to_string())
+            df_to_ipc_bytes_unchecked(&mut df)
+                .map_err(|e| SpicyError::Err(e.to_string()))
         })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        .map_err(|e| spicy_err_to_py(&e))?;
         Ok(PyBytes::new_bound(py, &bytes))
     }
 
@@ -339,7 +392,16 @@ fn df_to_ipc_bytes_unchecked(df: &mut DataFrame) -> Result<Vec<u8>, polars::erro
 // ---------------------------------------------------------------------------
 
 #[pymodule]
-fn chili(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn chili(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Engine>()?;
+    // Phase 13 — register structured exception types so Python callers
+    // can `from chili import ChiliError, PepperParseError, ...`
+    m.add("ChiliError", ChiliError::type_object_bound(py))?;
+    m.add("PepperParseError", PepperParseError::type_object_bound(py))?;
+    m.add("PepperEvalError", PepperEvalError::type_object_bound(py))?;
+    m.add("PartitionError", PartitionError::type_object_bound(py))?;
+    m.add("TypeMismatchError", TypeMismatchError::type_object_bound(py))?;
+    m.add("NameError", NameError::type_object_bound(py))?;
+    m.add("SerializationError", SerializationError::type_object_bound(py))?;
     Ok(())
 }
