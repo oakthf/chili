@@ -21,6 +21,7 @@ chrono = "0.4"
 sysinfo = "0.38.2"
 crossterm = "0.29"
 chumsky = { workspace = true }
+mimalloc = { version = "0.1", default-features = false }
 
 [[bin]]
 name = "chili"

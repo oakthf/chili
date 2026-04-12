@@ -3,6 +3,14 @@ mod logger;
 mod pipe;
 mod validator;
 
+// Use mimalloc as the global allocator. polars' fan-out allocation pattern
+// (many small DataFrame buffers + Arrow chunks) is a poor fit for the macOS
+// system allocator; mimalloc typically yields 10–25% on allocation-heavy
+// workloads. Global allocator must be declared in the binary crate.
+use mimalloc::MiMalloc;
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 use crate::logger::LOG_FN;
 use crate::pipe::Pipe;
 use crate::validator::ChiliValidator;

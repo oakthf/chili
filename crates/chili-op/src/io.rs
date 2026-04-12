@@ -20,7 +20,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     str::FromStr,
-    sync::Arc,
+    sync::{Arc, RwLock},
 };
 
 use polars::{
@@ -30,6 +30,31 @@ use polars::{
 use std::sync::LazyLock;
 
 use chili_core::{ArgType, SpicyError, SpicyObj, SpicyResult, validate_args};
+
+/// Proposal O — process-wide cache of `fs::canonicalize` results for HDB
+/// paths, keyed by the input string. `wpar` is called in tight loops by
+/// some downstream users (mdata's batch ingest, partition migration
+/// scripts), and `fs::canonicalize` is a syscall that hits the filesystem
+/// every time. The canonicalized path of an HDB root is invariant for the
+/// lifetime of the process (no one is going to `mv` the HDB root mid-run),
+/// so caching is safe and lock-light. RwLock because the read path is
+/// massively dominant — write only happens once per unique HDB path.
+static CANON_CACHE: LazyLock<RwLock<HashMap<String, PathBuf>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+fn canon_cached(hdb_path: &str) -> SpicyResult<PathBuf> {
+    if let Ok(cache) = CANON_CACHE.read()
+        && let Some(p) = cache.get(hdb_path)
+    {
+        return Ok(p.clone());
+    }
+    // Slow path: canonicalize and insert.
+    let canon = fs::canonicalize(hdb_path).map_err(|e| SpicyError::Err(e.to_string()))?;
+    if let Ok(mut cache) = CANON_CACHE.write() {
+        cache.insert(hdb_path.to_string(), canon.clone());
+    }
+    Ok(canon)
+}
 
 use crate::util;
 
@@ -279,7 +304,9 @@ pub fn write_partition(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
     // rechunk | append
     let rechunk = args[5].bool().unwrap();
     let sort_options = SortMultipleOptions::default();
-    let hdb_path = fs::canonicalize(hdb_path).map_err(|e| SpicyError::Err(e.to_string()))?;
+    // Proposal O — process-wide canonicalized-path cache eliminates the
+    // per-call `fs::canonicalize` syscall in `wpar` loops.
+    let hdb_path = canon_cached(hdb_path)?;
 
     let mut column_names = df.get_column_names_owned();
 
@@ -477,7 +504,8 @@ pub fn write_partition_py(
     rechunk: bool,
 ) -> SpicyResult<SpicyObj> {
     let sort_options = SortMultipleOptions::default();
-    let hdb_path = fs::canonicalize(hdb_path).map_err(|e| SpicyError::Err(e.to_string()))?;
+    // Proposal O — same canonicalize cache as the public `write_partition`.
+    let hdb_path = canon_cached(hdb_path)?;
 
     let mut column_names = df.get_column_names_owned();
     let mut lf = df.clone().lazy();

@@ -77,3 +77,22 @@ ndarray-linalg = { version = "0.18", optional = true }
 chili-core = { path = "../chili-core" }
 num = "0.4"
 sysinfo = "0.38.2"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "load_par_df"
+harness = false
+
+[[bench]]
+name = "scan"
+harness = false
+
+[[bench]]
+name = "eval"
+harness = false
+
+[[bench]]
+name = "write_partition"
+harness = false

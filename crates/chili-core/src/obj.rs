@@ -378,10 +378,12 @@ impl SpicyObj {
         }
     }
 
+    #[inline]
     pub fn is_fn(&self) -> bool {
         matches!(self, SpicyObj::Fn(_))
     }
 
+    #[inline]
     pub fn size(&self) -> usize {
         match self {
             SpicyObj::Series(s) => s.len(),
@@ -393,6 +395,7 @@ impl SpicyObj {
         }
     }
 
+    #[inline]
     pub fn str(&self) -> SpicyResult<&str> {
         match self {
             SpicyObj::String(s) | SpicyObj::Symbol(s) => Ok(s.as_str()),
@@ -403,6 +406,7 @@ impl SpicyObj {
         }
     }
 
+    #[inline]
     pub fn to_bool(&self) -> SpicyResult<bool> {
         match self {
             SpicyObj::Boolean(v) => Ok(*v),
@@ -410,6 +414,7 @@ impl SpicyObj {
         }
     }
 
+    #[inline]
     pub fn to_i64(&self) -> Result<i64, SpicyError> {
         match self {
             SpicyObj::Boolean(v) => Ok(*v as i64),
@@ -445,6 +450,7 @@ impl SpicyObj {
         }
     }
 
+    #[inline]
     pub fn to_par_num(&self) -> Result<i32, SpicyError> {
         match self {
             SpicyObj::I32(v) => Ok(*v),

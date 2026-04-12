@@ -9,6 +9,62 @@ All notable changes to this project will be documented in this file.
 - **Headless mode** (`--headless` flag) to run Chili as a stable daemon without TTY. Automatically triggered when `--port > 0` and stdin is not a TTY (subprocess/pipe/systemd). IPC server threads remain active while main thread is parked.
 - **Python bindings** (`crates/chili-py`) via PyO3 + maturin. New `Engine` class exposes `load()`, `eval()`, and `wpar()` for direct Python access to the Chili runtime. DataFrames cross the Rust/Python boundary as Arrow IPC bytes (compatible with py-polars).
 
+### Fixed
+
+- **Partition date filter returned wrong rows** (R1). `load_par_df` populated `PartitionedDataFrame.pars` directly from `fs::read_dir`, whose iteration order is filesystem-dependent and not sorted on macOS APFS or many Linux filesystems. Downstream `scan_partition` / `scan_partition_by_range` / `scan_partitions` all use `slice::binary_search`, which has undefined behavior on unsorted input. Symptoms: `where date=X` returned 0 rows for most X, `where date>=X, date<=Y` silently dropped middle dates, lower/upper-bound-only queries returned off-by-one partition sets. Fixed by sorting `par_vec` at load time with an inline invariant comment (`crates/chili-core/src/engine_state.rs`).
+- **Silently dropped non-partition filter when placed before a partition predicate.** `eval_query` unconditionally set `skip_part_clause = true` whenever `where_exp[0]` was any `BinaryExp`, even if no partition predicate was extracted. Queries like `where symbol='AAPL', date=X` silently skipped the symbol filter and then errored with `requires 'ByDate' condition` because `partitions` was empty. Rewrote partition-predicate extraction to scan every where-clause for `date`/`year` predicates, consume only the matching indices, and leave non-partition clauses untouched (`crates/chili-core/src/eval_query.rs`).
+- **Range predicates were not tightened into a single partition range.** `where date>=X, date<=Y` previously used only the first clause for partition pruning (`[X, i32::MAX]`) and relied on a post-scan row filter over the synthesized `date` column to drop the rest. Now both bounds combine into a tight range `[X, Y]`, avoiding unnecessary partition reads.
+
+### Added (tests)
+
+- `crates/chili-core/src/par_df.rs`: 15 unit tests covering `scan_partition_by_range` boundary conditions (empty range, inverted range, nonexistent bounds, unbounded lower/upper, missing inner dates, unsorted-pars regression guard).
+- `crates/chili-op/tests/partition_filter_test.rs`: 12 integration tests that write a real temp HDB in non-sorted creation order, load it, and exercise every shape of partition predicate through the full query path.
+- `crates/chili-py/tests/test_partition_filter.py`: 16 end-to-end pytests covering the R1 repro matrix through the Python bindings (equality per-date, narrow/wide/half-open ranges, strict bounds, `within`, `in`, mixed symbol+date clauses).
+- `crates/chili-core/tests/parse_cache_test.rs`: 6 new unit tests for the parse cache (hit/miss/path-discrimination/error-not-cached/concurrent-safety/correctness).
+
+### Performance — optimization sweep (Phases 1-7, 2026-04-12)
+
+A 14-proposal optimization sweep landed end-to-end on 2026-04-11/12. Cumulative wins (criterion benchmarks, isolated runs):
+
+| Workload | pre-all | post-sweep | Cumulative |
+|---|---:|---:|---:|
+| Partition equality query (single date) | 2.81 ms | 2.25 ms | **−19.9%** |
+| Narrow range query (5 partitions) | 11.05 ms | 5.78 ms | **−47.7%** |
+| Wide range query (500 partitions) | 988.63 ms | 362.59 ms | **−63.3%** (2.7×) |
+| Group-by aggregation | 7.66 ms | 3.30 ms | **−57.0%** (2.3×) |
+| `select * from t where date=X` | 1.52 ms | 365 µs | **−76.0%** (4.2×) |
+| Parse repeated query (cache hit) | 374 µs | **385 ns** | **−99.9%** (970×) |
+| Multi-table HDB load (5×200) | 2.87 ms | 1.53 ms | **−46.7%** |
+| Single-table HDB load (2000 partitions) | 6.27 ms | 5.05 ms | −19.5% |
+| Partition write (`wpar`) | 10.46 ms | 9.20 ms | −12.0% |
+
+**Python concurrent throughput (8 threads × 200 queries)**:
+
+| Metric | pre-all | post-sweep |
+|---|---:|---:|
+| Single-thread throughput | 564 q/s | 1281 q/s |
+| 8-thread concurrent throughput | **519 q/s** | **3168 q/s** |
+| Speedup vs serial (ideal = 8×) | **0.92×** (worse than serial) | **2.47×** |
+
+Concurrent Python throughput is **6.10× higher** end-to-end. Going from 0.92× speedup (8 threads slower than 1) to 2.47× speedup is the difference between "Python concurrency is broken on chili" and "Python concurrency works".
+
+Component changes:
+- **Build profile** (`Cargo.toml`): `opt-level = "z"` → `3`, `codegen-units = 6` → `1`, `lto = true` → `"fat"`. Parser, eval, scan, load all see 7-66% speedup.
+- **Allocator**: `mimalloc` set as `#[global_allocator]` in `chili-bin/src/main.rs` and `chili-py/src/lib.rs`.
+- **Inline annotations**: `#[inline]` on hot SpicyObj conversion methods (`is_fn`, `size`, `str`, `to_bool`, `to_i64`, `to_par_num`).
+- **Schema sentinel cache** (`crates/chili-core/src/par_df.rs`): `PartitionedDataFrame::empty_schema: Option<Arc<DataFrame>>` populated at load time. Removes per-miss parquet open.
+- **Two-phase `load_par_df`** (`crates/chili-core/src/engine_state.rs`): build all `PartitionedDataFrame` entries outside the lock; commit via single `HashMap::extend`. Concurrent readers no longer block during reload.
+- **rayon parallel per-table scans** in `load_par_df`: 5-table HDB load **−39.8%**.
+- **rayon parallel `glob::glob`** in `scan_partitions` and `scan_partition_by_range` (`crates/chili-core/src/par_df.rs`): wide-range query **−58.5%** in addition to all prior phases.
+- **`collect_schema()` shortcut** in `make_it_lazy` (`crates/chili-core/src/eval_query.rs`): replaces `lf.filter(lit(false)).collect().get_column_names()` round-trip with metadata-only schema lookup.
+- **Filter fusion** in `eval_fn_query`: sequential `.filter(c1).filter(c2)...` → `.filter(c1.and(c2)...)`.
+- **Vec pre-allocation** for where/op/by expression vectors with `Vec::with_capacity(n)`.
+- **LRU parse cache** (`crates/chili-core/src/engine_state.rs`): `Mutex<LruCache<(String, String), Arc<Vec<AstNode>>>>`, capacity 256. **Cache hit is 970× faster** than re-parsing.
+- **GIL release in chili-py** (`crates/chili-py/src/lib.rs`): `Engine::eval`, `Engine::wpar`, `Engine::load` wrap their bodies in `py.allow_threads`. Cumulative concurrent throughput **6.10×**.
+- **Canonicalize cache** in `crates/chili-op/src/io.rs`: process-wide `RwLock<HashMap<String, PathBuf>>` keyed on input HDB path. Eliminates `fs::canonicalize` syscall in tight wpar loops.
+
+See `docs/bench/summary.md` for the full breakdown and `docs/bench/phase{1..7}.md` for per-phase notes.
+
 ## [0.7.4] - 2026-03-21
 
 ### Added
