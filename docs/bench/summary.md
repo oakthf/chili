@@ -93,23 +93,21 @@ The 6 new parse_cache tests cover hit/miss/path-discrimination/error-not-cached/
 | `docs/bench/summary.md` | this file |
 | `docs/bench/mdata-collab/STATUS.md` | running phase tracker |
 
-## What's next (phases 9-17 — wishlist)
+## Wishlist phases 9-17 — all resolved (2026-04-12)
 
-After this sweep, the planned follow-up wave addresses mdata's wishlist items
-that aren't pure micro-optimizations:
+All mdata wishlist items shipped or closed in the same session:
 
-| Phase | Wishlist item | Effort |
+| Phase | Wishlist item | Outcome |
 |---|---|---|
-| 9 | Column projection pushdown (WL 2.1) | medium |
-| 10 | Symbol predicate pushdown (WL 2.2) | small-medium |
-| 11 | Fork safety guard (WL 1.2) | small |
-| 12 | Engine lifecycle API (WL 3.1) | small |
-| 13 | Structured error messages (WL 3.3) | medium |
-| 14 | Observability primitives (WL 3.2) | medium |
-| 15 | Quantized column helper (WL 3.4) | small |
-| 16 | **Python broker bindings (WL 1.1)** | LARGE |
-| 17 | Aggregation pushdown for `by` (WL 2.3) | large |
+| 9 | Column projection pushdown (WL 2.1) | No code change — polars 0.53 already pushes projection; 81% I/O reduction verified |
+| 10 | Symbol predicate pushdown (WL 2.2) | `sort_columns` wpar param + adaptive row_group_size; Q2 −55%, Q10 −64% |
+| 11 | Fork safety guard (WL 1.2) | PID check on load/eval/wpar — clear error instead of deadlock |
+| 12 | Engine lifecycle API (WL 3.1) | `close/unload/reload/is_loaded/table_count` |
+| 13 | Structured error messages (WL 3.3) | 7 typed exceptions, all extend `RuntimeError` |
+| 14 | Observability primitives (WL 3.2) | `stats()`, `parse_cache_len()`, `query_plan()` |
+| 15 | Quantized column helper (WL 3.4) | `set_column_scale()` + auto-dequantize in `eval()` |
+| 16 | Python broker bindings (WL 1.1) | `publish/subscribe/tick_upd/broker_eod` + `overwrite_partition` + `query_plan` fully implemented |
+| 17 | Aggregation pushdown for `by` (WL 2.3) | CLOSED — Q11 at 181 ms (target <200 ms met by Phases 10+15) |
 
-Phase 9-17 collaboration with mdata is set up at
-`docs/bench/mdata-collab/`. mdata's Claude has pre-delivered fixtures, test
-files, parity test skeleton, and quantized schema doc — see STATUS.md.
+Phase 9-17 collaboration artifacts live in `docs/bench/mdata-collab/`.
+See `STATUS.md` in that directory for the full phase tracker.

@@ -95,6 +95,27 @@ Extensions to `chili-py` (Python bindings) shipping after the core optimization 
 
 - **Phase 15 — Quantized column dequantization helper**: `engine.set_column_scale(table, column, factor)` registers a scale factor. On any subsequent `engine.eval()` call, result columns of type `Int64` matching a registered `(table, column)` pair are automatically cast to `Float64` and divided by `factor`. Float64 columns are left untouched (graceful no-op on un-quantized HDBs). `engine.clear_column_scales()` removes all registered factors.
 
+- **Phase 16 — Python broker bindings (WL 1.1)**: In-process pub/sub for `Engine`. New methods:
+  - `engine.publish(topic, ipc_bytes) -> int` — deliver Arrow IPC bytes to all subscribers of a topic; returns per-topic monotonic sequence number
+  - `engine.subscribe(topics, callback)` — register a callback `(topic, seq, ipc_bytes)` invoked from a background Rust thread (GIL released during channel ops)
+  - `engine.tick_upd(table, df) -> int` — convenience: serialize a polars DataFrame and publish it
+  - `engine.broker_eod(eod_message)` — broadcast `("__eod__", 0, payload)` to all subscriber callbacks regardless of topic
+  - Implementation: bounded `mpsc::sync_channel` (capacity 1024) per subscriber per topic; `AtomicBool` shutdown flag prevents queue drain on deallocation; backpressure logged via `log::warn` on full channel
+  - Also fixed a pre-existing `_column_scales` class-variable bug (Phase 15) that caused scale factors to be shared across all Engine instances
+
+- **Post-Phase-16 additions**:
+  - `engine.overwrite_partition(df, hdb_path, table, date, sort_columns=None)` — deletes all existing shard files for the given date and writes a single fresh `_0000` file. Unlike `wpar()` (which appends `_0001`, `_0002` etc.), enables safe in-place HDB rewrites (dtype migrations, re-sorting). Schema validation enforced.
+  - `engine.broker_eod()` now fully implemented — broadcasts the EOD sentinel to all subscriber channels.
+  - `engine.query_plan(query)` — creates a temporary lazy-mode engine, loads the HDB, evaluates the query to a `LazyFrame`, and returns `describe_plan()` without collecting. Equivalent to `EXPLAIN` in SQL. Requires an HDB to be loaded.
+
+- **Phase 17 — Aggregation pushdown (WL 2.3)**: Closed without code changes. Profiling on a real 252-partition HDB showed `select last close by symbol from ohlcv_1d` running at **181 ms** — within the original <200 ms target. Phases 10 (sorted writes) + 15 (dequantize in Python) brought Q11 from 1,850 ms → 181 ms (10.2×). Remaining gap vs polars native (181 ms vs 63 ms) is chili eval machinery overhead, not aggregation strategy. Profiling results: `docs/bench/mdata-collab/benchmarks/phase17_profile_results.json`.
+
+### Tests added (Phases 16-17)
+
+- `crates/chili-py/tests/test_broker.py`: 11 pytest tests for broker bindings (round-trip, multi-topic isolation, fan-out 2/4/8 subscribers, sequence monotonic, sequence per-topic independence, stress 2000 frames × 4 subs, `tick_upd`, no-subscriber publish, EOD delivery)
+- `crates/chili-py/tests/test_extras.py`: 8 pytest tests for `overwrite_partition` (replaces data, removes multiple shards, creates fresh on nonexistent), `broker_eod` (reaches all subscribers, does not interfere with normal publish), `query_plan` (returns string, does not execute, requires HDB)
+- **Total**: 35 Python pytest tests, 165 Rust tests, 200 tests overall
+
 ## [0.7.4] - 2026-03-21
 
 ### Added

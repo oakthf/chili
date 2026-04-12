@@ -28,6 +28,20 @@ After the 2026-04-12 optimization sweep (Phases 1-7, 14 individual proposals —
 
 The Python concurrent number is the headline: chili-py released the GIL around `Engine::eval`, so an 8-thread Python client can now drive the engine in parallel instead of serializing through the GIL. Pre-sweep, 8 threads were *slower* than 1 thread (0.92× speedup); post-sweep, 8 threads scale to 2.47× single-thread.
 
+## Python API (chili-py)
+
+The `chili-py` crate exposes the Chili runtime to Python via PyO3 + maturin. See `crates/chili-py/README.md` for full documentation. Key surface area:
+
+- **Query**: `engine.eval(query)` — returns a `polars.DataFrame`
+- **Write**: `engine.wpar(df, hdb, table, date, sort_columns=None)` — append a partition shard
+- **Overwrite**: `engine.overwrite_partition(df, hdb, table, date, sort_columns=None)` — replace a partition in-place (delete shards, write fresh `_0000`)
+- **Lifecycle**: `close()`, `unload()`, `reload()`, `is_loaded()`, `table_count()`
+- **Observability**: `stats()` returns `{partitions_loaded, parse_cache_len, hdb_path}`; `query_plan(query)` returns a polars `EXPLAIN`-equivalent plan string
+- **Quantized columns**: `set_column_scale(table, col, factor)` — auto-dequantize `Int64` price columns to `Float64` on `eval()` results
+- **Broker / pub-sub**: `publish(topic, ipc_bytes) -> seq`, `subscribe(topics, callback)`, `tick_upd(table, df) -> seq`, `broker_eod(payload)` — in-process pub/sub backed by bounded mpsc channels; GIL released during channel operations
+- **Structured exceptions**: `ChiliError`, `PartitionError`, `PepperParseError`, `PepperEvalError`, `TypeMismatchError`, `NameError`, `SerializationError` — all extend `RuntimeError`
+- **Fork safety**: calling any method from a forked child raises `RuntimeError` with a clear "use spawn not fork" message
+
 Run the benchmarks yourself:
 ```bash
 cargo bench -p chili-op --bench scan -- --save-baseline mine

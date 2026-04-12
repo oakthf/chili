@@ -19,7 +19,25 @@ import chili
 engine = chili.Engine(pepper=True)          # kdb+/q syntax
 engine.load("/path/to/hdb")                 # load partitioned HDB
 df = engine.eval("select from ohlcv_1d where date=2024.01.02")  # polars.DataFrame
-engine.wpar(df, "/hdb", "ohlcv_1d", "2024.01.02")               # write partition
+engine.wpar(df, "/hdb", "ohlcv_1d", "2024.01.02")               # append partition shard
+engine.overwrite_partition(df, "/hdb", "ohlcv_1d", "2024.01.02")  # replace partition in-place
+```
+
+## Partition write vs overwrite
+
+`wpar()` appends a new shard file (`_0001`, `_0002`, ...) to an existing
+partition directory. This is the default append-safe behavior.
+
+`overwrite_partition()` deletes all existing shard files for the given date and
+writes a single fresh `_0000`. Use this for in-place HDB rewrites such as dtype
+migrations, re-sorting by `sort_columns`, or correcting bad data. Schema
+validation is enforced on both paths.
+
+```python
+# Rebuild the 2024-01-02 partition sorted by symbol (enables row-group pruning)
+old_df = engine.eval("select from ohlcv_1d where date=2024.01.02")
+engine.overwrite_partition(old_df, "/hdb", "ohlcv_1d", "2024.01.02", sort_columns=["symbol"])
+engine.reload()  # re-scan HDB to pick up the new shard
 ```
 
 ## Partition date predicates
@@ -136,8 +154,17 @@ engine.parse_cache_len()   # LRU parse cache occupancy (max 256 entries)
 
 `stats()` is suitable for Prometheus metric export or liveness health checks.
 
-`engine.query_plan(query)` is stubbed and raises `RuntimeError` — full
-implementation requires a lazy-mode eval path and is deferred.
+`engine.query_plan(query)` returns a polars logical plan string (equivalent to
+`EXPLAIN`) without executing the query. It creates a temporary lazy-mode engine,
+loads the HDB, evaluates the query to a `LazyFrame`, and returns
+`LazyFrame.describe_plan()`. Requires an HDB to be loaded.
+
+```python
+plan = engine.query_plan("select from ohlcv_1d where date=2024.01.02")
+print(plan)
+# FILTER [(col("date")) == (2024-01-02)]
+#   SCAN PARQUET /hdb/ohlcv_1d/2024.01.02_0000
+```
 
 ## Quantized column dequantization
 
@@ -165,6 +192,43 @@ engine.clear_column_scales()   # remove all registered scale factors
 
 The auto-dequantize applies only when the column dtype in the result is `Int64`.
 Float64 columns are left untouched — this is a safe no-op on un-quantized HDBs.
+
+## Broker / in-process pub-sub
+
+`Engine` provides a lightweight in-process pub/sub broker backed by bounded
+`mpsc` channels (capacity 1024 per subscriber per topic). Intended for
+streaming live data from a feed manager to multiple downstream consumers in
+the same process.
+
+```python
+import chili, io, threading, polars as pl
+
+engine = chili.Engine()
+received = []
+
+def on_tick(topic: str, seq: int, ipc_bytes: bytes):
+    df = pl.from_arrow(pa.ipc.open_stream(io.BytesIO(ipc_bytes)).read_all())
+    received.append((topic, seq, df))
+
+engine.subscribe(["trade", "quote"], on_tick)
+
+# From a feed thread:
+seq = engine.tick_upd("trade", trade_df)  # serialize DataFrame + publish
+seq = engine.publish("trade", raw_ipc_bytes)  # publish pre-serialized bytes
+
+# End-of-day signal to all subscribers:
+engine.broker_eod(b"eod_payload")  # delivers ("__eod__", 0, payload) to every callback
+```
+
+**Threading model**: each `subscribe()` call spawns one background Rust thread
+per topic. Threads acquire the GIL only during callback invocation, so they
+never block concurrent `eval()` calls. The `AtomicBool` shutdown flag in the
+`Engine` drop implementation prevents the threads from draining the queue
+after deallocation.
+
+**Backpressure**: if a subscriber's channel is full, `publish()` drops the
+message and logs a warning via `log::warn`. Callers should process batches
+promptly or buffer externally.
 
 ## Fork safety
 
