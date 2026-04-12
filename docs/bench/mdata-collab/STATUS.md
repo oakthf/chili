@@ -22,14 +22,14 @@ Both sides read this file at the start of every invocation and know what to do n
 | 7 — Write path (O) | **SHIPPED 2026-04-12** ✓ (cache works; bench flat — code is free, low impact in microbench) | N/A | N/A |
 | 8 — Validation | **SHIPPED 2026-04-12** ✓ (181 tests, full bench sweep, CHANGELOG + README + summary.md) | N/A | N/A |
 | **9 — Column pruning (WL 2.1)** | **VERIFIED 2026-04-12 — NO CHANGE NEEDED** ✓ (polars 0.53 already pushes projection down through both scan_partition and scan_partition_by_range; multi-partition 81% saving on 1-col vs 11-col verified empirically) | Q1-Q12 rerun NOT needed for this phase | fixtures DONE 2026-04-11; rerun deferred to Phase 10 |
-| **10 — Symbol pushdown (WL 2.2)** | IN PROGRESS — investigating whether polars row-group stats are pruning by symbol | **Q1-Q12 rerun** when chili signals ready | waits on chili |
-| **11 — Fork guard (WL 1.2)** | PENDING | **validate error message** | waits on chili |
-| **12 — Lifecycle API (WL 3.1)** | PENDING | **swap `ChiliGateway.close()`** | waits on chili |
-| **13 — Structured errors (WL 3.3)** | PENDING | **swap RuntimeError catches** | waits on chili |
-| **14 — Observability (WL 3.2)** | PENDING | **wire into rest prometheus** | waits on chili |
-| **15 — Quantized helper (WL 3.4)** | PENDING | **schema doc drop + validation** | schema doc **DONE 2026-04-11** at `artifacts/quantized_schema.md`; validation waits on chili |
-| **16 — Broker bindings (WL 1.1)** | PENDING | **parity test + pubsub swap-in** | parity test skeleton **DONE 2026-04-11** at `artifacts/broker_parity_test.py`; swap-in waits on chili |
-| **17 — Agg pushdown (WL 2.3)** | PENDING | **Q11 rerun** | waits on chili |
+| **10 — Symbol pushdown (WL 2.2)** | **SHIPPED 2026-04-12** ✓ Write-side fix: wpar now accepts `sort_columns=["symbol"]`; auto-sets adaptive row_group_size → 16 row groups per partition with selective min/max stats. Polars-direct ratio improved from 0.75× to 0.21× (pruning confirmed). **mdata action: re-write HDB with `engine.wpar(df, hdb, table, date, sort_columns=["symbol"])`** then rerun Q1-Q12. | **Q1-Q12 rerun** after HDB rewrite with sorted partitions | waits on mdata HDB rewrite |
+| **11 — Fork guard (WL 1.2)** | **SHIPPED 2026-04-12** ✓ PID check on load/eval/wpar; clear error message with "use spawn not fork" guidance | **validate error message** | ready for mdata validation |
+| **12 — Lifecycle API (WL 3.1)** | **SHIPPED 2026-04-12** ✓ close/unload/reload/is_loaded/table_count — mdata can swap ChiliGateway._read_engine=None for engine.reload() | **swap `ChiliGateway.close()`** | ready for mdata integration |
+| **13 — Structured errors (WL 3.3)** | **SHIPPED 2026-04-12** ✓ 7 Python exception types: ChiliError, PepperParseError, PepperEvalError, PartitionError, TypeMismatchError, NameError, SerializationError. All extend RuntimeError (backwards-compat). | **swap RuntimeError catches** for specific types | ready for mdata integration |
+| **14 — Observability (WL 3.2)** | **SHIPPED 2026-04-12** ✓ stats() + parse_cache_len() work. query_plan() stubbed — needs lazy-mode eval path. | **wire stats() into rest prometheus** | ready for mdata integration (partial — query_plan deferred) |
+| **15 — Quantized helper (WL 3.4)** | **SHIPPED 2026-04-12** ✓ set_column_scale(table, col, factor) + clear_column_scales(). Auto-dequantizes Int64→Float64 in eval() results. | **remove dequantize_ohlcv_lazy** from chili-backed path + validate | schema doc at `artifacts/quantized_schema.md`; ready for mdata validation |
+| **16 — Broker bindings (WL 1.1)** | **NEXT SESSION** — deferred to fresh session for focused implementation. ~500 LOC Rust + PyO3 callback mechanism. | **pre-verify parity test vs unix** → drop `artifacts/broker_parity_unix_status.md` | parity test skeleton DONE; mdata should verify unix backend before chili session |
+| **17 — Agg pushdown (WL 2.3)** | **DEFERRED** — large query planner work, follows Phase 16 | **Q11 rerun** when shipped | waits on chili |
 
 ---
 
