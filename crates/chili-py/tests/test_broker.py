@@ -232,11 +232,19 @@ def test_publish_no_subscribers():
 
 
 # ---------------------------------------------------------------------------
-# Scenario 8 — broker_eod raises NotImplementedError
+# Scenario 8 — broker_eod broadcasts to subscribers
 # ---------------------------------------------------------------------------
 
-def test_broker_eod_not_implemented():
-    """broker_eod raises NotImplementedError (shape not yet frozen)."""
+def test_broker_eod_delivers():
+    """broker_eod sends __eod__ sentinel to all subscribers."""
     engine = chili.Engine(pepper=True)
-    with pytest.raises(NotImplementedError):
-        engine.broker_eod(b"eod")
+    received: list[str] = []
+
+    def on_msg(topic: str, seq: int, ipc_bytes: bytes) -> None:
+        received.append(topic)
+
+    engine.subscribe(["trade"], on_msg)
+    engine.broker_eod(b"eod")
+
+    _wait_for(lambda: len(received) >= 1)
+    assert received[0] == "__eod__"

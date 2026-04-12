@@ -275,18 +275,45 @@ impl Engine {
         self.state.parse_cache_len()
     }
 
-    /// Phase 14 — placeholder for query plan.
-    /// TODO: requires a lazy-mode eval path that chili doesn't currently
-    /// expose through the Python bindings. Would need either a per-query
-    /// lazy mode flag or a dedicated "compile to plan" API in EngineState.
-    /// For now returns a stub; real implementation deferred to Phase 14b
-    /// when chili gains a proper lazy-mode Python API.
-    fn query_plan(&self, _query: &str) -> PyResult<String> {
-        Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "query_plan is not yet implemented. Chili currently collects \
-             results eagerly; a lazy-mode eval path is needed to expose \
-             the polars query plan before execution."
-        ))
+    /// Phase 14 — return the polars query plan WITHOUT executing the query.
+    ///
+    /// Creates a temporary lazy-mode engine, loads the same HDB, evaluates
+    /// the query to build a LazyFrame, then returns describe_plan() instead
+    /// of collecting. The HDB path must be passed from the Python wrapper.
+    fn query_plan(&self, py: Python<'_>, query: &str, hdb_path: &str) -> PyResult<String> {
+        self.check_fork()?;
+        let query = query.to_owned();
+        let hdb_path = hdb_path.to_owned();
+        py.allow_threads(move || -> Result<String, String> {
+            // Create a lazy-mode engine that returns LazyFrame instead of
+            // collecting. Re-loads partition metadata from disk (~5ms).
+            let plan_state = EngineState::new(false, true, true);
+            plan_state.register_fn(&LOG_FN);
+            plan_state.register_fn(&BUILT_IN_FN);
+            plan_state
+                .load_par_df(&hdb_path)
+                .map_err(|e| e.to_string())?;
+            let query_obj = SpicyObj::String(query);
+            let mut stack = Stack::new(None, 0, 0, "");
+            let obj = plan_state
+                .eval(&mut stack, &query_obj, "plan.chi")
+                .map_err(|e| e.to_string())?;
+            match obj {
+                SpicyObj::LazyFrame(lf) => {
+                    lf.describe_plan().map_err(|e| e.to_string())
+                }
+                SpicyObj::DataFrame(_) => {
+                    Err("query collected eagerly — lazy plan not available \
+                         for this query shape"
+                        .into())
+                }
+                other => Err(format!(
+                    "query returned {}, expected LazyFrame",
+                    other.get_type_name()
+                )),
+            }
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
     }
 
     /// Load a partitioned HDB directory.
@@ -419,6 +446,93 @@ impl Engine {
         Ok(n)
     }
 
+    /// Overwrite an existing partition, replacing all shards with a single
+    /// fresh `_0000` file. Unlike `wpar` (which appends new shards), this
+    /// deletes any existing `{date}_*` files first.
+    ///
+    /// Use for in-place HDB rewrites (e.g., dtype migrations, re-sorting).
+    /// Schema validation is still enforced — the new DataFrame must match
+    /// the table's schema sentinel.
+    #[pyo3(signature = (ipc_bytes, hdb_path, table, date, sort_columns=Vec::new()))]
+    fn overwrite_partition(
+        &self,
+        py: Python<'_>,
+        ipc_bytes: &[u8],
+        hdb_path: &str,
+        table: &str,
+        date: &str,
+        sort_columns: Vec<String>,
+    ) -> PyResult<i64> {
+        self.check_fork()?;
+        let ipc_bytes = ipc_bytes.to_vec();
+        let hdb_path = hdb_path.to_owned();
+        let table = table.to_owned();
+        let date = date.to_owned();
+        let n = py.allow_threads(move || -> Result<i64, String> {
+            // Parse date to get the partition filename prefix
+            use chrono::{Datelike, NaiveDate};
+            let parsed = NaiveDate::parse_from_str(&date, "%Y.%m.%d")
+                .map_err(|e| format!("invalid date '{}': {}", date, e))?;
+            let par_str = format!(
+                "{}.{:02}.{:02}",
+                parsed.year(),
+                parsed.month(),
+                parsed.day()
+            );
+
+            // Resolve the table directory
+            let canon_hdb = std::fs::canonicalize(&hdb_path)
+                .map_err(|e| format!("cannot resolve '{}': {}", hdb_path, e))?;
+            let table_dir = canon_hdb.join(&table);
+
+            // Delete existing shards: {table_dir}/{date}_*
+            if table_dir.exists() {
+                let prefix = format!("{}_", par_str);
+                for entry in std::fs::read_dir(&table_dir)
+                    .map_err(|e| format!("read_dir: {}", e))?
+                {
+                    let entry = entry.map_err(|e| format!("dir entry: {}", e))?;
+                    if let Some(name) = entry.file_name().to_str() {
+                        if name.starts_with(&prefix) {
+                            std::fs::remove_file(entry.path()).map_err(|e| {
+                                format!("remove {}: {}", entry.path().display(), e)
+                            })?;
+                        }
+                    }
+                }
+            }
+
+            // Write fresh _0000 via write_partition_py (no existing shards)
+            let df =
+                polars::io::ipc::IpcStreamReader::new(std::io::Cursor::new(
+                    &ipc_bytes,
+                ))
+                .finish()
+                .map_err(|e: polars::error::PolarsError| e.to_string())?;
+            let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+            let days = i32::try_from((parsed - epoch).num_days())
+                .map_err(|e| format!("date out of range: {}", e))?;
+            let date_obj = SpicyObj::Date(days);
+            let sort_refs: Vec<&str> =
+                sort_columns.iter().map(|s| s.as_str()).collect();
+            let obj = write_partition_py(
+                &canon_hdb.to_string_lossy(),
+                &date_obj,
+                &table,
+                &df,
+                &sort_refs,
+                false,
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(match obj {
+                SpicyObj::I64(n) => n,
+                _ => 0,
+            })
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        Ok(n)
+    }
+
     // -----------------------------------------------------------------------
     // Phase 16 — Broker bindings (WL 1.1)
     //
@@ -529,6 +643,31 @@ impl Engine {
                     ))
                 })?;
             subs.entry(topic).or_default().push(sender);
+        }
+        Ok(())
+    }
+
+    /// Broadcast an end-of-day signal to ALL in-process subscribers.
+    ///
+    /// Sends `("__eod__", 0, eod_message)` to every subscriber channel
+    /// regardless of topic. Subscribers can detect EOD by checking
+    /// `topic == "__eod__"` in their callback.
+    fn broker_eod(&self, eod_message: &[u8]) -> PyResult<()> {
+        self.check_fork()?;
+        let subs = self.py_subscribers.lock().map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "py_subscribers lock poisoned: {}", e
+            ))
+        })?;
+        let bytes = eod_message.to_vec();
+        for senders in subs.values() {
+            for sender in senders {
+                let _ = sender.try_send((
+                    "__eod__".to_owned(),
+                    0,
+                    bytes.clone(),
+                ));
+            }
         }
         Ok(())
     }

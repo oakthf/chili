@@ -1,0 +1,114 @@
+{
+  "timestamp": "2026-04-12T22:57:50.287445",
+  "machine": "aitrading.local",
+  "python_version": "3.12.13 (main, Mar 25 2026, 03:16:06) [Clang 22.1.1 ]",
+  "polars_version": "1.39.3",
+  "hdb_path": "data/hdb",
+  "table": "ohlcv_1d",
+  "date_range": [
+    "2024.01.02",
+    "2024.12.31"
+  ],
+  "n_partitions": 252,
+  "total_rows": 2383650,
+  "n_unique_symbols": 10397,
+  "first_partition_symbols": 8946,
+  "last_partition_symbols": 10291,
+  "two_pass_partitions_needed": 23,
+  "two_pass_io_reduction_pct": 90.9,
+  "correctness_verified": true,
+  "step_profile": {
+    "glob": {
+      "name": "File glob",
+      "median_ms": 4.76,
+      "min_ms": 4.51,
+      "max_ms": 8.52,
+      "p90_ms": 8.52,
+      "n_iters": 10,
+      "result_rows": null
+    },
+    "scan_collect_all": {
+      "name": "Scan + collect (all cols)",
+      "median_ms": 126.93,
+      "min_ms": 116.92,
+      "max_ms": 130.71,
+      "p90_ms": 130.71,
+      "n_iters": 10,
+      "result_rows": 2383650
+    },
+    "scan_collect_projected": {
+      "name": "Scan + collect (projected)",
+      "median_ms": 57.24,
+      "min_ms": 55.35,
+      "max_ms": 58.04,
+      "p90_ms": 58.04,
+      "n_iters": 10,
+      "result_rows": 2383650
+    },
+    "groupby_last": {
+      "name": "Group_by + last (in-memory)",
+      "median_ms": 11.13,
+      "min_ms": 10.13,
+      "max_ms": 12.23,
+      "p90_ms": 12.23,
+      "n_iters": 10,
+      "result_rows": 10397
+    },
+    "pass1_symbol_col": {
+      "name": "Pass 1: symbol col (all files)",
+      "median_ms": 46.48,
+      "min_ms": 44.86,
+      "max_ms": 47.82,
+      "p90_ms": 47.82,
+      "n_iters": 10,
+      "result_rows": 2383650
+    },
+    "pass1_loop": {
+      "name": "Pass 1: per-file loop",
+      "median_ms": 277.32,
+      "min_ms": 273.26,
+      "max_ms": 278.78,
+      "p90_ms": 278.78,
+      "n_iters": 10,
+      "result_rows": null
+    }
+  },
+  "strategy_benchmarks": {
+    "baseline_all": {
+      "name": "A: Baseline (all cols)",
+      "median_ms": 63.53,
+      "min_ms": 60.91,
+      "max_ms": 65.48,
+      "p90_ms": 65.48,
+      "n_iters": 10,
+      "result_rows": 10397
+    },
+    "baseline_projected": {
+      "name": "A': Baseline (projected)",
+      "median_ms": 68.04,
+      "min_ms": 65.9,
+      "max_ms": 70.45,
+      "p90_ms": 70.45,
+      "n_iters": 10,
+      "result_rows": 10397
+    },
+    "two_pass": {
+      "name": "B: Two-pass (symbol scan \u2192 targeted read)",
+      "median_ms": 296.29,
+      "min_ms": 294.18,
+      "max_ms": 299.23,
+      "p90_ms": 299.23,
+      "n_iters": 10,
+      "result_rows": 10397
+    },
+    "chili_eval": {
+      "name": "C: Chili eval (full pipeline)",
+      "median_ms": 181.28,
+      "min_ms": 179.35,
+      "max_ms": 184.83,
+      "p90_ms": 184.83,
+      "n_iters": 10,
+      "result_rows": 10397
+    }
+  }
+}

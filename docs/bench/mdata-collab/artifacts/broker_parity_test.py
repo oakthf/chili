@@ -101,15 +101,18 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.asyncio
 
 
-# Only import chili classes when they exist (Phase 16 not shipped yet).
-try:
-    from mdata.feed.pubsub import (  # type: ignore[attr-defined]
-        ChiliBrokerPublisher,
-        ChiliBrokerSubscriber,
-    )
+# Import chili broker classes — Phase 16 is shipped.
+from mdata.feed.pubsub import (
+    ChiliBrokerPublisher,
+    ChiliBrokerSubscriber,
+)
 
+try:
+    from mdata.server.chili_gateway import ensure_chili_importable
+
+    _chili = ensure_chili_importable()
     HAVE_CHILI_BROKER = True
-except ImportError:
+except (ImportError, ModuleNotFoundError):
     HAVE_CHILI_BROKER = False
 
 
@@ -155,16 +158,19 @@ def _make_unix_subscriber(pub: UnixSocketPublisher) -> UnixSocketSubscriber:
     return UnixSocketSubscriber(socket_path=pub.socket_path)
 
 
-def _make_chili_publisher(tmpdir: Path) -> Publisher:  # pragma: no cover
+def _make_chili_publisher(tmpdir: Path) -> Publisher:
     if not HAVE_CHILI_BROKER:
-        pytest.skip("chili broker bindings not available (Phase 16 not shipped)")
-    return ChiliBrokerPublisher()  # type: ignore[name-defined]
+        pytest.skip("chili broker bindings not available")
+    engine = _chili.Engine(pepper=True)  # type: ignore[name-defined]
+    return ChiliBrokerPublisher(engine=engine)
 
 
-def _make_chili_subscriber(pub: Publisher) -> Subscriber:  # pragma: no cover
+def _make_chili_subscriber(pub: Publisher) -> Subscriber:
     if not HAVE_CHILI_BROKER:
-        pytest.skip("chili broker bindings not available (Phase 16 not shipped)")
-    return ChiliBrokerSubscriber()  # type: ignore[name-defined]
+        pytest.skip("chili broker bindings not available")
+    # Chili pub/sub shares the same Engine — grab it from the publisher.
+    engine = pub._engine  # type: ignore[attr-defined]
+    return ChiliBrokerSubscriber(engine=engine)
 
 
 PUBLISHER_FACTORIES = {

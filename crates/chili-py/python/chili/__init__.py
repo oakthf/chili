@@ -147,9 +147,11 @@ class Engine:
     def query_plan(self, query: str) -> str:
         """Return the polars query plan for a pepper query WITHOUT executing it.
 
-        Equivalent to DuckDB's ``EXPLAIN``. Shows the optimized plan that
+        Equivalent to DuckDB's ``EXPLAIN``. Shows the logical plan that
         polars' lazy engine would execute, including predicate pushdown,
         projection pushdown, and partition pruning.
+
+        Requires an HDB to be loaded (the plan depends on partition layout).
 
         Parameters
         ----------
@@ -159,9 +161,13 @@ class Engine:
         Returns
         -------
         str
-            The human-readable optimized plan.
+            The human-readable logical plan.
         """
-        return self._inner.query_plan(query)
+        if self._hdb_path is None:
+            raise RuntimeError(
+                "No HDB directory has been loaded yet. Call engine.load(path) first."
+            )
+        return self._inner.query_plan(query, self._hdb_path)
 
     def eval(self, query: str) -> pl.DataFrame:
         """
@@ -282,15 +288,57 @@ class Engine:
     def broker_eod(self, eod_message: bytes) -> None:
         """Broadcast end-of-day signal to all subscribers.
 
-        Not yet implemented — EOD signal semantics are being designed.
+        Sends ``("__eod__", 0, eod_message)`` to every subscriber
+        callback regardless of topic. Subscribers can detect EOD by
+        checking ``topic == "__eod__"`` in their callback.
 
-        Raises
-        ------
-        NotImplementedError
+        Parameters
+        ----------
+        eod_message : bytes
+            Payload bytes sent with the EOD signal.
         """
-        raise NotImplementedError(
-            "broker_eod is not yet implemented. EOD signal shape is "
-            "being designed as part of chili Phase 16."
+        self._inner.broker_eod(eod_message)
+
+    def overwrite_partition(
+        self,
+        df: pl.DataFrame,
+        hdb_path: str,
+        table: str,
+        date: str,
+        sort_columns: Optional[list[str]] = None,
+    ) -> int:
+        """Replace an existing partition with new data.
+
+        Unlike ``wpar()`` (which appends a new shard ``_0001``, ``_0002``,
+        etc.), this deletes all existing shard files for the given date and
+        writes a single fresh ``_0000`` file.
+
+        Use for in-place HDB rewrites (dtype migrations, re-sorting, etc.).
+        Schema validation is still enforced.
+
+        Parameters
+        ----------
+        df : polars.DataFrame
+            Replacement data.
+        hdb_path : str
+            Root HDB directory path.
+        table : str
+            Table name.
+        date : str
+            Partition date in ``YYYY.MM.DD`` format.
+        sort_columns : list[str], optional
+            Column names to sort by before writing.
+
+        Returns
+        -------
+        int
+            Bytes written.
+        """
+        buf = io.BytesIO()
+        df.write_ipc_stream(buf)
+        ipc_bytes = buf.getvalue()
+        return self._inner.overwrite_partition(
+            ipc_bytes, hdb_path, table, date, sort_columns or []
         )
 
     def wpar(
