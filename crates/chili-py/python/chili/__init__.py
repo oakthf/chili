@@ -36,6 +36,7 @@ class Engine:
     def __init__(self, debug: bool = False, lazy: bool = False, pepper: bool = True) -> None:
         self._inner = _Engine(debug=debug, lazy=lazy, pepper=pepper)
         self._hdb_path: Optional[str] = None
+        self._column_scales: dict[str, dict[str, int]] = {}
 
     def load(self, path: str) -> None:
         """Load a partitioned HDB directory into the engine."""
@@ -115,8 +116,6 @@ class Engine:
     # -----------------------------------------------------------------------
     # Phase 15 — Quantized column helper (WL 3.4)
     # -----------------------------------------------------------------------
-
-    _column_scales: dict[str, dict[str, int]] = {}
 
     def set_column_scale(self, table: str, column: str, factor: int) -> None:
         """Register a dequantization scale factor for a column.
@@ -213,6 +212,86 @@ class Engine:
                 df = df.with_columns(cast_exprs)  # pyright: ignore[reportUnknownMemberType]
             break  # Only match the first table
         return df
+
+    # -----------------------------------------------------------------------
+    # Phase 16 — Broker bindings (WL 1.1)
+    # -----------------------------------------------------------------------
+
+    def publish(self, topic: str, ipc_bytes: bytes) -> int:
+        """Publish Arrow IPC bytes to all subscribers of a topic.
+
+        Parameters
+        ----------
+        topic : str
+            Topic name (typically the table name, e.g. ``"trade"``).
+        ipc_bytes : bytes
+            Arrow IPC stream bytes (e.g. from ``df.write_ipc_stream()``).
+
+        Returns
+        -------
+        int
+            Publisher-side monotonic sequence number for this topic,
+            starting at 1.
+        """
+        return self._inner.publish(topic, ipc_bytes)
+
+    def subscribe(
+        self,
+        topics: list[str],
+        callback,
+    ) -> None:
+        """Register a callback invoked for each published batch.
+
+        Parameters
+        ----------
+        topics : list[str]
+            Topics to subscribe to.
+        callback : Callable[[str, int, bytes], None]
+            Called with ``(topic, seq, ipc_bytes)`` from a background
+            Rust thread. Must not block — dispatch to an event loop
+            or queue for async processing.
+        """
+        self._inner.subscribe(topics, callback)
+
+    def tick_upd(self, table: str, df: pl.DataFrame) -> int:
+        """Serialize a DataFrame and publish to subscribers.
+
+        Convenience method combining Arrow IPC serialization with
+        ``publish()``. Equivalent to::
+
+            buf = io.BytesIO()
+            df.write_ipc_stream(buf)
+            engine.publish(table, buf.getvalue())
+
+        Parameters
+        ----------
+        table : str
+            Topic/table name.
+        df : polars.DataFrame
+            Data to publish.
+
+        Returns
+        -------
+        int
+            Sequence number.
+        """
+        buf = io.BytesIO()
+        df.write_ipc_stream(buf)
+        return self._inner.publish(table, buf.getvalue())
+
+    def broker_eod(self, eod_message: bytes) -> None:
+        """Broadcast end-of-day signal to all subscribers.
+
+        Not yet implemented — EOD signal semantics are being designed.
+
+        Raises
+        ------
+        NotImplementedError
+        """
+        raise NotImplementedError(
+            "broker_eod is not yet implemented. EOD signal shape is "
+            "being designed as part of chili Phase 16."
+        )
 
     def wpar(
         self,

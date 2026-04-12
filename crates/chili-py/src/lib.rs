@@ -9,7 +9,8 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 use std::collections::HashMap;
 use std::io::Cursor;
-use std::sync::{Arc, LazyLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, LazyLock, Mutex};
 
 use chili_core::{EngineState, Func, SpicyError, SpicyObj, SpicyResult, Stack};
 use chili_op::{write_partition_py, BUILT_IN_FN};
@@ -189,6 +190,27 @@ struct Engine {
     /// the Rust state is unsalvageable (Rust threads + RwLock + Arc
     /// don't survive fork). Raise a clear error instead of deadlocking.
     init_pid: u32,
+    // Phase 16 — in-process broker pub/sub state.
+    // py_subscribers: topic → list of bounded channel senders (capacity 1024).
+    // Each subscribe() call spawns a background thread per topic that reads
+    // from the receiver and invokes the Python callback with GIL.
+    py_subscribers: Arc<Mutex<HashMap<String, Vec<mpsc::SyncSender<(String, i64, Vec<u8>)>>>>>,
+    // topic_seq: per-topic monotonic sequence counter, starting at 0 (first
+    // publish returns 1).
+    topic_seq: Arc<Mutex<HashMap<String, i64>>>,
+    // broker_shutdown: signals subscriber threads to stop processing
+    // messages. Set to true in Drop so threads don't drain large queues
+    // after the engine is deallocated.
+    broker_shutdown: Arc<AtomicBool>,
+}
+
+impl Drop for Engine {
+    fn drop(&mut self) {
+        // Signal subscriber threads to exit immediately instead of
+        // draining their entire message queue — avoids multi-second
+        // GIL contention when large queues are buffered.
+        self.broker_shutdown.store(true, Ordering::Relaxed);
+    }
 }
 
 #[pymethods]
@@ -209,6 +231,9 @@ impl Engine {
         Engine {
             state: arc_state,
             init_pid: std::process::id(),
+            py_subscribers: Arc::new(Mutex::new(HashMap::new())),
+            topic_seq: Arc::new(Mutex::new(HashMap::new())),
+            broker_shutdown: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -392,6 +417,120 @@ impl Engine {
         })
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
         Ok(n)
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 16 — Broker bindings (WL 1.1)
+    //
+    // In-process pub/sub: publish() fans out Arrow IPC bytes to Python
+    // callbacks registered via subscribe(). Each subscriber gets a bounded
+    // mpsc channel (capacity 1024); a background thread per subscription
+    // reads from the channel and invokes the callback with GIL acquired.
+    //
+    // This is independent of the Rust broker's IPC dispatch path (which
+    // writes to TCP socket handles for inter-process communication).
+    // -----------------------------------------------------------------------
+
+    /// Publish Arrow IPC bytes to all in-process subscribers of a topic.
+    ///
+    /// Returns the publisher-side monotonic sequence number (per-topic,
+    /// starting at 1). Backpressure: if a subscriber's channel is full
+    /// (1024 pending messages), the message is silently dropped for that
+    /// subscriber.
+    fn publish(&self, topic: &str, ipc_bytes: &[u8]) -> PyResult<i64> {
+        self.check_fork()?;
+        let seq = {
+            let mut seqs = self.topic_seq.lock().map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "topic_seq lock poisoned: {}", e
+                ))
+            })?;
+            let entry = seqs.entry(topic.to_owned()).or_insert(0);
+            *entry += 1;
+            *entry
+        };
+        let subs = self.py_subscribers.lock().map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "py_subscribers lock poisoned: {}", e
+            ))
+        })?;
+        if let Some(senders) = subs.get(topic) {
+            let bytes = ipc_bytes.to_vec();
+            for sender in senders {
+                // Backpressure: try_send drops the message if the channel
+                // is full. The parity test allows receiving fewer than
+                // published frames under pressure.
+                if let Err(mpsc::TrySendError::Full(_)) =
+                    sender.try_send((topic.to_owned(), seq, bytes.clone()))
+                {
+                    log::warn!(
+                        "chili broker: subscriber backpressure on topic={}, dropping seq={}",
+                        topic, seq
+                    );
+                }
+            }
+        }
+        Ok(seq)
+    }
+
+    /// Register a Python callback for published frames on the given topics.
+    ///
+    /// `callback(topic: str, seq: int, ipc_bytes: bytes)` is invoked from
+    /// a background Rust thread for each published frame. The callback
+    /// must not block — dispatch to an asyncio event loop or queue.
+    ///
+    /// Each call spawns one background thread per topic that acquires the
+    /// GIL only when invoking the callback. This avoids deadlocks with
+    /// concurrent `eval()` calls that release the GIL (Phase 6).
+    fn subscribe(
+        &self,
+        py: Python<'_>,
+        topics: Vec<String>,
+        callback: Py<PyAny>,
+    ) -> PyResult<()> {
+        self.check_fork()?;
+        let mut subs = self.py_subscribers.lock().map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "py_subscribers lock poisoned: {}", e
+            ))
+        })?;
+        for topic in topics {
+            let (sender, receiver) =
+                mpsc::sync_channel::<(String, i64, Vec<u8>)>(1024);
+            let cb = callback.clone_ref(py);
+            let shutdown = Arc::clone(&self.broker_shutdown);
+            std::thread::Builder::new()
+                .name(format!("chili-broker-{}", topic))
+                .spawn(move || {
+                    while let Ok((topic, seq, bytes)) = receiver.recv() {
+                        // Exit immediately if the engine has been dropped —
+                        // don't drain the queue and thrash the GIL.
+                        if shutdown.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        Python::with_gil(|py| {
+                            let py_bytes = PyBytes::new_bound(py, &bytes);
+                            if let Err(e) =
+                                cb.call1(py, (topic.as_str(), seq, py_bytes))
+                            {
+                                log::warn!(
+                                    "chili broker callback error: {}", e
+                                );
+                            }
+                        });
+                    }
+                    // Channel closed — drop callback with GIL for safe
+                    // Py_DECREF.
+                    Python::with_gil(|_py| drop(cb));
+                })
+                .map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "failed to spawn broker thread: {}", e
+                    ))
+                })?;
+            subs.entry(topic).or_default().push(sender);
+        }
+        Ok(())
     }
 }
 
