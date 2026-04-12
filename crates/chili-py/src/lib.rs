@@ -179,6 +179,20 @@ impl Engine {
         Ok(())
     }
 
+    /// Phase 12 — clear all loaded partitioned DataFrames from the engine.
+    /// The engine stays alive; use `load()` to re-load afterwards.
+    fn unload(&self) -> PyResult<()> {
+        self.check_fork()?;
+        self.state
+            .clear_par_df()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+    }
+
+    /// Phase 12 — return the number of loaded partitioned tables.
+    fn table_count(&self) -> usize {
+        self.state.par_df_count()
+    }
+
     /// Load a partitioned HDB directory.
     ///
     /// Releases the GIL for the duration of the load (which can take up to

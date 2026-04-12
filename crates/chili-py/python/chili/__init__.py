@@ -35,10 +35,62 @@ class Engine:
 
     def __init__(self, debug: bool = False, lazy: bool = False, pepper: bool = True) -> None:
         self._inner = _Engine(debug=debug, lazy=lazy, pepper=pepper)
+        self._hdb_path: Optional[str] = None
 
     def load(self, path: str) -> None:
         """Load a partitioned HDB directory into the engine."""
         self._inner.load(path)
+        self._hdb_path = path
+
+    # -----------------------------------------------------------------------
+    # Phase 12 — Engine lifecycle API (WL 3.1)
+    # -----------------------------------------------------------------------
+
+    def close(self) -> None:
+        """Release the Rust engine state immediately.
+
+        After calling ``close()``, any subsequent call to ``eval()``,
+        ``wpar()``, ``load()``, or ``reload()`` will raise ``AttributeError``.
+        Use this instead of relying on Python's garbage collector to reclaim
+        the Rust state — especially in migration scripts and tests where
+        deterministic cleanup matters.
+        """
+        self._inner = None  # type: ignore[assignment]
+        self._hdb_path = None
+
+    def unload(self) -> None:
+        """Drop all loaded partitions but keep the engine alive.
+
+        Subsequent queries on partitioned tables will error with "table not
+        found" until ``load()`` or ``reload()`` is called again. The HDB
+        path is preserved so ``reload()`` still works after ``unload()``.
+        Non-partitioned variables, registered functions, and IPC connections
+        are unaffected.
+        """
+        self._inner.unload()
+
+    def reload(self) -> None:
+        """Re-scan the most recently loaded HDB directory for new partitions.
+
+        Equivalent to ``engine.unload(); engine.load(original_path)`` but
+        preserves the engine's other state (variables, functions, connections).
+
+        Raises ``RuntimeError`` if no HDB directory has been loaded yet.
+        """
+        if self._hdb_path is None:
+            raise RuntimeError(
+                "No HDB directory has been loaded yet. Call engine.load(path) first."
+            )
+        self._inner.unload()
+        self._inner.load(self._hdb_path)
+
+    def is_loaded(self) -> bool:
+        """Return True if at least one partitioned table is loaded."""
+        return self._inner.table_count() > 0
+
+    def table_count(self) -> int:
+        """Return the number of loaded partitioned tables."""
+        return self._inner.table_count()
 
     def eval(self, query: str) -> pl.DataFrame:
         """

@@ -1688,6 +1688,24 @@ impl EngineState {
         ))
     }
 
+    /// Phase 12 — clear all loaded partitioned DataFrames. The engine remains
+    /// alive (variables, functions, connections unaffected); only the par_df
+    /// map is emptied. Subsequent queries on partitioned tables will error
+    /// with "table not found" until `load_par_df` is called again.
+    pub fn clear_par_df(&self) -> SpicyResult<()> {
+        let mut par_df = self
+            .par_df
+            .write()
+            .map_err(|e| SpicyError::EvalErr(e.to_string()))?;
+        par_df.clear();
+        Ok(())
+    }
+
+    /// Return the number of loaded partitioned DataFrames (tables).
+    pub fn par_df_count(&self) -> usize {
+        self.par_df.read().map(|m| m.len()).unwrap_or(0)
+    }
+
     pub fn tick(&self, inc: i64) -> SpicyResult<SpicyObj> {
         let mut tick_count = self
             .tick_count
