@@ -132,6 +132,11 @@ fn parse_date_str(date_str: &str) -> PyResult<i32> {
 #[pyclass]
 struct Engine {
     state: Arc<EngineState>,
+    /// Phase 11 — PID recorded at construction time. If a subsequent
+    /// method call sees a different PID, we're in a forked child and
+    /// the Rust state is unsalvageable (Rust threads + RwLock + Arc
+    /// don't survive fork). Raise a clear error instead of deadlocking.
+    init_pid: u32,
 }
 
 #[pymethods]
@@ -149,7 +154,29 @@ impl Engine {
         state.register_fn(&BUILT_IN_FN);
         let arc_state = Arc::new(state);
         arc_state.set_arc_self(Arc::clone(&arc_state)).unwrap();
-        Engine { state: arc_state }
+        Engine {
+            state: arc_state,
+            init_pid: std::process::id(),
+        }
+    }
+
+    /// Phase 11 — check that we're still in the same process that created
+    /// the engine. If not, we were forked, and the Rust state (RwLock,
+    /// Arc, thread-local allocator pools) is in an undefined state.
+    /// Raise a clear error instead of deadlocking (which is the symptom
+    /// mdata's Sprint D hit with ProcessPoolExecutor on macOS).
+    fn check_fork(&self) -> PyResult<()> {
+        if std::process::id() != self.init_pid {
+            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "chili.Engine is not fork-safe after construction. \
+                 This engine was created in PID {} but is now running in PID {}. \
+                 Use multiprocessing.get_context('spawn') instead of 'fork', \
+                 or create a new Engine in each child process.",
+                self.init_pid,
+                std::process::id(),
+            )));
+        }
+        Ok(())
     }
 
     /// Load a partitioned HDB directory.
@@ -159,6 +186,7 @@ impl Engine {
     /// traversal + parquet schema reads). Other Python threads can run
     /// during this time.
     fn load(&self, py: Python<'_>, path: &str) -> PyResult<()> {
+        self.check_fork()?;
         let state = Arc::clone(&self.state);
         let path = path.to_owned();
         py.allow_threads(move || {
@@ -186,6 +214,7 @@ impl Engine {
     /// the polars rayon pool size, instead of being serialized at 0.92×
     /// (worse than serial — measured pre-Phase-6).
     fn eval<'py>(&self, py: Python<'py>, query: &str) -> PyResult<Bound<'py, PyBytes>> {
+        self.check_fork()?;
         let state = Arc::clone(&self.state);
         let query = query.to_owned();
         // Run the entire query OFF the GIL.
@@ -241,6 +270,7 @@ impl Engine {
         date: &str,
         sort_columns: Vec<String>,
     ) -> PyResult<i64> {
+        self.check_fork()?;
         // Copy bytes off the &[u8] reference because the closure must own
         // its captured data (the Python buffer is released as soon as the
         // GIL is released).
