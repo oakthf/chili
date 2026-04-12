@@ -112,6 +112,39 @@ class Engine:
             "hdb_path": self._hdb_path,
         }
 
+    # -----------------------------------------------------------------------
+    # Phase 15 — Quantized column helper (WL 3.4)
+    # -----------------------------------------------------------------------
+
+    _column_scales: dict[str, dict[str, int]] = {}
+
+    def set_column_scale(self, table: str, column: str, factor: int) -> None:
+        """Register a dequantization scale factor for a column.
+
+        After calling ``set_column_scale("ohlcv_1d", "close", 1_000_000)``,
+        any ``engine.eval()`` result from ``ohlcv_1d`` that contains a
+        ``close`` column of type ``Int64`` will be automatically cast to
+        ``Float64`` and divided by ``factor`` before returning the DataFrame.
+
+        This is the mdata "Option B" approach: set the scale once at engine
+        construction time and forget about it. No query-string changes needed.
+
+        Parameters
+        ----------
+        table : str
+            Table name (e.g. ``"ohlcv_1d"``).
+        column : str
+            Column name (e.g. ``"close"``).
+        factor : int
+            Scale factor (e.g. ``1_000_000``). The stored Int64 value is
+            divided by this factor to produce Float64.
+        """
+        self._column_scales.setdefault(table, {})[column] = factor
+
+    def clear_column_scales(self) -> None:
+        """Remove all registered column scale factors."""
+        self._column_scales.clear()
+
     def query_plan(self, query: str) -> str:
         """Return the polars query plan for a pepper query WITHOUT executing it.
 
@@ -135,6 +168,10 @@ class Engine:
         """
         Evaluate a Chili/pepper query and return the result as a polars DataFrame.
 
+        If ``set_column_scale()`` has been called for any columns in the
+        result table, those columns are automatically dequantized from
+        Int64 to Float64 before returning (Phase 15 / WL 3.4).
+
         Parameters
         ----------
         query : str
@@ -146,7 +183,36 @@ class Engine:
         polars.DataFrame
         """
         ipc_bytes: bytes = self._inner.eval(query)
-        return pl.from_arrow(pa.ipc.open_stream(io.BytesIO(ipc_bytes)).read_all())
+        df = pl.from_arrow(pa.ipc.open_stream(io.BytesIO(ipc_bytes)).read_all())
+        return self._apply_column_scales(df, query)
+
+    def _apply_column_scales(self, df: pl.DataFrame, query: str) -> pl.DataFrame:
+        """Phase 15 — auto-dequantize columns registered via set_column_scale.
+
+        For each (table, column, factor) that matches a column in `df`,
+        cast the column from Int64 to Float64 and divide by factor.
+        Only applies if the column dtype is Int64 (Float64 columns are
+        left untouched, which handles the case where the HDB hasn't been
+        quantized yet).
+        """
+        if not self._column_scales:
+            return df
+        # Try to detect the table name from the query (best-effort: look
+        # for "from <table>" pattern). If the query doesn't match any
+        # registered table, no scaling is applied.
+        for table, scales in self._column_scales.items():
+            if f"from {table}" not in query:
+                continue
+            cast_exprs = []
+            for col_name, factor in scales.items():
+                if col_name in df.columns and df[col_name].dtype == pl.Int64:
+                    cast_exprs.append(
+                        pl.col(col_name).cast(pl.Float64) / factor  # pyright: ignore[reportUnknownMemberType]
+                    )
+            if cast_exprs:
+                df = df.with_columns(cast_exprs)  # pyright: ignore[reportUnknownMemberType]
+            break  # Only match the first table
+        return df
 
     def wpar(
         self,
