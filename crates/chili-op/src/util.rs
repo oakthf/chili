@@ -138,6 +138,20 @@ pub(crate) fn list_op_list(
 // }
 
 pub(crate) fn write_parquet_to_filepath(filepath: &str, df: &DataFrame) -> SpicyResult<u64> {
+    write_parquet_to_filepath_with_row_group_size(filepath, df, None)
+}
+
+/// Variant of `write_parquet_to_filepath` that lets the caller pin a
+/// `row_group_size`. Used by Phase 10 (symbol predicate pushdown) — when a
+/// partition is written sorted by symbol, a smaller row group size lets
+/// polars later prune row groups via parquet column statistics during
+/// `where symbol=X` queries. Default `None` preserves polars' default row
+/// group size for backwards compatibility.
+pub(crate) fn write_parquet_to_filepath_with_row_group_size(
+    filepath: &str,
+    df: &DataFrame,
+    row_group_size: Option<usize>,
+) -> SpicyResult<u64> {
     let mut file = match File::create(filepath) {
         Ok(f) => f,
         Err(e) => {
@@ -148,8 +162,11 @@ pub(crate) fn write_parquet_to_filepath(filepath: &str, df: &DataFrame) -> Spicy
         }
     };
 
-    ParquetWriter::new(&mut file)
-        .with_compression(ParquetCompression::default())
+    let mut writer = ParquetWriter::new(&mut file).with_compression(ParquetCompression::default());
+    if let Some(rgs) = row_group_size {
+        writer = writer.with_row_group_size(Some(rgs));
+    }
+    writer
         .finish(&mut df.clone())
         .map_err(|e| SpicyError::Err(e.to_string()))
 }

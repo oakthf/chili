@@ -21,8 +21,8 @@ Both sides read this file at the start of every invocation and know what to do n
 | 6 — GIL release (A) | **SHIPPED 2026-04-12** ✓ (concurrent 519→3168 q/s = 6.1×) | N/A | N/A |
 | 7 — Write path (O) | **SHIPPED 2026-04-12** ✓ (cache works; bench flat — code is free, low impact in microbench) | N/A | N/A |
 | 8 — Validation | **SHIPPED 2026-04-12** ✓ (181 tests, full bench sweep, CHANGELOG + README + summary.md) | N/A | N/A |
-| **9 — Column pruning (WL 2.1)** | PENDING | **Q1-Q12 rerun + fixture drop** | fixtures **DONE 2026-04-11** (20 × ohlcv_1d, 5 × ohlcv_1m, schemas); benchmark waits on chili |
-| **10 — Symbol pushdown (WL 2.2)** | PENDING | **Q1-Q12 rerun** | waits on chili |
+| **9 — Column pruning (WL 2.1)** | **VERIFIED 2026-04-12 — NO CHANGE NEEDED** ✓ (polars 0.53 already pushes projection down through both scan_partition and scan_partition_by_range; multi-partition 81% saving on 1-col vs 11-col verified empirically) | Q1-Q12 rerun NOT needed for this phase | fixtures DONE 2026-04-11; rerun deferred to Phase 10 |
+| **10 — Symbol pushdown (WL 2.2)** | IN PROGRESS — investigating whether polars row-group stats are pruning by symbol | **Q1-Q12 rerun** when chili signals ready | waits on chili |
 | **11 — Fork guard (WL 1.2)** | PENDING | **validate error message** | waits on chili |
 | **12 — Lifecycle API (WL 3.1)** | PENDING | **swap `ChiliGateway.close()`** | waits on chili |
 | **13 — Structured errors (WL 3.3)** | PENDING | **swap RuntimeError catches** | waits on chili |

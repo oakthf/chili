@@ -73,6 +73,72 @@ pub fn make_row(symbols: &[&str], rows_per_symbol: usize) -> DataFrame {
     .unwrap()
 }
 
+/// Build a wide DataFrame mirroring mdata's ohlcv schema: 10 columns total
+/// (open/high/low/close/vwap floats, volume/transactions ints, symbol string,
+/// plus the partition `date` column injected by `write_partition_py`). Used
+/// to make projection-pushdown benchmarks meaningful — projecting from 10
+/// columns to 1 should be visibly faster than reading all 10.
+pub fn make_wide_row(symbols: &[&str], rows_per_symbol: usize) -> DataFrame {
+    let n = symbols.len() * rows_per_symbol;
+    let mut all_symbols: Vec<String> = Vec::with_capacity(n);
+    let mut open: Vec<f64> = Vec::with_capacity(n);
+    let mut high: Vec<f64> = Vec::with_capacity(n);
+    let mut low: Vec<f64> = Vec::with_capacity(n);
+    let mut close: Vec<f64> = Vec::with_capacity(n);
+    let mut vwap: Vec<f64> = Vec::with_capacity(n);
+    let mut volume: Vec<i64> = Vec::with_capacity(n);
+    let mut transactions: Vec<i64> = Vec::with_capacity(n);
+    let mut bid: Vec<f64> = Vec::with_capacity(n);
+    let mut ask: Vec<f64> = Vec::with_capacity(n);
+    for sym in symbols {
+        for i in 0..rows_per_symbol {
+            let f = (i as f64) * 0.01;
+            all_symbols.push((*sym).to_string());
+            open.push(f);
+            high.push(f + 0.5);
+            low.push(f - 0.5);
+            close.push(f + 0.1);
+            vwap.push(f + 0.05);
+            volume.push((i as i64) * 100);
+            transactions.push(i as i64);
+            bid.push(f + 0.04);
+            ask.push(f + 0.06);
+        }
+    }
+    df![
+        "symbol" => all_symbols,
+        "open" => open,
+        "high" => high,
+        "low" => low,
+        "close" => close,
+        "vwap" => vwap,
+        "volume" => volume,
+        "transactions" => transactions,
+        "bid" => bid,
+        "ask" => ask,
+    ]
+    .unwrap()
+}
+
+/// Build an HDB with `n_partitions` date partitions of the wide ohlcv schema,
+/// each with `n_symbols` symbols × `rows_per_symbol` rows. Counterpart to
+/// `build_hdb` but uses `make_wide_row`.
+pub fn build_wide_hdb(
+    tmp: &TempHdb,
+    table: &str,
+    n_partitions: usize,
+    n_symbols: usize,
+    rows_per_symbol: usize,
+) {
+    let dates = date_sequence(n_partitions);
+    let syms: Vec<String> = (0..n_symbols).map(|i| format!("SYM{:04}", i)).collect();
+    let sym_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
+    for d in dates.iter().rev() {
+        let df = make_wide_row(&sym_refs, rows_per_symbol);
+        write_partition_py(tmp.path(), &SpicyObj::Date(*d), table, &df, &[], false).unwrap();
+    }
+}
+
 /// Write one partition via chili-op's write_partition_py path.
 pub fn write_one_partition(
     hdb: &str,

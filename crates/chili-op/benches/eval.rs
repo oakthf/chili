@@ -2,6 +2,10 @@
 //!
 //! - B7 `query_groupby_agg`: group-by + aggregation (tests filter fusion, with_capacity, collect_schema shortcut)
 //! - B8 `query_select_star`: raw select * to measure IPC + eval overhead unrelated to polars compute
+//! - B12 `query_select_one_col`, `query_select_three_cols`, `query_select_all_wide`:
+//!   projection benches against a 10-column wide-schema fixture mirroring mdata's
+//!   ohlcv shape. The pre/post diff between `select close` and `select *` measures
+//!   whether projection pushdown is doing anything for chili's query path.
 
 use std::time::Duration;
 
@@ -9,7 +13,7 @@ use chili_core::{EngineState, SpicyObj, Stack};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 mod common;
-use common::{build_hdb, make_engine, TempHdb};
+use common::{build_hdb, build_wide_hdb, make_engine, TempHdb};
 
 fn eval(engine: &EngineState, query: &str) {
     let mut stack = Stack::new(None, 0, 0, "");
@@ -49,5 +53,51 @@ fn bench_eval(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_eval);
+/// Phase 9 — projection pushdown benches.
+///
+/// Wide fixture (10 OHLCV columns + injected `date`). Compares the wall time of
+/// `select close from t where date=X` against `select from t where date=X`.
+/// If polars projection pushdown is fully working, the 1-column query should
+/// be visibly faster than the 11-column read. If they're similar, the
+/// pushdown isn't reaching the parquet reader for chili's query shape.
+fn bench_projection(c: &mut Criterion) {
+    let tmp = TempHdb::new("eval_wide_100p");
+    // 100 dates × 50 symbols × 200 rows = 1M rows × 11 columns = ~88 MB
+    build_wide_hdb(&tmp, "wide", 100, 50, 200);
+    let engine = make_engine();
+    engine.load_par_df(tmp.path()).unwrap();
+
+    let mut group = c.benchmark_group("projection");
+    group.sample_size(50);
+    group.measurement_time(Duration::from_secs(10));
+
+    // Read all 11 columns (no projection)
+    group.bench_function("select_all_wide", |b| {
+        b.iter(|| eval(&engine, "select from wide where date=2024.01.03"));
+    });
+
+    // Project to a single column — if pushdown works, this should be ~10× faster
+    group.bench_function("select_one_col", |b| {
+        b.iter(|| eval(&engine, "select close from wide where date=2024.01.03"));
+    });
+
+    // Project to 3 columns — should be ~3× faster than select_all_wide
+    group.bench_function("select_three_cols", |b| {
+        b.iter(|| eval(&engine, "select close, volume, vwap from wide where date=2024.01.03"));
+    });
+
+    // Project + filter on a non-projected column — must include `symbol` for the filter
+    group.bench_function("select_one_col_with_sym_filter", |b| {
+        b.iter(|| {
+            eval(
+                &engine,
+                "select close from wide where date=2024.01.03, symbol=`SYM0001",
+            )
+        });
+    });
+
+    group.finish();
+}
+
+criterion_group!(benches, bench_eval, bench_projection);
 criterion_main!(benches);

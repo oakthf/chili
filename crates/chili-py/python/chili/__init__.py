@@ -63,6 +63,7 @@ class Engine:
         hdb_path: str,
         table: str,
         date: str,
+        sort_columns: Optional[list[str]] = None,
     ) -> int:
         """
         Write a DataFrame as a partition to an HDB directory.
@@ -77,6 +78,19 @@ class Engine:
             Table name (subdirectory under hdb_path).
         date : str
             Partition date in ``YYYY.MM.DD`` format, e.g. ``"2024.01.02"``.
+        sort_columns : list[str], optional
+            Column names to sort the partition by before writing. When set,
+            chili also forces a small parquet ``row_group_size`` (16384) so
+            polars can later prune row groups via column min/max statistics.
+
+            Required for ``where symbol=X`` queries to skip parquet row
+            groups (Phase 10 / mdata wishlist 2.2). Without this option,
+            chili writes a single row group per partition and ``where``
+            predicates are applied at the row level after the full partition
+            is read into memory.
+
+            Recommended setting for symbol-filtered analytical workloads:
+            ``sort_columns=["symbol"]``.
 
         Returns
         -------
@@ -89,4 +103,6 @@ class Engine:
         # file format (with footer) which IpcStreamReader cannot parse.
         df.write_ipc_stream(buf)
         ipc_bytes = buf.getvalue()
-        return self._inner.wpar(ipc_bytes, hdb_path, table, date)
+        return self._inner.wpar(
+            ipc_bytes, hdb_path, table, date, sort_columns or []
+        )

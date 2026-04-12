@@ -495,6 +495,13 @@ pub fn write_partition(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
 /// Accepts native Rust types so callers do not need to construct SpicyObj
 /// arg slices that satisfy the `SymOrSyms` validation constraint for
 /// sort_columns.  When `sort_columns` is empty no sorting is performed.
+///
+/// Phase 10 — symbol predicate pushdown:
+/// When `sort_columns` is non-empty, the partition is also written with a
+/// reduced row_group_size (default 16384 rows when sorted, polars default
+/// otherwise). This makes parquet's per-row-group min/max statistics
+/// selective for the sort key, so a downstream
+/// `where symbol=X` query can prune row groups that don't contain X.
 pub fn write_partition_py(
     hdb_path: &str,
     partition: &SpicyObj,
@@ -506,6 +513,31 @@ pub fn write_partition_py(
     let sort_options = SortMultipleOptions::default();
     // Proposal O — same canonicalize cache as the public `write_partition`.
     let hdb_path = canon_cached(hdb_path)?;
+
+    // Phase 10 — When sort_columns is non-empty, force a smaller row group
+    // so polars can later prune row groups by min/max stats on the sort key.
+    //
+    // polars' default row_group_size is 512*512 = 262144 rows; mdata-shaped
+    // partitions (10k-50k rows) end up as a single row group covering the
+    // entire symbol range, defeating pruning.
+    //
+    // Critically: polars' `chunk_df_for_writing` uses floor division
+    // (`n_splits = height / row_group_size`). To get N splits we need
+    // row_group_size <= height/N. We aim for at least ~10 row groups per
+    // partition, with a minimum of 1024 rows per group (otherwise polars
+    // rechunks small groups back together at line 154 of chunks.rs:
+    // "if df.estimated_size() / n_chunks < 128 * 1024 { rechunk }").
+    //
+    // Compute the target row_group_size based on the actual DataFrame
+    // height — this gives good selectivity for partitions of any size.
+    let row_group_size: Option<usize> = if !sort_columns.is_empty() {
+        let n_rows = df.height();
+        // Target ~16 row groups, with floor 1024 and ceiling 32768
+        let target = (n_rows / 16).max(1024).min(32768);
+        Some(target)
+    } else {
+        None
+    };
 
     let mut column_names = df.get_column_names_owned();
     let mut lf = df.clone().lazy();
@@ -622,7 +654,8 @@ pub fn write_partition_py(
 
     if max_par == 0 {
         let sub_par_path = format!("{}_0000", par_path.display());
-        util::write_parquet_to_filepath(&sub_par_path, &df).map(|size| SpicyObj::I64(size as i64))
+        util::write_parquet_to_filepath_with_row_group_size(&sub_par_path, &df, row_group_size)
+            .map(|size| SpicyObj::I64(size as i64))
     } else {
         let mut par = max_par;
         let mut sub_par_path = format!("{}_{:04}", par_path.display(), par);
@@ -635,7 +668,11 @@ pub fn write_partition_py(
                 "Exceed maximum sub partition number 9999".to_string(),
             ))
         } else {
-            let size = util::write_parquet_to_filepath(&sub_par_path, &df)?;
+            let size = util::write_parquet_to_filepath_with_row_group_size(
+                &sub_par_path,
+                &df,
+                row_group_size,
+            )?;
             if rechunk {
                 let tmp_path = table_path.join("tmp");
                 let args = ScanArgsParquet::default();

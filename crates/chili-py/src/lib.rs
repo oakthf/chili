@@ -220,12 +220,27 @@ impl Engine {
     /// hdb_path  : root HDB directory (must exist and be canonicalisable)
     /// table     : table name
     /// date      : partition date string "YYYY.MM.DD"
+    /// sort_columns : optional list of column names to sort the partition
+    ///                by before writing. When non-empty, also forces a small
+    ///                row_group_size (16384) so polars can later prune row
+    ///                groups via parquet column statistics on the sort key
+    ///                — required for `where symbol=X` queries to skip
+    ///                row groups (Phase 10 / WL 2.2).
     ///
     /// Proposal A — releases the GIL for the IPC bytes → DataFrame parse,
     /// the date parse, and the partition write. mdata's batch ingest paths
     /// can issue many `wpar` calls concurrently from a Python thread pool
     /// without GIL contention.
-    fn wpar(&self, py: Python<'_>, ipc_bytes: &[u8], hdb_path: &str, table: &str, date: &str) -> PyResult<i64> {
+    #[pyo3(signature = (ipc_bytes, hdb_path, table, date, sort_columns=Vec::new()))]
+    fn wpar(
+        &self,
+        py: Python<'_>,
+        ipc_bytes: &[u8],
+        hdb_path: &str,
+        table: &str,
+        date: &str,
+        sort_columns: Vec<String>,
+    ) -> PyResult<i64> {
         // Copy bytes off the &[u8] reference because the closure must own
         // its captured data (the Python buffer is released as soon as the
         // GIL is released).
@@ -251,7 +266,8 @@ impl Engine {
                     .map_err(|e| format!("date '{}' is out of i32 range: {}", date, e))?
             };
             let date_obj = SpicyObj::Date(days);
-            let obj = write_partition_py(&hdb_path, &date_obj, &table, &df, &[], false)
+            let sort_refs: Vec<&str> = sort_columns.iter().map(|s| s.as_str()).collect();
+            let obj = write_partition_py(&hdb_path, &date_obj, &table, &df, &sort_refs, false)
                 .map_err(|e| e.to_string())?;
             Ok(match obj {
                 SpicyObj::I64(n) => n,
