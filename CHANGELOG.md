@@ -65,6 +65,36 @@ Component changes:
 
 See `docs/bench/summary.md` for the full breakdown and `docs/bench/phase{1..7}.md` for per-phase notes.
 
+### Python API — mdata wishlist phases (9-15, 2026-04-11/12)
+
+Extensions to `chili-py` (Python bindings) shipping after the core optimization sweep:
+
+- **Phase 9 — Polars projection pushdown verified (no code change)**: polars 0.53 already pushes column projection through both `scan_partition` and `scan_partition_by_range`. An 11-column OHLCV partition with a 1-column select shows 81% I/O reduction. No chili changes required.
+
+- **Phase 10 — Symbol predicate pushdown** (`wpar` `sort_columns` parameter): `engine.wpar(df, hdb, table, date, sort_columns=["symbol"])` sorts the partition by symbol before writing and sets `row_group_size=16384` (16 row groups per ~1 M-row partition). Polars uses parquet row-group min/max statistics to skip row groups on `where symbol=X`, reducing I/O from full-partition scans. Pruning ratio improved from 0.75× to 0.21× in benchmarks.
+
+- **Phase 11 — Fork detection guard**: `Engine` records its construction PID. Any method call (`load`, `eval`, `wpar`) from a forked child process raises `RuntimeError` immediately with a clear message: "Use `multiprocessing.get_context('spawn')` instead of 'fork', or create a new Engine in each child process."
+
+- **Phase 12 — Engine lifecycle API**: New methods on `Engine`:
+  - `close()` — release Rust state immediately (deterministic cleanup; subsequent calls raise `AttributeError`)
+  - `unload()` — drop all loaded partitions but keep the engine alive
+  - `reload()` — re-scan the last-loaded HDB directory for new partitions
+  - `is_loaded()` — return True if at least one partitioned table is loaded
+  - `table_count()` — return the number of loaded partitioned tables
+
+- **Phase 13 — Structured Python exception hierarchy**: 7 typed exception classes exported from the `chili` module, all extending `RuntimeError` for backwards compatibility:
+  - `ChiliError` — base class for all chili errors
+  - `PepperParseError` — syntax/parse errors
+  - `PepperEvalError` — evaluation errors
+  - `PartitionError` — missing `date` predicate or partition not found
+  - `TypeMismatchError` — argument type or count mismatch
+  - `NameError` — undefined variable or function
+  - `SerializationError` — Arrow IPC serialization/deserialization failure
+
+- **Phase 14 — Observability primitives**: `engine.stats()` returns a dict with `partitions_loaded`, `parse_cache_len`, and `hdb_path`. `engine.parse_cache_len()` exposed directly. `engine.query_plan(query)` stubbed — raises `RuntimeError` with a descriptive message; full implementation deferred pending a lazy-mode eval path in `EngineState`.
+
+- **Phase 15 — Quantized column dequantization helper**: `engine.set_column_scale(table, column, factor)` registers a scale factor. On any subsequent `engine.eval()` call, result columns of type `Int64` matching a registered `(table, column)` pair are automatically cast to `Float64` and divided by `factor`. Float64 columns are left untouched (graceful no-op on un-quantized HDBs). `engine.clear_column_scales()` removes all registered factors.
+
 ## [0.7.4] - 2026-03-21
 
 ### Added
