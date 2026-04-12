@@ -92,6 +92,45 @@ class Engine:
         """Return the number of loaded partitioned tables."""
         return self._inner.table_count()
 
+    # -----------------------------------------------------------------------
+    # Phase 14 — Observability primitives (WL 3.2)
+    # -----------------------------------------------------------------------
+
+    def stats(self) -> dict:
+        """Return engine-internal metrics as a Python dict.
+
+        Keys:
+          - ``partitions_loaded``: number of loaded partitioned tables
+          - ``parse_cache_len``: entries in the LRU parse cache
+          - ``hdb_path``: last-loaded HDB path (or None)
+
+        Useful for Prometheus metric export or health checks.
+        """
+        return {
+            "partitions_loaded": self._inner.table_count(),
+            "parse_cache_len": self._inner.parse_cache_len(),
+            "hdb_path": self._hdb_path,
+        }
+
+    def query_plan(self, query: str) -> str:
+        """Return the polars query plan for a pepper query WITHOUT executing it.
+
+        Equivalent to DuckDB's ``EXPLAIN``. Shows the optimized plan that
+        polars' lazy engine would execute, including predicate pushdown,
+        projection pushdown, and partition pruning.
+
+        Parameters
+        ----------
+        query : str
+            A pepper query string.
+
+        Returns
+        -------
+        str
+            The human-readable optimized plan.
+        """
+        return self._inner.query_plan(query)
+
     def eval(self, query: str) -> pl.DataFrame:
         """
         Evaluate a Chili/pepper query and return the result as a polars DataFrame.

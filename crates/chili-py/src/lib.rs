@@ -245,6 +245,25 @@ impl Engine {
         self.state.par_df_count()
     }
 
+    /// Phase 14 — return the parse cache size.
+    fn parse_cache_len(&self) -> usize {
+        self.state.parse_cache_len()
+    }
+
+    /// Phase 14 — placeholder for query plan.
+    /// TODO: requires a lazy-mode eval path that chili doesn't currently
+    /// expose through the Python bindings. Would need either a per-query
+    /// lazy mode flag or a dedicated "compile to plan" API in EngineState.
+    /// For now returns a stub; real implementation deferred to Phase 14b
+    /// when chili gains a proper lazy-mode Python API.
+    fn query_plan(&self, _query: &str) -> PyResult<String> {
+        Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "query_plan is not yet implemented. Chili currently collects \
+             results eagerly; a lazy-mode eval path is needed to expose \
+             the polars query plan before execution."
+        ))
+    }
+
     /// Load a partitioned HDB directory.
     ///
     /// Releases the GIL for the duration of the load (which can take up to
