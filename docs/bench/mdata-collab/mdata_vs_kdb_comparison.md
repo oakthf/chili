@@ -30,7 +30,7 @@
 | RDB → HDB live merge | Three modes: in-proc `RdbBuffer`, pull `RdbProxy`, push `RdbSubscriberCache` (`db/query.py:68-90`) | RDB rejoins TP feed after `.Q.hdpf` EOD flush |
 | Asof join | Polars `join_asof` (app-layer) | `aj`/`wj`/`pj` — tuned binary-search primitives, industry-leading |
 | Corporate actions / adjustments | `AdjustmentEngine` + `CorporateActionsStore` (splits, dividends) | Roll your own (no built-in) |
-| Aggregation pushdown | Q11 @ 860ms — pending chili Phase 17 | `update ... by` native, vectorized |
+| Aggregation pushdown | Q11 @ 181 ms (chili Phase 17 closed 2026-04-12 — target met via Phases 10+15) | `update ... by` native, vectorized |
 | SQL surface | DuckDB (full ANSI) | `s.k` limited SQL; KDB-X adds SQL 2016 |
 | Ad-hoc analytics (wide/sparse) | Polars/DuckDB eat it | Splayed model fights you past ~50 sparse cols |
 | ML/AI interop | Zero-copy Arrow → torch/sklearn | Boundary tax via PyKX or C |
@@ -39,7 +39,7 @@
 | Clustering / sharding | Single-node only (`scalability_architecture.md` SUPERSEDED) | `par.txt` segmentation; Insights Enterprise adds k8s |
 | Observability | JSONL `RunLog`, `mdata status/doctor/logs` CLI | `.z.ts` timers; enterprise tooling paid |
 
-**Feature-parity verdict**: mdata has built a remarkably complete kdb+-equivalent feature set for the 80/20 case. Where it's **behind**: asof joins as a first-class primitive, column attributes for sub-ms point lookups, aggregation pushdown (Phase 17 outstanding), and sharding. Where it's **ahead**: portable Parquet (any Arrow consumer can read), ML interop, ad-hoc SQL, gentle auth story via FastAPI.
+**Feature-parity verdict**: mdata has built a remarkably complete kdb+-equivalent feature set for the 80/20 case. Where it's **behind**: asof joins as a first-class primitive, column attributes for sub-ms point lookups, and sharding. Where it's **ahead**: portable Parquet (any Arrow consumer can read), ML interop, ad-hoc SQL, gentle auth story via FastAPI.
 
 ---
 
@@ -91,7 +91,7 @@ aj[`sym`time; trade; quote]   / attach prevailing quote to each trade, <1ms/day/
 | Q7: 100 syms, 1yr 1d | **66.2 ms** | 197.2 ms | — | 200 ms | DuckDB 3× |
 | Q8: all syms, 1 wk | 15.0 ms | **12.6 ms** | — | 250 ms | Chili 1.2× |
 | Q9: SPY 1yr, 1m bars | — | **1876 ms** | 2294 ms | 500 ms | Both FAIL |
-| Q11: pepper `last close by symbol` | — | 861 ms | — | 100 ms | FAIL — awaits chili Phase 17 |
+| Q11: pepper `last close by symbol` | — | **181 ms** | — | 200 ms | Chili PASS (Phase 17 closed 2026-04-12) |
 
 **Pattern**: chili wins on wide partition-prune scans, loses on narrow per-symbol multi-year queries (partition-load overhead not amortized). DuckDB is the surprisingly consistent all-rounder. Polars is the baseline.
 
@@ -140,7 +140,6 @@ For the workloads mdata actually runs (daily bars + intraday minute, US equity u
 - Single-node only; no sharding story (SUPERSEDED plan only).
 - No asof-join primitive as fast as kdb+'s `aj` — Polars `join_asof` is the app-layer substitute.
 - Chili loses on narrow multi-year single-symbol queries (Q2/Q3 benchmarks 2–3× slower than DuckDB).
-- Aggregation pushdown pending chili Phase 17 — Q11 currently 8× over target.
 - Auth posture weak: Flight is loopback-only with no auth; pub/sub socket has none.
 - Chili itself is a moving target — not in `pyproject.toml`, path shim + external build.
 - Large runtime footprint (Python venv + multiple Rust extensions) vs. kdb+'s 1 MB binary.
@@ -173,12 +172,11 @@ For the workloads mdata actually runs (daily bars + intraday minute, US equity u
 **Stay on mdata+chili if**: your workloads are daily bars + minute bars on a universe of ~10K US symbols, you want portable Parquet, you value Python/ML interop, and you can tolerate ~200ms single-symbol 1yr queries.
 
 **Next-enhancement priorities (in order)**:
-1. **Finish chili Phase 17 (aggregation pushdown)** — fixes Q11 (`last by symbol`) from 860ms → <200ms target.
-2. **Investigate Q2/Q3 single-symbol regression** — why chili is 3× slower than DuckDB on narrow multi-year queries (partition prefetch? page cache warmup? read-ahead?).
-3. **Evaluate asof-join primitive** — either push upstream to chili, or optimize the Polars `join_asof` path in `QueryEngine` for tick-scale trade/quote analytics.
-4. **Auth hardening** — Flight loopback → mTLS or token auth; pub/sub socket → SO_PEERCRED + UID allowlist.
-5. **Massive WS multiplexing** — refactor `MassiveClient` to share one socket across T/Q/AM channels, removing the "one stream at a time" constraint.
-6. **Sharding story** — if data scales past single-node, revisit `scalability_architecture.md` (currently SUPERSEDED).
+1. **Investigate Q2/Q3 single-symbol regression** — why chili is 3× slower than DuckDB on narrow multi-year queries (partition prefetch? page cache warmup? read-ahead?).
+2. **Evaluate asof-join primitive** — either push upstream to chili, or optimize the Polars `join_asof` path in `QueryEngine` for tick-scale trade/quote analytics.
+3. **Auth hardening** — Flight loopback → mTLS or token auth; pub/sub socket → SO_PEERCRED + UID allowlist.
+4. **Massive WS multiplexing** — refactor `MassiveClient` to share one socket across T/Q/AM channels, removing the "one stream at a time" constraint.
+5. **Sharding story** — if data scales past single-node, revisit `scalability_architecture.md` (currently SUPERSEDED).
 
 **Adopt kdb+ (specifically KDB-X Community) if**: you move to tick-scale trade/quote analytics, need `aj` at 100M+ trades/day, or your counterparties demand it.
 
