@@ -52,6 +52,28 @@ cargo bench -p chili-core --bench parse_cache
 cd crates/chili-py && uv run python tests/bench_concurrent.py --save mine
 ```
 
+## Document Index
+
+### Current reference docs
+
+| Document | Purpose |
+|----------|---------|
+| [`crates/chili-py/README.md`](crates/chili-py/README.md) | Python bindings (chili-py): build, install, full API surface |
+| [`CHANGELOG.md`](CHANGELOG.md) | Release notes: all shipped features, bug fixes, and optimization phases |
+| [`docs/bench/baseline.md`](docs/bench/baseline.md) | Pre-sweep benchmark baseline (`pre-all`, 2026-04-11) |
+| [`docs/bench/summary.md`](docs/bench/summary.md) | Optimization sweep final summary (Phases 1-7, 2026-04-12) |
+| [`docs/bench/phase{1..7,9}.md`](docs/bench/) | Per-phase benchmark snapshots (shipped 2026-04-11/12) |
+| [`docs/bench/mdata-collab/STATUS.md`](docs/bench/mdata-collab/STATUS.md) | Chili-mdata collaboration phase tracker (Phases 0–17, all complete) |
+| [`docs/bench/mdata-collab/artifacts/quantized_schema.md`](docs/bench/mdata-collab/artifacts/quantized_schema.md) | mdata Int64 price storage schema — scale factor and per-column map |
+| [`docs/bench/mdata-collab/mdata_vs_kdb_comparison.md`](docs/bench/mdata-collab/mdata_vs_kdb_comparison.md) | Feature and performance comparison: mdata+chili vs kdb+/q |
+| [`docs/bench/mdata-collab/tests/README.md`](docs/bench/mdata-collab/tests/README.md) | mdata-derived test corpus for chili-py PyO3 boundary verification |
+
+### Historical docs (frozen reference)
+
+Under [`docs/history/`](docs/history/):
+
+- `mdata-collab/artifacts/broker_parity_unix_status_2026-04-12.md` — Unix-backend parity test results from before Phase 16 shipped; ABC interface freeze contract (superseded by Phase 16 delivery)
+
 ## References
 
 - [Polars](https://www.pola.rs/): an open-source library for data manipulation.

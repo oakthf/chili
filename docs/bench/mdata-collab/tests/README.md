@@ -15,14 +15,14 @@ License: MIT — see `~/Desktop/repos/mdata/LICENSE`.
 
 ## Usage
 
-Chili's test harness should:
+These files serve as the acceptance contract between chili and mdata:
 
-1. **Port to Rust integration tests** — adapt the pepper query
-   patterns into `crates/chili-op/tests/mdata_patterns_test.rs` so
-   they run in `cargo test` without requiring a Python dependency.
-2. **Keep Python parallels** — also run the copies as-is from
-   `crates/chili-py/tests/test_mdata_*.py` as verification at the
-   PyO3 boundary (pepper parsing + eval + dtype mapping).
+1. **Python parallels** — run from `crates/chili-py/tests/` as verification at the
+   PyO3 boundary (pepper parsing + eval + dtype mapping). Both files are included
+   in the chili-py test suite as-is.
+2. **Rust integration tests** — the pepper patterns from `test_chili_pepper_patterns.py`
+   are also ported to `crates/chili-op/tests/mdata_patterns_test.rs` so they run in
+   `cargo test` without a Python dependency.
 3. **Report divergences** — any pattern that fails should be
    reported back to mdata so we can reconcile. Chili's pepper surface
    is the contract mdata relies on.
