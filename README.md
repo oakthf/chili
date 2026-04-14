@@ -63,7 +63,6 @@ cd crates/chili-py && uv run python tests/bench_concurrent.py --save mine
 | [`docs/bench/baseline.md`](docs/bench/baseline.md) | Pre-sweep benchmark baseline (`pre-all`, 2026-04-11) |
 | [`docs/bench/summary.md`](docs/bench/summary.md) | Optimization sweep final summary (Phases 1-7, 2026-04-12) |
 | [`docs/bench/phase{1..7,9}.md`](docs/bench/) | Per-phase benchmark snapshots (shipped 2026-04-11/12) |
-| [`docs/bench/mdata-collab/STATUS.md`](docs/bench/mdata-collab/STATUS.md) | Chili-mdata collaboration phase tracker (Phases 0–17, all complete) |
 | [`docs/bench/mdata-collab/artifacts/quantized_schema.md`](docs/bench/mdata-collab/artifacts/quantized_schema.md) | mdata Int64 price storage schema — scale factor and per-column map |
 | [`docs/bench/mdata-collab/mdata_vs_kdb_comparison.md`](docs/bench/mdata-collab/mdata_vs_kdb_comparison.md) | Feature and performance comparison: mdata+chili vs kdb+/q |
 | [`docs/bench/mdata-collab/tests/README.md`](docs/bench/mdata-collab/tests/README.md) | mdata-derived test corpus for chili-py PyO3 boundary verification |
@@ -72,6 +71,7 @@ cd crates/chili-py && uv run python tests/bench_concurrent.py --save mine
 
 Under [`docs/history/`](docs/history/):
 
+- `mdata-collab/STATUS_2026-04-12.md` — Complete chili↔mdata collaboration phase tracker (Phases 0–17, all shipped/closed 2026-04-12); preserved as project provenance
 - `mdata-collab/artifacts/broker_parity_unix_status_2026-04-12.md` — Unix-backend parity test results from before Phase 16 shipped; ABC interface freeze contract (superseded by Phase 16 delivery)
 
 ## References
