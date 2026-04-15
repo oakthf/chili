@@ -20,7 +20,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     str::FromStr,
-    sync::Arc,
+    sync::{Arc, RwLock},
 };
 
 use polars::{
@@ -30,6 +30,31 @@ use polars::{
 use std::sync::LazyLock;
 
 use chili_core::{ArgType, SpicyError, SpicyObj, SpicyResult, validate_args};
+
+/// Proposal O — process-wide cache of `fs::canonicalize` results for HDB
+/// paths, keyed by the input string. `wpar` is called in tight loops by
+/// some downstream users (mdata's batch ingest, partition migration
+/// scripts), and `fs::canonicalize` is a syscall that hits the filesystem
+/// every time. The canonicalized path of an HDB root is invariant for the
+/// lifetime of the process (no one is going to `mv` the HDB root mid-run),
+/// so caching is safe and lock-light. RwLock because the read path is
+/// massively dominant — write only happens once per unique HDB path.
+static CANON_CACHE: LazyLock<RwLock<HashMap<String, PathBuf>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+fn canon_cached(hdb_path: &str) -> SpicyResult<PathBuf> {
+    if let Ok(cache) = CANON_CACHE.read()
+        && let Some(p) = cache.get(hdb_path)
+    {
+        return Ok(p.clone());
+    }
+    // Slow path: canonicalize and insert.
+    let canon = fs::canonicalize(hdb_path).map_err(|e| SpicyError::Err(e.to_string()))?;
+    if let Ok(mut cache) = CANON_CACHE.write() {
+        cache.insert(hdb_path.to_string(), canon.clone());
+    }
+    Ok(canon)
+}
 
 use crate::util;
 
@@ -277,15 +302,51 @@ pub fn write_partition(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
     let df = args[3].df().unwrap();
     let columns = args[4].to_str_vec().unwrap();
     // rechunk | append
-    let rechunk = args[5].bool().unwrap();
+    let rechunk = *args[5].bool().unwrap();
+    write_partition_native(hdb_path, partition, table_name, &df, &columns, rechunk)
+}
+
+pub fn write_partition_native(
+    hdb_path: &str,
+    partition: &SpicyObj,
+    table_name: &str,
+    df: &polars::prelude::DataFrame,
+    sort_columns: &[&str],
+    rechunk: bool,
+) -> SpicyResult<SpicyObj> {
     let sort_options = SortMultipleOptions::default();
-    let hdb_path = fs::canonicalize(hdb_path).map_err(|e| SpicyError::Err(e.to_string()))?;
+    // Proposal O — same canonicalize cache as the public `write_partition`.
+    let hdb_path = canon_cached(hdb_path)?;
+
+    // When sort_columns is non-empty, force a smaller row group
+    // so polars can later prune row groups by min/max stats on the sort key.
+    //
+    // polars' default row_group_size is 512*512 = 262144 rows; mdata-shaped
+    // partitions (10k-50k rows) end up as a single row group covering the
+    // entire symbol range, defeating pruning.
+    //
+    // Critically: polars' `chunk_df_for_writing` uses floor division
+    // (`n_splits = height / row_group_size`). To get N splits we need
+    // row_group_size <= height/N. We aim for at least ~10 row groups per
+    // partition, with a minimum of 1024 rows per group (otherwise polars
+    // rechunks small groups back together at line 154 of chunks.rs:
+    // "if df.estimated_size() / n_chunks < 128 * 1024 { rechunk }").
+    //
+    // Compute the target row_group_size based on the actual DataFrame
+    // height — this gives good selectivity for partitions of any size.
+    let row_group_size: Option<usize> = if !sort_columns.is_empty() {
+        let n_rows = df.height();
+        // Target ~16 row groups, with floor 1024 and ceiling 32768
+        let target = (n_rows / 16).max(1024).min(32768);
+        Some(target)
+    } else {
+        None
+    };
 
     let mut column_names = df.get_column_names_owned();
-
     let mut lf = df.clone().lazy();
-    if !columns.is_empty() {
-        lf = lf.sort(columns.clone(), sort_options.clone());
+    if !sort_columns.is_empty() {
+        lf = lf.sort(sort_columns.to_vec(), sort_options.clone());
     }
 
     let par_str = match partition {
@@ -337,11 +398,9 @@ pub fn write_partition(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
         .map_err(|e| SpicyError::EvalErr(e.to_string()))?;
 
     let table_path = hdb_path.join(table_name);
-
     if !table_path.exists() {
         fs::create_dir(&table_path).map_err(|e| SpicyError::Err(e.to_string()))?;
     }
-
     let par_path = if table_path.is_dir() {
         table_path.join(&par_str)
     } else {
@@ -396,7 +455,8 @@ pub fn write_partition(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
 
     if max_par == 0 {
         let sub_par_path = format!("{}_0000", par_path.display());
-        util::write_parquet_to_filepath(&sub_par_path, &df).map(|size| SpicyObj::I64(size as i64))
+        util::write_parquet_to_filepath_with_row_group_size(&sub_par_path, &df, row_group_size)
+            .map(|size| SpicyObj::I64(size as i64))
     } else {
         let mut par = max_par;
         let mut sub_par_path = format!("{}_{:04}", par_path.display(), par);
@@ -409,43 +469,36 @@ pub fn write_partition(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
                 "Exceed maximum sub partition number 9999".to_string(),
             ))
         } else {
-            for path in glob::glob(&par_wild_path).unwrap() {
-                let path = path.map_err(|e| SpicyError::Err(e.to_string()))?;
-                if path
-                    .metadata()
-                    .map_err(|e| SpicyError::Err(e.to_string()))?
-                    .permissions()
-                    .readonly()
-                {
-                    return Err(SpicyError::Err(format!(
-                        "No write permission for '{}'",
-                        path.display()
-                    )));
-                }
-            }
-            let size = util::write_parquet_to_filepath(&sub_par_path, &df)?;
-            if *rechunk {
+            let size = util::write_parquet_to_filepath_with_row_group_size(
+                &sub_par_path,
+                &df,
+                row_group_size,
+            )?;
+            if rechunk {
                 let tmp_path = table_path.join("tmp");
                 let args = ScanArgsParquet::default();
                 let file_format =
                     FileWriteFormat::Parquet(Arc::new(ParquetWriteOptions::default()));
-                let _ = LazyFrame::scan_parquet(
+                let mut rechunk_lf = LazyFrame::scan_parquet(
                     PlRefPath::new(Path::new(&par_wild_path).to_str().unwrap_or_default()),
                     args,
                 )
-                .map_err(|e| SpicyError::EvalErr(e.to_string()))?
-                .sort(columns, sort_options)
-                .sink(
-                    SinkDestination::File {
-                        target: SinkTarget::Path(PlRefPath::new(
-                            Path::new(&tmp_path).to_str().unwrap_or_default(),
-                        )),
-                    },
-                    file_format,
-                    UnifiedSinkArgs::default(),
-                )
-                .map_err(|e| SpicyError::EvalErr(e.to_string()))?
-                .collect();
+                .map_err(|e| SpicyError::EvalErr(e.to_string()))?;
+                if !sort_columns.is_empty() {
+                    rechunk_lf = rechunk_lf.sort(sort_columns.to_vec(), sort_options);
+                }
+                let _ = rechunk_lf
+                    .sink(
+                        SinkDestination::File {
+                            target: SinkTarget::Path(PlRefPath::new(
+                                Path::new(&tmp_path).to_str().unwrap_or_default(),
+                            )),
+                        },
+                        file_format,
+                        UnifiedSinkArgs::default(),
+                    )
+                    .map_err(|e| SpicyError::EvalErr(e.to_string()))?
+                    .collect();
                 for path in glob::glob(&par_wild_path).unwrap() {
                     match path {
                         Ok(path) => {

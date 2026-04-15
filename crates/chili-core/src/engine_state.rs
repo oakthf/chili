@@ -17,6 +17,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, error, info, warn};
 use polars::{
     frame::DataFrame,
+    io::SerReader,
+    io::parquet::read::ParquetReader,
     prelude::{
         ArrowDataType, ArrowField, Column, DataType, IntoLazy, NamedFrom, NamedFromOwned, TimeUnit,
         col,
@@ -27,6 +29,8 @@ use polars_arrow::{
     array::{Int64Array, ListArray},
     offset::OffsetsBuffer,
 };
+
+use rayon::prelude::*;
 
 use crate::{
     Stack,
@@ -1417,120 +1421,200 @@ impl EngineState {
     }
 
     pub fn load_par_df(&self, path: &str) -> SpicyResult<()> {
+        // Two-phase load:
+        //   1. (outside lock) enumerate top-level table entries; build each
+        //      PartitionedDataFrame in parallel via rayon; read the schema
+        //      sentinel for each table at the same time so queries that miss
+        //      a partition never re-open the schema file (Proposal J).
+        //   2. (inside lock) acquire the par_df write lock exactly once and
+        //      extend the map. This shrinks the lock window from "entire
+        //      directory traversal" to "one atomic HashMap::extend", so
+        //      concurrent readers are no longer blocked during reload.
+
+        // Phase 1a: collect top-level table entries. We eagerly materialise
+        // into Vec<(PathBuf, String, bool)> because DirEntry is not Send on
+        // all platforms, so we cannot pass the iterator directly to rayon.
         let paths = match fs::read_dir(path) {
             Ok(p) => p,
             Err(e) => {
                 return Err(SpicyError::EvalErr(format!("OS err: {}", e)));
             }
         };
+        let entries: Vec<(PathBuf, String, bool)> = paths
+            .filter_map(|e| match e {
+                Ok(entry) => {
+                    let is_file = entry.metadata().ok().map(|m| m.is_file()).unwrap_or(false);
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    Some((entry.path(), name, is_file))
+                }
+                Err(e) => {
+                    eprintln!("OS err: {}", e);
+                    None
+                }
+            })
+            .collect();
+
+        // Phase 1b: build each PartitionedDataFrame in parallel. Each table
+        // is independent so rayon `par_iter` is safe and gives roughly Nx
+        // speedup on multi-table HDBs (Proposal C).
+        let new_entries: Vec<(String, PartitionedDataFrame)> = entries
+            .par_iter()
+            .filter_map(|(table_path, table_name, is_file)| {
+                Self::build_par_df_entry(table_path, table_name.clone(), *is_file)
+            })
+            .collect();
+
+        // Phase 2: acquire the write lock exactly once and extend. This is
+        // the only place the lock is held during load_par_df, and its
+        // duration is bounded by HashMap::insert, not filesystem I/O.
         let mut par_df = self
             .par_df
             .write()
             .map_err(|e| SpicyError::EvalErr(e.to_string()))?;
-        for table_path in paths {
-            if let Err(e) = table_path {
-                eprintln!("OS err: {}", e)
-            } else {
-                let mut par_vec: Vec<i32> = Vec::new();
-                let table = table_path.unwrap();
-                let table_name = table.file_name().to_string_lossy().to_string();
-                if table.metadata().unwrap().is_file() {
-                    par_df.insert(
-                        table_name.clone(),
-                        PartitionedDataFrame {
-                            name: table_name,
-                            df_type: DFType::Single,
-                            path: table.path().to_string_lossy().to_string(),
-                            pars: vec![],
-                        },
+        for (k, v) in new_entries {
+            par_df.insert(k, v);
+        }
+        Ok(())
+    }
+
+    /// Build a single `PartitionedDataFrame` entry for one top-level entry
+    /// under the HDB root. Returns `Some((table_name, par_df))` on success,
+    /// `None` when the entry should be skipped (empty directory, invalid
+    /// filenames, etc.). Runs entirely outside any shared lock — safe to
+    /// invoke from rayon workers.
+    fn build_par_df_entry(
+        table_path: &PathBuf,
+        table_name: String,
+        is_file: bool,
+    ) -> Option<(String, PartitionedDataFrame)> {
+        // Top-level file → single (unpartitioned) table.
+        if is_file {
+            return Some((
+                table_name.clone(),
+                PartitionedDataFrame {
+                    name: table_name,
+                    df_type: DFType::Single,
+                    path: table_path.to_string_lossy().to_string(),
+                    pars: vec![],
+                    empty_schema: None,
+                },
+            ));
+        }
+
+        // Top-level directory → partitioned table.
+        let dir = match fs::read_dir(table_path) {
+            Ok(d) => d,
+            Err(e) => {
+                error!("failed to read table dir {:?}: {}", table_path, e);
+                return None;
+            }
+        };
+        let files: Vec<DirEntry> = dir
+            .into_iter()
+            .flatten()
+            .filter(|p| p.metadata().is_ok() && p.metadata().unwrap().is_file())
+            .collect();
+        let filename_len = files.iter().map(|f| f.file_name().len()).max().unwrap_or(0);
+        if filename_len == 0 {
+            error!(
+                "not able to find args files for '{:?}', skip...",
+                table_path.file_name()
+            );
+            return None;
+        }
+        let df_type = if filename_len >= 13 {
+            DFType::ByDate
+        } else {
+            DFType::ByYear
+        };
+
+        let mut par_vec: Vec<i32> = Vec::new();
+        for p in &files {
+            let file_name = p.file_name().to_string_lossy().to_string();
+            if file_name == "schema" {
+                continue;
+            }
+            if df_type == DFType::ByDate {
+                if file_name.len() < 13 {
+                    error!(
+                        "partitioned by date shall match filename(0000.00.00_*), skip {:?}..",
+                        p.file_name()
                     );
-                } else {
-                    let table_dir = fs::read_dir(table.path().as_os_str());
-                    if let Ok(dir) = table_dir {
-                        let files: Vec<DirEntry> = dir
-                            .into_iter()
-                            .flatten()
-                            .filter(|p| p.metadata().is_ok() && p.metadata().unwrap().is_file())
-                            .collect();
-                        let filename_len =
-                            files.iter().map(|f| f.file_name().len()).max().unwrap_or(0);
-                        if filename_len == 0 {
-                            error!(
-                                "not able to find args files for '{:?}', skip...",
-                                table.file_name()
-                            );
-                            continue;
+                    continue;
+                }
+                let date = SpicyObj::parse_date(&file_name[..10]);
+                match date {
+                    Ok(d) => {
+                        let d = d.to_i64().unwrap();
+                        if d > 3999 && !par_vec.contains(&(d as i32)) {
+                            par_vec.push(d as i32)
                         }
-                        let df_type = if filename_len >= 13 {
-                            DFType::ByDate
-                        } else {
-                            DFType::ByYear
-                        };
-                        for p in files {
-                            let file_name = p.file_name().to_string_lossy().to_string();
-                            if file_name == "schema" {
-                                continue;
-                            }
-                            if df_type == DFType::ByDate {
-                                if file_name.len() < 13 {
-                                    error!(
-                                        "partitioned by date shall match filename(0000.00.00_*), skip {:?}..",
-                                        p.file_name()
-                                    );
-                                    continue;
-                                }
-                                let date = SpicyObj::parse_date(&file_name[..10]);
-                                match date {
-                                    Ok(d) => {
-                                        let d = d.to_i64().unwrap();
-                                        if d > 3999 && !par_vec.contains(&(d as i32)) {
-                                            par_vec.push(d as i32)
-                                        }
-                                    }
-                                    Err(e) => eprintln!("{}", e),
-                                }
-                            } else {
-                                if file_name.len() < 7 {
-                                    error!(
-                                        "partitioned by year shall match filename(0000_00), skip {:?}..",
-                                        p.file_name()
-                                    );
-                                    continue;
-                                }
-                                let year = file_name[..4].parse::<i32>();
-                                match year {
-                                    Ok(y) => {
-                                        if y <= 3999 && !par_vec.contains(&y) {
-                                            par_vec.push(y)
-                                        }
-                                    }
-                                    Err(e) => {
-                                        error!("failed to parse '{}' - err {}", file_name, e)
-                                    }
-                                }
-                            }
+                    }
+                    Err(e) => eprintln!("{}", e),
+                }
+            } else {
+                if file_name.len() < 7 {
+                    error!(
+                        "partitioned by year shall match filename(0000_00), skip {:?}..",
+                        p.file_name()
+                    );
+                    continue;
+                }
+                let year = file_name[..4].parse::<i32>();
+                match year {
+                    Ok(y) => {
+                        if y <= 3999 && !par_vec.contains(&y) {
+                            par_vec.push(y)
                         }
-                        if !par_vec.is_empty() {
-                            par_df.insert(
-                                table_name.clone(),
-                                PartitionedDataFrame {
-                                    name: table_name,
-                                    df_type,
-                                    path: table.path().to_string_lossy().to_string(),
-                                    pars: par_vec,
-                                },
-                            );
-                        }
-                    } else {
-                        return Err(SpicyError::EvalErr(format!(
-                            "os error: {}",
-                            table_dir.unwrap_err()
-                        )));
+                    }
+                    Err(e) => {
+                        error!("failed to parse '{}' - err {}", file_name, e)
                     }
                 }
             }
         }
-        Ok(())
+        if par_vec.is_empty() {
+            return None;
+        }
+        // `fs::read_dir` yields entries in filesystem-dependent order
+        // (unsorted on macOS APFS and many Linux FSes). `PartitionedDataFrame`
+        // uses `slice::binary_search` for scan_partition / scan_partition_by_range,
+        // which has undefined behavior on unsorted input. Sort here so
+        // partition lookups are deterministic.
+        par_vec.sort_unstable();
+
+        // Proposal J: read the schema sentinel parquet file once at load
+        // time and cache it as an empty DataFrame. Queries that hit a
+        // missing partition return `empty_schema.clone().lazy()` instead
+        // of re-scanning the sentinel file on every miss.
+        let empty_schema = {
+            let mut schema_path = table_path.clone();
+            schema_path.push("schema");
+            match std::fs::File::open(&schema_path) {
+                Ok(f) => match ParquetReader::new(f).finish() {
+                    Ok(df) => Some(Arc::new(df)),
+                    Err(e) => {
+                        warn!(
+                            "failed to pre-read schema sentinel for {}: {} — will fall back to per-miss scan",
+                            table_name, e
+                        );
+                        None
+                    }
+                },
+                Err(_) => None, // no schema file — leave as None; scans fall back
+            }
+        };
+
+        Some((
+            table_name.clone(),
+            PartitionedDataFrame {
+                name: table_name,
+                df_type,
+                path: table_path.to_string_lossy().to_string(),
+                pars: par_vec,
+                empty_schema,
+            },
+        ))
     }
 
     pub fn tick(&self, inc: i64) -> SpicyResult<SpicyObj> {

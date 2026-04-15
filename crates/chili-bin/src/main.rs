@@ -25,7 +25,7 @@ use reedline::{
     Signal, default_emacs_keybindings,
 };
 use std::fs::File;
-use std::io::{Write, stdout};
+use std::io::{IsTerminal, Write, stdout};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::exit;
@@ -80,6 +80,10 @@ struct Args {
     /// Optional flag to enable pepper syntax
     #[arg(short = 'P', long, default_value = "false")]
     pepper: bool,
+
+    /// Skip the interactive REPL; run as headless daemon (auto-detected when stdin is not a TTY with --port)
+    #[arg(long, default_value = "false")]
+    headless: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -90,8 +94,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let debug = log_level == log::LevelFilter::Debug;
 
-    let printer = ExternalPrinter::default();
-    let pipe = Pipe::new(printer.clone());
+    // Headless mode: explicit flag, or port requested with non-TTY stdin (daemon launch)
+    let is_headless = args.headless || (args.port > 0 && !std::io::stdin().is_terminal());
+
+    // ExternalPrinter is only needed for the interactive REPL; skip in headless mode
+    let printer: Option<ExternalPrinter<String>> = if is_headless || !args.log_dir.is_empty() {
+        None
+    } else {
+        Some(ExternalPrinter::default())
+    };
 
     let target = if !args.log_dir.is_empty() {
         let log_dir = PathBuf::from(&args.log_dir);
@@ -112,8 +123,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 exit(1);
             }
         }
-    } else {
+    } else if let Some(ref p) = printer {
+        let pipe = Pipe::new(p.clone());
         Target::Pipe(Box::new(pipe))
+    } else {
+        // headless: log to stderr (works without a TTY)
+        Target::Stderr
     };
 
     env_logger::Builder::new()
@@ -221,8 +236,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arc_state = Arc::new(state);
     arc_state.set_arc_self(Arc::clone(&arc_state)).unwrap();
 
-    let completer = ChiliCompleter::new(&arc_state);
-
     if args.port > 0 {
         info!("listening at port {}", args.port);
         let state_tcp = Arc::clone(&arc_state);
@@ -326,111 +339,131 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    let prompt_prefix = if args.pepper {
-        "p ".to_owned()
-    } else {
-        "c ".to_owned()
-    };
-    let prompt = DefaultPrompt::new(
-        DefaultPromptSegment::Basic(prompt_prefix),
-        DefaultPromptSegment::Empty,
-    );
-
-    let history_path = if args.pepper {
-        home_dir().unwrap().join(".pepper_history")
-    } else {
-        home_dir().unwrap().join(".chili_history")
-    };
-
-    let history = Box::new(
-        FileBackedHistory::with_file(1000, history_path).expect("Failed to create history file"),
-    );
-    let hinter = DefaultHinter::default().with_style(Style::new().italic().fg(Color::DarkGray));
-
-    let completion_menu = Box::new(ColumnarMenu::default().with_name("completion_menu"));
-
-    let mut keybindings = default_emacs_keybindings();
-    keybindings.add_binding(
-        KeyModifiers::NONE,
-        KeyCode::Tab,
-        ReedlineEvent::UntilFound(vec![
-            ReedlineEvent::Menu("completion_menu".to_string()),
-            ReedlineEvent::MenuNext,
-        ]),
-    );
-    let edit_mode = Emacs::new(keybindings);
-
-    let mut line_editor = Reedline::create()
-        .with_history(history)
-        .with_hinter(Box::new(hinter))
-        .with_completer(Box::new(completer))
-        .with_menu(ReedlineMenu::EngineCompleter(completion_menu))
-        .with_edit_mode(Box::new(edit_mode))
-        .with_validator(Box::new(ChiliValidator {
-            use_chili_syntax: !args.pepper,
-        }))
-        .with_external_printer(printer)
-        .use_bracketed_paste(true);
-
-    let state_input = Arc::clone(&arc_state);
-    let src_path = if args.pepper { "repl.pep" } else { "repl.chi" };
-    let rl_handle = thread::spawn(move || {
-        let state = state_input;
+    if is_headless {
+        info!(
+            "headless mode: REPL disabled, IPC server active on port {}",
+            args.port
+        );
+        // Park the main thread indefinitely; the IPC server thread handles all traffic.
+        // A process supervisor (systemd, supervisord) can send SIGTERM to stop.
+        // Loop to guard against spurious wakeups from thread::park().
         loop {
-            let readline = line_editor.read_line(&prompt);
-            match readline {
-                Ok(Signal::Success(line)) => {
-                    if line.is_empty() {
-                        continue;
-                    }
-                    if line == "\\\\" {
-                        break;
-                    }
-                    let start = Instant::now();
-                    let nodes = match state.parse("", &line) {
-                        Ok(nodes) => nodes,
-                        Err(e) => {
-                            eprintln!("\x1b[1;91m{}\x1b[0m", e);
+            std::thread::park();
+        }
+    } else {
+        let completer = ChiliCompleter::new(&arc_state);
+
+        let prompt_prefix = if args.pepper {
+            "p ".to_owned()
+        } else {
+            "c ".to_owned()
+        };
+        let prompt = DefaultPrompt::new(
+            DefaultPromptSegment::Basic(prompt_prefix),
+            DefaultPromptSegment::Empty,
+        );
+
+        let history_path = if args.pepper {
+            home_dir().unwrap().join(".pepper_history")
+        } else {
+            home_dir().unwrap().join(".chili_history")
+        };
+
+        let history = Box::new(
+            FileBackedHistory::with_file(1000, history_path)
+                .expect("Failed to create history file"),
+        );
+        let hinter = DefaultHinter::default().with_style(Style::new().italic().fg(Color::DarkGray));
+
+        let completion_menu = Box::new(ColumnarMenu::default().with_name("completion_menu"));
+
+        let mut keybindings = default_emacs_keybindings();
+        keybindings.add_binding(
+            KeyModifiers::NONE,
+            KeyCode::Tab,
+            ReedlineEvent::UntilFound(vec![
+                ReedlineEvent::Menu("completion_menu".to_string()),
+                ReedlineEvent::MenuNext,
+            ]),
+        );
+        let edit_mode = Emacs::new(keybindings);
+
+        let mut line_editor = Reedline::create()
+            .with_history(history)
+            .with_hinter(Box::new(hinter))
+            .with_completer(Box::new(completer))
+            .with_menu(ReedlineMenu::EngineCompleter(completion_menu))
+            .with_edit_mode(Box::new(edit_mode))
+            .with_validator(Box::new(ChiliValidator {
+                use_chili_syntax: !args.pepper,
+            }))
+            .use_bracketed_paste(true);
+        // Wire the external printer only when logging to the REPL (no --dir flag).
+        // When --dir is set, logs go to a file and we skip the printer.
+        if let Some(p) = printer {
+            line_editor = line_editor.with_external_printer(p);
+        }
+
+        let state_input = Arc::clone(&arc_state);
+        let src_path = if args.pepper { "repl.pep" } else { "repl.chi" };
+        let rl_handle = thread::spawn(move || {
+            let state = state_input;
+            loop {
+                let readline = line_editor.read_line(&prompt);
+                match readline {
+                    Ok(Signal::Success(line)) => {
+                        if line.is_empty() {
                             continue;
                         }
-                    };
-                    let state = state.clone();
-                    let handle = thread::spawn(move || {
-                        match state.eval_ast(nodes.clone(), src_path, &line) {
-                            Ok(any) => {
-                                println!("\x1b[1;90m{:?}\x1b[0m", start.elapsed());
-                                println!("{}", any);
-                            }
-                            Err(e) => eprintln!("\x1b[1;91m{}\x1b[0m", e),
+                        if line == "\\\\" {
+                            break;
                         }
-                    });
-                    handle.join().unwrap_or_else(|e| {
-                        eprintln!("\x1b[1;91m{:?}\x1b[0m", e);
-                    });
-                }
-                Ok(Signal::CtrlC) => {
-                    println!("CTRL-C");
-                    break;
-                }
-                Ok(Signal::CtrlD) => {
-                    println!("CTRL-D");
-                    break;
-                }
-                Err(err) => {
-                    println!("Error: {:?}", err);
-                    break;
+                        let start = Instant::now();
+                        let nodes = match state.parse("", &line) {
+                            Ok(nodes) => nodes,
+                            Err(e) => {
+                                eprintln!("\x1b[1;91m{}\x1b[0m", e);
+                                continue;
+                            }
+                        };
+                        let state = state.clone();
+                        let handle = thread::spawn(move || {
+                            match state.eval_ast(nodes.clone(), src_path, &line) {
+                                Ok(any) => {
+                                    println!("\x1b[1;90m{:?}\x1b[0m", start.elapsed());
+                                    println!("{}", any);
+                                }
+                                Err(e) => eprintln!("\x1b[1;91m{}\x1b[0m", e),
+                            }
+                        });
+                        handle.join().unwrap_or_else(|e| {
+                            eprintln!("\x1b[1;91m{:?}\x1b[0m", e);
+                        });
+                    }
+                    Ok(Signal::CtrlC) => {
+                        println!("CTRL-C");
+                        break;
+                    }
+                    Ok(Signal::CtrlD) => {
+                        println!("CTRL-D");
+                        break;
+                    }
+                    Err(err) => {
+                        println!("Error: {:?}", err);
+                        break;
+                    }
                 }
             }
-        }
-    });
+        });
 
-    match rl_handle.join() {
-        Ok(_) => {
-            info!("Exiting ...");
-        }
-        Err(e) => {
-            error!("Exiting ... error {:?}", e);
-            exit(1);
+        match rl_handle.join() {
+            Ok(_) => {
+                info!("Exiting ...");
+            }
+            Err(e) => {
+                error!("Exiting ... error {:?}", e);
+                exit(1);
+            }
         }
     }
     Ok(())

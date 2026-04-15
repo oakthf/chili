@@ -1,5 +1,5 @@
 [workspace.package]
-version = "0.7.4"
+version = "0.7.5"
 edition = "2024"
 authors = ["The Chili Authors <purple-chili@hotmail.com>"]
 description = "chili"
@@ -37,9 +37,9 @@ opt-level = 1
 
 [profile.release]
 strip = true
-opt-level = "z"
-lto = true
-codegen-units = 6
+opt-level = 3 # polars compute kernels rely heavily on LLVM auto-vectorization which "z" disables.
+lto = "fat"   # cross-crate inlining across polars boundary
+codegen-units = 1
 # panic = "abort"
 
 [patch.crates-io.polars-core]

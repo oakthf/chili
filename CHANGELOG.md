@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.5] - 2026-04-15
+
+### Added
+
+- Criterion benchmarks for `chili-op` (`load_par_df`, `scan`, `eval`, `write_partition`)
+- Integration tests covering HDB partition loading + selection (R1 regression guard)
+- `write_partition_native` helper for writing partitions programmatically
+
+### Changed
+
+- `load_par_df` now builds table metadata in parallel and shrinks the write-lock window
+- `write_partition` optimizes parquet output for partition pruning by tuning row group size when sorting
+
+### Fixed
+
+- Partition discovery is now deterministic (partition vectors are sorted before binary-search-based lookups)
+- Partition predicate handling now scans all where-clauses and preserves non-partition filters (fixes missing rows for `where date=...` / ranges)
+
 ## [0.7.4] - 2026-03-21
 
 ### Added

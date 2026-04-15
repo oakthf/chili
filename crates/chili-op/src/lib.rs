@@ -13,3 +13,4 @@ mod sys;
 mod temporal;
 mod util;
 pub use built_in_fn::BUILT_IN_FN;
+pub use io::write_partition_native;
