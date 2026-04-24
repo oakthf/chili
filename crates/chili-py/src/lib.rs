@@ -8,7 +8,7 @@ use chili_op::BUILT_IN_FN;
 use indexmap::IndexMap;
 use polars::frame::DataFrame;
 use pyo3::create_exception;
-use pyo3::exceptions::{PyException, PyRuntimeError};
+use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::{PyDate, PyDateTime, PyDelta, PyDict, PyList, PyTime, PyTuple, PyTzInfo};
 use pyo3_polars::{PyDataFrame, PySeries};

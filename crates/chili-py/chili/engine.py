@@ -1,44 +1,44 @@
 """Python bindings for Chili's ``EngineState`` (Rust ``chili-core``)."""
 
-from typing import Optional
+from typing import Any, Optional, Tuple
 
 import polars as pl
 
-from .engine_state import EngineState
+from .engine_state import EngineState  # type: ignore
 
 
 class ChiliEngine:
     def __init__(self, debug: bool = False, lazy: bool = False, pepper: bool = False):
         self.engine = EngineState(debug, lazy, pepper)
 
-    def eval(self, source: str) -> any:
+    def eval(self, source: str) -> Any:
         return self.engine.eval(source)
 
-    def get_var(self, id: str) -> any:
+    def get_var(self, id: str) -> Any:
         return self.engine.get_var(id)
 
-    def set_var(self, id: str, value: any):
+    def set_var(self, id: str, value: Any):
         return self.engine.set_var(id, value)
 
     def has_var(self, id: str) -> bool:
         return self.engine.has_var(id)
 
-    def del_var(self, id: str) -> any:
+    def del_var(self, id: str) -> Any:
         return self.engine.del_var(id)
 
-    def import_source_path(self, relative: str, path: str) -> any:
+    def import_source_path(self, relative: str, path: str) -> Any:
         return self.engine.import_source_path(relative, path)
 
-    def set_source(self, path: str, src: str) -> any:
+    def set_source(self, path: str, src: str) -> Any:
         return self.engine.set_source(path, src)
 
-    def get_source(self, index: int) -> tuple[str, str]:
+    def get_source(self, index: int) -> Tuple[str, str]:
         return self.engine.get_source(index)
 
     def shutdown(self):
         self.engine.shutdown()
 
-    def get_displayed_vars(self) -> dict[str, any]:
+    def get_displayed_vars(self) -> dict[str, Any]:
         return self.engine.get_displayed_vars()
 
     def list_vars(self, pattern: str) -> list[str]:
@@ -50,7 +50,7 @@ class ChiliEngine:
     def get_tick_count(self) -> int:
         return self.engine.get_tick_count()
 
-    def tick(self, inc: int) -> any:
+    def tick(self, inc: int) -> Any:
         return self.engine.tick(inc)
 
     def is_lazy_mode(self) -> bool:
@@ -59,7 +59,7 @@ class ChiliEngine:
     def is_repl_use_chili_syntax(self) -> bool:
         return self.engine.is_repl_use_chili_syntax()
 
-    def fn_call(self, func: str, args: list[any]) -> any:
+    def fn_call(self, func: str, args: list[Any]) -> Any:
         return self.engine.fn_call(func, args)
 
     def write_partitioned_df(
@@ -74,7 +74,7 @@ class ChiliEngine:
         return self.fn_call("wpar", [df, hdb_path, table, date, sort_columns, rechunk])
 
     def load_partitioned_df(self, hdb_path: str) -> None:
-        return self.fn_call("load", [hdb_path])
+        self.fn_call("load", [hdb_path])
 
     def clear_partitioned_df(self) -> None:
         return self.engine.clear_par_df()

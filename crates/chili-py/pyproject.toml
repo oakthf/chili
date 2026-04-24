@@ -3,7 +3,7 @@ requires = ["maturin>=1.9,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "chili"
+name = "chili-sauce"
 version = "0.8.0"
 description = "Python bindings for the Chili engine (EngineState)"
 requires-python = ">=3.10"

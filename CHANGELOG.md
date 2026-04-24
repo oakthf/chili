@@ -6,7 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
-- Python bindings for the Chili engine
+- Python bindings "chili-sauce" for the Chili engine
 
 ## [0.7.5] - 2026-04-15
 
