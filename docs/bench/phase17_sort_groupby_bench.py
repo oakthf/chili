@@ -10,7 +10,7 @@ Phase 10's sort_columns). Tests three group_by strategies:
 Also tests with and without projection pushdown (select only symbol + close vs all cols).
 
 Run from the chili repo root:
-    cd ~/Desktop/repos/chili
+    cd ~/code/chili
     uv run --directory crates/chili-py python docs/bench/phase17_sort_groupby_bench.py
 """
 from __future__ import annotations

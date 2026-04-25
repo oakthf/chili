@@ -1,10 +1,10 @@
 # mdata → chili test corpus
 
 These test files are copied verbatim from
-`~/Desktop/repos/mdata/tests/server/` at commit `64603d2` on the
+`~/code/mdata/tests/server/` at commit `64603d2` on the
 `claude` branch (2026-04-11).
 
-License: MIT — see `~/Desktop/repos/mdata/LICENSE`.
+License: MIT — see `~/code/mdata/LICENSE`.
 
 ## Files
 
@@ -54,8 +54,8 @@ Re-copy from mdata whenever:
 
 1. mdata's chili-backed code changes (new pepper pattern, new column
    scale, new schema field) — detected by a diff in
-   `~/Desktop/repos/mdata/src/mdata/server/chili_gateway.py` or
-   `~/Desktop/repos/mdata/src/mdata/vendor/schemas.py`.
+   `~/code/mdata/src/mdata/server/chili_gateway.py` or
+   `~/code/mdata/src/mdata/vendor/schemas.py`.
 2. A chili phase lands that changes query semantics (Phase 9 column
    pruning, Phase 10 symbol pushdown, Phase 13 errors, Phase 15
    quantized) — re-run mdata's tests locally first, then re-copy to

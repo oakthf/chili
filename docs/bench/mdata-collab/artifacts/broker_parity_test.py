@@ -97,7 +97,7 @@ if TYPE_CHECKING:
 # Module-level asyncio marker. Explicit so the file runs cleanly even when
 # pytest's rootdir resolves to a project whose config does NOT set
 # ``asyncio_mode = "auto"`` — e.g. when chili's Claude runs this file from
-# ``~/Desktop/repos/chili`` via ``uv run pytest`` in chili's own venv.
+# ``~/code/chili`` via ``uv run pytest`` in chili's own venv.
 pytestmark = pytest.mark.asyncio
 
 
@@ -502,14 +502,14 @@ async def test_callback_thread_safety(
 # ---------------------------------------------------------------------------
 
 # Authored by mdata's Claude, 2026-04-11.
-# Source of truth: ~/Desktop/repos/mdata/src/mdata/feed/pubsub.py
+# Source of truth: ~/code/mdata/src/mdata/feed/pubsub.py
 # Acceptance target for chili Phase 16 (WL 1.1). Any test that passes
 # against "unix" must pass against "chili" with zero code changes
 # on the test side. If chili's semantics diverge, chili must fix
 # its implementation, not this test.
 #
 # When chili Phase 16 lands:
-#   1. Rebuild chili-py: cd ~/Desktop/repos/chili/crates/chili-py
+#   1. Rebuild chili-py: cd ~/code/chili/crates/chili-py
 #                         && uv run maturin develop --release
 #   2. Add ChiliBrokerPublisher / ChiliBrokerSubscriber to
 #      src/mdata/feed/pubsub.py (see docs/plans/chili_broker_swap_in.md).

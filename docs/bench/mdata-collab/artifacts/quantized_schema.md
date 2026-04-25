@@ -129,7 +129,7 @@ input is an Int64 partition at scale 1_000_000. Chili's round-trip
 test should:
 
 1. Load one of mdata's fixture partitions (e.g.
-   `~/Desktop/repos/chili/docs/bench/mdata-collab/fixtures/ohlcv_1d_2024.07.15_0000`).
+   `~/code/chili/docs/bench/mdata-collab/fixtures/ohlcv_1d_2024.07.15_0000`).
 2. **ohlcv_1d fixtures are Int64 as of 2026-04-11** — mdata's
    `scripts/quantize_hdb.py --execute` ran against the live `ohlcv_1d`
    HDB on 2026-04-11 and this directory's fixtures were refreshed

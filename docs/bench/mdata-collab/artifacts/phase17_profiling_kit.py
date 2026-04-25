@@ -5,18 +5,18 @@ a two-pass approach (symbol-column scan → targeted partition read) can beat
 the current full-scan + hash-groupby baseline.
 
 Results go into:
-    ~/Desktop/repos/chili/docs/bench/mdata-collab/benchmarks/phase17_profile_results.json
+    ~/code/chili/docs/bench/mdata-collab/benchmarks/phase17_profile_results.json
 
 Chili's Claude will read that file to decide whether to implement the
 optimization in Rust.
 
 Usage (from mdata repo root):
     # Step 1: rebuild chili-py if needed
-    cd ~/Desktop/repos/chili/crates/chili-py && uv run maturin develop --release
-    cd ~/Desktop/repos/mdata
+    cd ~/code/chili/crates/chili-py && uv run maturin develop --release
+    cd ~/code/mdata
 
     # Step 2: run this script
-    uv run python ~/Desktop/repos/chili/docs/bench/mdata-collab/artifacts/phase17_profiling_kit.py
+    uv run python ~/code/chili/docs/bench/mdata-collab/artifacts/phase17_profiling_kit.py
 
     # Step 3: results are written automatically to the drop zone
 """
@@ -46,7 +46,7 @@ DATE_START = "2024.01.02"
 DATE_END = "2024.12.31"
 
 # Output location (chili collab drop zone)
-OUTPUT_DIR = Path.home() / "Desktop/repos/chili/docs/bench/mdata-collab/benchmarks"
+OUTPUT_DIR = Path.home() / "code/chili/docs/bench/mdata-collab/benchmarks"
 OUTPUT_FILE = OUTPUT_DIR / "phase17_profile_results.json"
 
 N_ITERS = 10
