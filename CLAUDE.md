@@ -2,11 +2,19 @@
 
 Agent-facing map of this repo. Keep terse: this file is loaded into every conversation.
 
+## Project background
+
+This is a local working fork of [purple-chili/chili](https://purple-chili.github.io/) — a kdb+/q-style analytics engine on Polars + Arrow + Parquet, with `chili` (JS-like) and `pepper` (q-like) syntaxes. It reuses `kola` for q interop. Upstream is the canonical project; this repo exists because a separate user project, **mdata** (`~/code/mdata`, market-data warehouse, ~11K US equities), needed Python bindings, GIL-released eval, quantization, pub/sub, `overwrite_partition`, etc. that upstream lacked. The chili author has since picked up a subset of those changes (see `project_chili_background.md` memory for the commit range and table). See `README.md` for performance numbers and feature list.
+
 ## Branch policy (load-bearing)
 
-**Commit only to the `claude` branch.** The user owns `main` and uploads fresh state there directly. Never commit to `main`, never `git push origin main`, never `git merge claude` into `main`. If a change must reach `main`, surface it and let the user merge.
+**No remote.** `git remote -v` is empty by design. Never `git push`, `git pull`, `git fetch`, or re-add a remote. The user manually uploads upstream state into the local `main` branch.
 
-Before every commit run `git rev-parse --abbrev-ref HEAD` and confirm it is `claude`. If absent locally, create from current HEAD: `git checkout -b claude`.
+**`main` = upstream / external contributors.** Never commit to it, never check it out to make changes. Treat it as read-only.
+
+**`claude` = the only branch you commit to.** Verify with `git rev-parse --abbrev-ref HEAD` before every commit; if absent locally, `git checkout -b claude`.
+
+**Merging:** Only `main → claude` (when the user uploads new upstream state). Never `claude → main`, never any other direction. If a change must reach `main`, surface it and let the user handle it.
 
 ## Pre-commit gate
 
@@ -89,8 +97,10 @@ Project-specific guidance lives in user memory; global rules are in `~/.claude/r
 
 ## Project state
 
-- Branch: `claude` (working) / `main` (user-owned upload target).
+- Branch: `claude` (working) / `main` (read-only upstream mirror, user-managed).
+- Remote: none. Do not re-add.
+- Upstream-adopted range on `main`: `e9092ce..b0f20e5` (LRU parse cache, chili-py PyO3 bindings, Criterion benches, manylinux 2_28). See `project_chili_background.md` memory for the per-commit table.
 - Date pin: 2026-04-26.
-- Version: workspace `0.7.4` (`Cargo.toml`), `chili-pie 0.7.4` (`pyproject.toml`).
+- Version: workspace `0.7.4` (`Cargo.toml`), `chili-pie 0.7.4` (`pyproject.toml`). Upstream renamed Python package to `chili-sauce` — reconcile only when asked.
 - Test count baseline: 35 Python + 165 Rust = 200.
 - Open items: see `~/.claude/projects/-Users-oakadmin-code-chili/memory/MEMORY.md`.
