@@ -99,8 +99,9 @@ Project-specific guidance lives in user memory; global rules are in `~/.claude/r
 
 - Branch: `claude` (working) / `main` (read-only upstream mirror, user-managed).
 - Remote: none. Do not re-add.
-- Upstream-adopted range on `main`: `e9092ce..b0f20e5` (LRU parse cache, chili-py PyO3 bindings, Criterion benches, manylinux 2_28). See `project_chili_background.md` memory for the per-commit table.
+- Upstream `e9092ce..b0f20e5` selectively merged into `claude` on 2026-04-26: bytes-removal FFI rewrite (eval/wpar/overwrite_partition/tick_upd return/accept `pl.DataFrame` directly via `pyo3_polars::PyDataFrame`), pyo3 0.22→0.27, pyo3-polars 0.26, `chrono` workspace dep, `.gitignore` additions. **NOT** merged: `chili-pie → chili-sauce` rename, manylinux 2_28 GH workflows, low-level `PyEngineState`. See `project_chili_background.md`.
 - Date pin: 2026-04-26.
-- Version: workspace `0.7.4` (`Cargo.toml`), `chili-pie 0.7.4` (`pyproject.toml`). Upstream renamed Python package to `chili-sauce` — reconcile only when asked.
-- Test count baseline: 35 Python + 165 Rust = 200.
+- Versions: workspace `0.7.4`, `chili-pie 0.7.5` (Python wheel, post-merge bump). Upstream calls his package `chili-sauce 0.8.0`; we stay on `chili-pie` because mdata/nxcar import it.
+- Python min: 3.10 (raised from 3.7 by pyo3 0.27 abi3-py310).
+- Test count: 44 Python (35 baseline + 9 new direct-DataFrame regression tests) + 165 Rust = 209.
 - Open items: see `~/.claude/projects/-Users-oakadmin-code-chili/memory/MEMORY.md`.

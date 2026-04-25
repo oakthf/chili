@@ -1,25 +1,30 @@
 // Use mimalloc as the global allocator for the chili-py cdylib. Same
 // rationale as chili-bin: polars' allocation pattern fits mimalloc much
-// better than the system allocator. Safe because the cdylib has a single
-// linked allocator boundary and pyo3 does not mandate any particular
-// allocator on the Rust side.
+// better than the system allocator.
 use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
 use std::collections::HashMap;
-use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, LazyLock, Mutex};
 
+use chili_core::constant::{NS_IN_DAY, UNIX_EPOCH_DAY};
 use chili_core::{EngineState, Func, SpicyError, SpicyObj, SpicyResult, Stack};
 use chili_op::{write_partition_py, BUILT_IN_FN};
-use polars::io::{SerReader, SerWriter};
-use polars::io::ipc::{IpcStreamReader, IpcStreamWriter};
-use polars::prelude::DataFrame;
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Timelike, Utc};
+use indexmap::IndexMap;
+use polars::frame::DataFrame;
+use polars::io::ipc::IpcStreamWriter;
+use polars::io::SerWriter;
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
-use pyo3::PyTypeInfo;
+use pyo3::types::{
+    PyBool, PyBytes, PyDate, PyDateTime, PyDelta, PyDict, PyFloat, PyInt, PyList, PyString, PyTime,
+    PyTuple, PyTzInfo,
+};
+use pyo3::{create_exception, intern};
+use pyo3_polars::{PyDataFrame, PySeries};
 
 // ---------------------------------------------------------------------------
 // Phase 13 — Structured exception hierarchy (WL 3.3)
@@ -34,26 +39,20 @@ use pyo3::PyTypeInfo;
 //       print("missing date predicate")
 //   except chili.PepperParseError:
 //       print("syntax error")
-//   except chili.ChiliError:
-//       print("some other chili error")
-//   except RuntimeError:
-//       print("still caught by RuntimeError too")
 // ---------------------------------------------------------------------------
-pyo3::create_exception!(chili, ChiliError, pyo3::exceptions::PyRuntimeError);
-pyo3::create_exception!(chili, PepperParseError, ChiliError);
-pyo3::create_exception!(chili, PepperEvalError, ChiliError);
-pyo3::create_exception!(chili, PartitionError, ChiliError);
-pyo3::create_exception!(chili, TypeMismatchError, ChiliError);
-pyo3::create_exception!(chili, NameError, ChiliError);
-pyo3::create_exception!(chili, SerializationError, ChiliError);
+create_exception!(chili, ChiliError, PyRuntimeError);
+create_exception!(chili, PepperParseError, ChiliError);
+create_exception!(chili, PepperEvalError, ChiliError);
+create_exception!(chili, PartitionError, ChiliError);
+create_exception!(chili, TypeMismatchError, ChiliError);
+create_exception!(chili, NameError, ChiliError);
+create_exception!(chili, SerializationError, ChiliError);
 
 /// Map a SpicyError to the most specific Python exception class.
 fn spicy_err_to_py(err: &SpicyError) -> PyErr {
     match err {
         SpicyError::ParserErr(_) => PepperParseError::new_err(err.to_string()),
         SpicyError::EvalErr(msg) => {
-            // Detect the specific "requires 'ByDate' condition" pattern so
-            // callers can catch PartitionError separately.
             if msg.contains("condition for this partitioned") {
                 PartitionError::new_err(err.to_string())
             } else {
@@ -74,8 +73,7 @@ fn spicy_err_to_py(err: &SpicyError) -> PyErr {
 
 // ---------------------------------------------------------------------------
 // Log built-in functions (mirrors chili-bin/src/logger.rs)
-// These register `.log.info` / `.log.warn` / `.log.debug` / `.log.error`
-// in the engine so Chili scripts can call them.
+// Register `.log.info` / `.log.warn` / `.log.debug` / `.log.error`.
 // ---------------------------------------------------------------------------
 
 fn log_str(args: &[&SpicyObj]) -> SpicyResult<String> {
@@ -137,49 +135,190 @@ static LOG_FN: LazyLock<HashMap<String, Func>> = LazyLock::new(|| {
 });
 
 // ---------------------------------------------------------------------------
-// Arrow IPC bridge helpers
+// SpicyObj <-> Python conversion helpers (ported from upstream bf9fa14).
+// These replace the previous Arrow-IPC bytes round-trip path entirely.
+// `pyo3_polars::PyDataFrame` is a zero-copy wrapper over polars::DataFrame —
+// no serialization, no buffer copy.
 // ---------------------------------------------------------------------------
 
-fn df_to_ipc_bytes(df: &mut DataFrame) -> PyResult<Vec<u8>> {
-    let mut buf = Vec::new();
-    IpcStreamWriter::new(&mut buf)
-        .finish(df)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
-    Ok(buf)
+fn unwrap_return(mut o: SpicyObj) -> SpicyObj {
+    while let SpicyObj::Return(inner) = o {
+        o = *inner;
+    }
+    o
 }
 
-fn ipc_bytes_to_df(bytes: &[u8]) -> PyResult<DataFrame> {
-    IpcStreamReader::new(Cursor::new(bytes))
-        .finish()
-        .map_err(|e: polars::error::PolarsError| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string())
-        })
-}
-
-// ---------------------------------------------------------------------------
-// Parse a date string "YYYY.MM.DD" into days since Unix epoch (1970-01-01).
-// SpicyObj::Date(i32) stores days since 1970-01-01.
-// ---------------------------------------------------------------------------
-
-fn parse_date_str(date_str: &str) -> PyResult<i32> {
-    use chrono::NaiveDate;
-    let date = NaiveDate::parse_from_str(date_str, "%Y.%m.%d").map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-            "invalid date '{}': {} (expected YYYY.MM.DD)",
-            date_str, e
+#[allow(dead_code)] // reserved for future set_var / fn_call surface
+fn spicy_from_py_bound(any: &Bound<'_, PyAny>) -> PyResult<SpicyObj> {
+    if any.is_instance_of::<PyBool>() {
+        Ok(SpicyObj::Boolean(any.extract::<bool>()?))
+    } else if any.is_instance_of::<PyInt>() {
+        Ok(SpicyObj::I64(any.extract::<i64>()?))
+    } else if any.is_instance_of::<PyFloat>() {
+        Ok(SpicyObj::F64(any.extract::<f64>()?))
+    } else if any.is_instance_of::<PyString>() {
+        Ok(SpicyObj::Symbol(any.extract::<String>()?))
+    } else if any.is_instance_of::<PyBytes>() {
+        let bytes = any.cast::<PyBytes>()?;
+        Ok(SpicyObj::String(String::from_utf8(bytes.as_bytes().to_vec())?))
+    } else if any.hasattr(intern!(any.py(), "_s"))? {
+        let series = any.extract::<PySeries>()?.into();
+        Ok(SpicyObj::Series(series))
+    } else if any.hasattr(intern!(any.py(), "_df"))? {
+        let df = any.extract::<PyDataFrame>()?.into();
+        Ok(SpicyObj::DataFrame(df))
+    } else if any.is_none() {
+        Ok(SpicyObj::Null)
+    } else if any.is_instance_of::<PyDateTime>() {
+        let datetime: DateTime<Utc> = any.extract()?;
+        Ok(SpicyObj::Timestamp(datetime.timestamp_nanos_opt().unwrap_or(0)))
+    } else if any.is_instance_of::<PyDate>() {
+        let dt: NaiveDate = any.cast::<PyDate>()?.extract()?;
+        Ok(SpicyObj::Date(dt.num_days_from_ce() - UNIX_EPOCH_DAY))
+    } else if any.is_instance_of::<PyTime>() {
+        let dt: NaiveTime = any.cast::<PyTime>()?.extract()?;
+        Ok(SpicyObj::Time(
+            dt.nanosecond() as i64 + dt.num_seconds_from_midnight() as i64 * 1_000_000_000,
         ))
-    })?;
+    } else if any.is_instance_of::<PyDelta>() {
+        let delta: Duration = any.extract()?;
+        Ok(SpicyObj::Duration(delta.num_nanoseconds().unwrap_or(0)))
+    } else if any.is_instance_of::<PyDict>() {
+        let py_dict = any.cast::<PyDict>()?;
+        let mut dict = IndexMap::with_capacity(py_dict.len());
+        for (k, v) in py_dict.into_iter() {
+            let k = k.extract::<String>().map_err(|_| {
+                ChiliError::new_err(format!("Requires str as key, got {:?}", k.get_type()))
+            })?;
+            dict.insert(k, spicy_from_py_bound(&v)?);
+        }
+        Ok(SpicyObj::Dict(dict))
+    } else if any.is_instance_of::<PyList>() {
+        let py_list = any.cast::<PyList>()?;
+        let mut k_list = Vec::with_capacity(py_list.len());
+        for py_any in py_list {
+            k_list.push(spicy_from_py_bound(&py_any)?);
+        }
+        Ok(SpicyObj::MixedList(k_list))
+    } else if any.is_instance_of::<PyTuple>() {
+        let py_tuple = any.cast::<PyTuple>()?;
+        let mut k_tuple = Vec::with_capacity(py_tuple.len());
+        for py_any in py_tuple {
+            k_tuple.push(spicy_from_py_bound(&py_any)?);
+        }
+        Ok(SpicyObj::MixedList(k_tuple))
+    } else {
+        Err(ChiliError::new_err(format!(
+            "Unsupported Python type for chili conversion: {}",
+            any.get_type().name()?
+        )))
+    }
+}
+
+fn spicy_to_py(py: Python<'_>, obj: SpicyObj) -> PyResult<Py<PyAny>> {
+    let obj = unwrap_return(obj);
+    match obj {
+        SpicyObj::Null => Ok(py.None()),
+        SpicyObj::Boolean(v) => Ok(v.into_pyobject(py)?.to_owned().into_any().unbind()),
+        SpicyObj::U8(v) => Ok(v.into_pyobject(py)?.into_any().unbind()),
+        SpicyObj::I16(v) => Ok(v.into_pyobject(py)?.into_any().unbind()),
+        SpicyObj::I32(v) => Ok(v.into_pyobject(py)?.into_any().unbind()),
+        SpicyObj::I64(v) => Ok(v.into_pyobject(py)?.into_any().unbind()),
+        SpicyObj::F32(v) => Ok(v.into_pyobject(py)?.into_any().unbind()),
+        SpicyObj::F64(v) => Ok(v.into_pyobject(py)?.into_any().unbind()),
+        // String → Python bytes (matches q-style char vector semantics).
+        SpicyObj::String(v) => Ok(v.as_bytes().into_pyobject(py)?.into_any().unbind()),
+        SpicyObj::Symbol(v) => Ok(v.into_pyobject(py)?.into_any().unbind()),
+        SpicyObj::Date(v) => Ok(PyDate::from_timestamp(py, v as i64 * 86400)?
+            .into_any()
+            .unbind()),
+        SpicyObj::Time(v) => {
+            let seconds = v / 1_000_000_000;
+            let microseconds = v % 1_000_000_000 / 1_000;
+            let hour = seconds / 3600 % 24;
+            let minute = seconds / 60 % 60;
+            let second = seconds % 60;
+            let utc = PyTzInfo::utc(py)?.to_owned();
+            Ok(PyTime::new(
+                py,
+                hour as u8,
+                minute as u8,
+                second as u8,
+                microseconds as u32,
+                Some(&utc),
+            )?
+            .into_any()
+            .unbind())
+        }
+        SpicyObj::Datetime(v) => {
+            let utc = PyTzInfo::utc(py)?.to_owned();
+            Ok(
+                PyDateTime::from_timestamp(py, v as f64 / 1000.0, Some(&utc))?
+                    .into_any()
+                    .unbind(),
+            )
+        }
+        SpicyObj::Timestamp(v) => {
+            let utc = PyTzInfo::utc(py)?.to_owned();
+            Ok(
+                PyDateTime::from_timestamp(py, v as f64 / 1_000_000_000.0, Some(&utc))?
+                    .into_any()
+                    .unbind(),
+            )
+        }
+        SpicyObj::Duration(v) => {
+            let abs_v = v.abs();
+            let sign = if v < 0 { -1 } else { 1 };
+            let days = abs_v / NS_IN_DAY;
+            let seconds = abs_v / 1_000_000_000 % 86400;
+            let microseconds = v % 1_000_000_000 / 1_000;
+            Ok(PyDelta::new(
+                py,
+                days as i32 * sign,
+                seconds as i32,
+                microseconds as i32,
+                false,
+            )?
+            .into_any()
+            .unbind())
+        }
+        SpicyObj::MixedList(items) => {
+            let mut list = Vec::with_capacity(items.len());
+            for it in items {
+                list.push(spicy_to_py(py, it)?);
+            }
+            Ok(PyList::new(py, &list)?.into_any().unbind())
+        }
+        SpicyObj::Dict(map) => {
+            let d = PyDict::new(py);
+            for (k, v) in map {
+                d.set_item(k, spicy_to_py(py, v)?)?;
+            }
+            Ok(d.into_any().unbind())
+        }
+        // Zero-copy: pyo3_polars::PyDataFrame wraps the polars DataFrame
+        // directly as a Python object — no IPC round-trip.
+        SpicyObj::DataFrame(df) => Ok(PyDataFrame(df).into_pyobject(py)?.into_any().unbind()),
+        SpicyObj::Series(s) => Ok(PySeries(s).into_pyobject(py)?.into_any().unbind()),
+        SpicyObj::Err(msg) => Err(ChiliError::new_err(msg)),
+        other => Ok(other.to_string().into_pyobject(py)?.into_any().unbind()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Date helper: parse "YYYY.MM.DD" → days since Unix epoch.
+// ---------------------------------------------------------------------------
+
+fn parse_date_to_days(date_str: &str) -> Result<i32, String> {
+    let parsed = NaiveDate::parse_from_str(date_str, "%Y.%m.%d")
+        .map_err(|e| format!("invalid date '{}': {} (expected YYYY.MM.DD)", date_str, e))?;
     let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-    i32::try_from((date - epoch).num_days()).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyOverflowError, _>(format!(
-            "date '{}' is out of i32 range: {}",
-            date_str, e
-        ))
-    })
+    i32::try_from((parsed - epoch).num_days())
+        .map_err(|e| format!("date '{}' is out of i32 range: {}", date_str, e))
 }
 
 // ---------------------------------------------------------------------------
-// Engine Python class
+// Engine Python class — high-level wrapper around chili_core::EngineState.
 // ---------------------------------------------------------------------------
 
 #[pyclass]
@@ -191,24 +330,13 @@ struct Engine {
     /// don't survive fork). Raise a clear error instead of deadlocking.
     init_pid: u32,
     // Phase 16 — in-process broker pub/sub state.
-    // py_subscribers: topic → list of bounded channel senders (capacity 1024).
-    // Each subscribe() call spawns a background thread per topic that reads
-    // from the receiver and invokes the Python callback with GIL.
     py_subscribers: Arc<Mutex<HashMap<String, Vec<mpsc::SyncSender<(String, i64, Vec<u8>)>>>>>,
-    // topic_seq: per-topic monotonic sequence counter, starting at 0 (first
-    // publish returns 1).
     topic_seq: Arc<Mutex<HashMap<String, i64>>>,
-    // broker_shutdown: signals subscriber threads to stop processing
-    // messages. Set to true in Drop so threads don't drain large queues
-    // after the engine is deallocated.
     broker_shutdown: Arc<AtomicBool>,
 }
 
 impl Drop for Engine {
     fn drop(&mut self) {
-        // Signal subscriber threads to exit immediately instead of
-        // draining their entire message queue — avoids multi-second
-        // GIL contention when large queues are buffered.
         self.broker_shutdown.store(true, Ordering::Relaxed);
     }
 }
@@ -237,14 +365,9 @@ impl Engine {
         }
     }
 
-    /// Phase 11 — check that we're still in the same process that created
-    /// the engine. If not, we were forked, and the Rust state (RwLock,
-    /// Arc, thread-local allocator pools) is in an undefined state.
-    /// Raise a clear error instead of deadlocking (which is the symptom
-    /// mdata's Sprint D hit with ProcessPoolExecutor on macOS).
     fn check_fork(&self) -> PyResult<()> {
         if std::process::id() != self.init_pid {
-            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            return Err(PyRuntimeError::new_err(format!(
                 "chili.Engine is not fork-safe after construction. \
                  This engine was created in PID {} but is now running in PID {}. \
                  Use multiprocessing.get_context('spawn') instead of 'fork', \
@@ -256,221 +379,152 @@ impl Engine {
         Ok(())
     }
 
-    /// Phase 12 — clear all loaded partitioned DataFrames from the engine.
-    /// The engine stays alive; use `load()` to re-load afterwards.
     fn unload(&self) -> PyResult<()> {
         self.check_fork()?;
-        self.state
-            .clear_par_df()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+        self.state.clear_par_df().map_err(|e| spicy_err_to_py(&e))
     }
 
-    /// Phase 12 — return the number of loaded partitioned tables.
     fn table_count(&self) -> usize {
         self.state.par_df_count()
     }
 
-    /// Phase 14 — return the parse cache size.
     fn parse_cache_len(&self) -> usize {
         self.state.parse_cache_len()
     }
 
-    /// Phase 14 — return the polars query plan WITHOUT executing the query.
-    ///
-    /// Creates a temporary lazy-mode engine, loads the same HDB, evaluates
-    /// the query to build a LazyFrame, then returns describe_plan() instead
-    /// of collecting. The HDB path must be passed from the Python wrapper.
     fn query_plan(&self, py: Python<'_>, query: &str, hdb_path: &str) -> PyResult<String> {
         self.check_fork()?;
         let query = query.to_owned();
         let hdb_path = hdb_path.to_owned();
-        py.allow_threads(move || -> Result<String, String> {
-            // Create a lazy-mode engine that returns LazyFrame instead of
-            // collecting. Re-loads partition metadata from disk (~5ms).
+        py.detach(move || -> Result<String, String> {
             let plan_state = EngineState::new(false, true, true);
             plan_state.register_fn(&LOG_FN);
             plan_state.register_fn(&BUILT_IN_FN);
-            plan_state
-                .load_par_df(&hdb_path)
-                .map_err(|e| e.to_string())?;
+            plan_state.load_par_df(&hdb_path).map_err(|e| e.to_string())?;
             let query_obj = SpicyObj::String(query);
             let mut stack = Stack::new(None, 0, 0, "");
             let obj = plan_state
                 .eval(&mut stack, &query_obj, "plan.chi")
                 .map_err(|e| e.to_string())?;
             match obj {
-                SpicyObj::LazyFrame(lf) => {
-                    lf.describe_plan().map_err(|e| e.to_string())
-                }
-                SpicyObj::DataFrame(_) => {
-                    Err("query collected eagerly — lazy plan not available \
-                         for this query shape"
-                        .into())
-                }
+                SpicyObj::LazyFrame(lf) => lf.describe_plan().map_err(|e| e.to_string()),
+                SpicyObj::DataFrame(_) => Err(
+                    "query collected eagerly — lazy plan not available for this query shape"
+                        .into(),
+                ),
                 other => Err(format!(
                     "query returned {}, expected LazyFrame",
                     other.get_type_name()
                 )),
             }
         })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
+        .map_err(PyRuntimeError::new_err)
     }
 
-    /// Load a partitioned HDB directory.
-    ///
-    /// Releases the GIL for the duration of the load (which can take up to
-    /// hundreds of milliseconds for large HDBs and includes filesystem
-    /// traversal + parquet schema reads). Other Python threads can run
-    /// during this time.
     fn load(&self, py: Python<'_>, path: &str) -> PyResult<()> {
         self.check_fork()?;
         let state = Arc::clone(&self.state);
         let path = path.to_owned();
-        py.allow_threads(move || {
-            state
-                .load_par_df(&path)
-                .map_err(|e| spicy_err_to_py(&e))
-        })
+        py.detach(move || state.load_par_df(&path).map_err(|e| spicy_err_to_py(&e)))
     }
 
-    /// Evaluate a Chili/pepper query; returns Arrow IPC bytes.
-    /// The Python wrapper in __init__.py converts these to a polars DataFrame.
+    /// Evaluate a Chili/pepper query and return the result as a Python
+    /// object. polars DataFrames are returned via `pyo3_polars::PyDataFrame`
+    /// (zero-copy — no Arrow IPC round-trip).
     ///
-    /// **Proposal A — GIL release.**
-    ///
-    /// The entire query body (parse → eval → polars collect → Arrow IPC
-    /// serialization) is wrapped in `py.allow_threads`, so other Python
-    /// threads can make progress while this query runs. `EngineState` is
-    /// already `Send + Sync` (it's used across `thread::spawn` boundaries
-    /// in `chili-bin/src/main.rs`'s IPC server), and nothing inside the
-    /// closure touches Python objects, so the closure body is fully
-    /// `Send`.
-    ///
-    /// Result of releasing the GIL: an N-thread Python client driving the
-    /// same engine in parallel scales close to N× throughput, bounded by
-    /// the polars rayon pool size, instead of being serialized at 0.92×
-    /// (worse than serial — measured pre-Phase-6).
-    fn eval<'py>(&self, py: Python<'py>, query: &str) -> PyResult<Bound<'py, PyBytes>> {
+    /// **GIL release.** The entire query body (parse → eval → collect)
+    /// runs inside `py.allow_threads`. Other Python threads can drive
+    /// independent queries on the same engine in parallel; concurrent
+    /// throughput scales linearly with thread count up to the polars
+    /// rayon pool size. Pre-bytes-removal: 8-thread = 6.10× single-thread.
+    fn eval(&self, py: Python<'_>, query: &str) -> PyResult<Py<PyAny>> {
         self.check_fork()?;
         let state = Arc::clone(&self.state);
         let query = query.to_owned();
-        // Run the entire query OFF the GIL, carrying the full SpicyError
-        // out of the closure so we can map it to a structured Python
-        // exception on the GIL side (Phase 13).
-        let bytes = py.allow_threads(move || -> Result<Vec<u8>, SpicyError> {
-            let query_obj = SpicyObj::String(query);
-            let mut stack = Stack::new(None, 0, 0, "");
-            let obj = state
-                .eval(&mut stack, &query_obj, "py.chi")?;
-            let mut df = match obj {
-                SpicyObj::DataFrame(df) => df,
-                SpicyObj::LazyFrame(lf) => lf
-                    .collect()
-                    .map_err(|e| SpicyError::EvalErr(e.to_string()))?,
-                other => {
-                    return Err(SpicyError::EvalErr(format!(
-                        "eval returned {}, expected DataFrame",
-                        other.get_type_name()
-                    )));
-                }
-            };
-            df_to_ipc_bytes_unchecked(&mut df)
-                .map_err(|e| SpicyError::Err(e.to_string()))
-        })
-        .map_err(|e| spicy_err_to_py(&e))?;
-        Ok(PyBytes::new_bound(py, &bytes))
+        // Run parse+eval+collect off the GIL. Materialize LazyFrames into
+        // DataFrames inside the closure so the GIL-free phase covers the
+        // expensive part. Carry the SpicyObj out and convert to Python on
+        // the GIL side (pyo3 conversions need the GIL).
+        let obj = py
+            .detach(move || -> Result<SpicyObj, SpicyError> {
+                let query_obj = SpicyObj::String(query);
+                let mut stack = Stack::new(None, 0, 0, "");
+                let obj = state.eval(&mut stack, &query_obj, "py.chi")?;
+                // Eagerly collect LazyFrames inside the closure so the
+                // collect cost stays off the GIL.
+                let obj = match obj {
+                    SpicyObj::LazyFrame(lf) => SpicyObj::DataFrame(
+                        lf.collect().map_err(|e| SpicyError::EvalErr(e.to_string()))?,
+                    ),
+                    other => other,
+                };
+                Ok(obj)
+            })
+            .map_err(|e| spicy_err_to_py(&e))?;
+        spicy_to_py(py, obj)
     }
 
-    /// Write a polars DataFrame (passed as Arrow IPC bytes) to an HDB partition.
+    /// Append a polars DataFrame as a new partition shard.
     ///
-    /// ipc_bytes : Arrow IPC stream bytes produced by polars DataFrame.write_ipc()
-    /// hdb_path  : root HDB directory (must exist and be canonicalisable)
-    /// table     : table name
-    /// date      : partition date string "YYYY.MM.DD"
-    /// sort_columns : optional list of column names to sort the partition
-    ///                by before writing. When non-empty, also forces a small
-    ///                row_group_size (16384) so polars can later prune row
-    ///                groups via parquet column statistics on the sort key
-    ///                — required for `where symbol=X` queries to skip
-    ///                row groups (Phase 10 / WL 2.2).
+    /// hdb_path : root HDB directory (must exist)
+    /// table    : table name
+    /// date     : partition date "YYYY.MM.DD"
+    /// sort_columns : optional sort keys for the partition. When non-empty,
+    ///                forces a small parquet row_group_size (16384) so
+    ///                later queries can prune row groups via column stats
+    ///                — required for `where symbol=X` to skip row groups
+    ///                (Phase 10 / WL 2.2).
     ///
-    /// Proposal A — releases the GIL for the IPC bytes → DataFrame parse,
-    /// the date parse, and the partition write. mdata's batch ingest paths
-    /// can issue many `wpar` calls concurrently from a Python thread pool
-    /// without GIL contention.
-    #[pyo3(signature = (ipc_bytes, hdb_path, table, date, sort_columns=Vec::new()))]
+    /// GIL is released for the entire write.
+    #[pyo3(signature = (df, hdb_path, table, date, sort_columns=Vec::new()))]
     fn wpar(
         &self,
         py: Python<'_>,
-        ipc_bytes: &[u8],
+        df: PyDataFrame,
         hdb_path: &str,
         table: &str,
         date: &str,
         sort_columns: Vec<String>,
     ) -> PyResult<i64> {
         self.check_fork()?;
-        // Copy bytes off the &[u8] reference because the closure must own
-        // its captured data (the Python buffer is released as soon as the
-        // GIL is released).
-        let ipc_bytes = ipc_bytes.to_vec();
+        let frame: DataFrame = df.into();
         let hdb_path = hdb_path.to_owned();
         let table = table.to_owned();
         let date = date.to_owned();
-        // Mirror Engine::eval: return String from the closure and re-wrap as
-        // PyErr after re-acquiring the GIL. Avoids constructing PyErr inside
-        // allow_threads — PyO3 docs warn that this is technically unsound for
-        // exception types whose construction calls back into Python.
-        let n = py.allow_threads(move || -> Result<i64, String> {
-            let df = polars::io::ipc::IpcStreamReader::new(std::io::Cursor::new(&ipc_bytes))
-                .finish()
-                .map_err(|e: polars::error::PolarsError| e.to_string())?;
-            // Inline parse_date_str without the PyResult wrapping.
-            let days = {
-                use chrono::NaiveDate;
-                let parsed = NaiveDate::parse_from_str(&date, "%Y.%m.%d")
-                    .map_err(|e| format!("invalid date '{}': {} (expected YYYY.MM.DD)", date, e))?;
-                let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-                i32::try_from((parsed - epoch).num_days())
-                    .map_err(|e| format!("date '{}' is out of i32 range: {}", date, e))?
-            };
+        py.detach(move || -> Result<i64, String> {
+            let days = parse_date_to_days(&date)?;
             let date_obj = SpicyObj::Date(days);
             let sort_refs: Vec<&str> = sort_columns.iter().map(|s| s.as_str()).collect();
-            let obj = write_partition_py(&hdb_path, &date_obj, &table, &df, &sort_refs, false)
+            let obj = write_partition_py(&hdb_path, &date_obj, &table, &frame, &sort_refs, false)
                 .map_err(|e| e.to_string())?;
             Ok(match obj {
                 SpicyObj::I64(n) => n,
                 _ => 0,
             })
         })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
-        Ok(n)
+        .map_err(PyRuntimeError::new_err)
     }
 
-    /// Overwrite an existing partition, replacing all shards with a single
-    /// fresh `_0000` file. Unlike `wpar` (which appends new shards), this
-    /// deletes any existing `{date}_*` files first.
-    ///
-    /// Use for in-place HDB rewrites (e.g., dtype migrations, re-sorting).
-    /// Schema validation is still enforced — the new DataFrame must match
-    /// the table's schema sentinel.
-    #[pyo3(signature = (ipc_bytes, hdb_path, table, date, sort_columns=Vec::new()))]
+    /// Replace an existing partition with the given DataFrame.
+    /// Deletes all `{date}_*` shard files first, then writes a single
+    /// fresh `_0000` file. Use for in-place HDB rewrites (dtype
+    /// migrations, re-sorting, etc.). Schema validation is enforced.
+    #[pyo3(signature = (df, hdb_path, table, date, sort_columns=Vec::new()))]
     fn overwrite_partition(
         &self,
         py: Python<'_>,
-        ipc_bytes: &[u8],
+        df: PyDataFrame,
         hdb_path: &str,
         table: &str,
         date: &str,
         sort_columns: Vec<String>,
     ) -> PyResult<i64> {
         self.check_fork()?;
-        let ipc_bytes = ipc_bytes.to_vec();
+        let frame: DataFrame = df.into();
         let hdb_path = hdb_path.to_owned();
         let table = table.to_owned();
         let date = date.to_owned();
-        let n = py.allow_threads(move || -> Result<i64, String> {
-            // Parse date to get the partition filename prefix
-            use chrono::{Datelike, NaiveDate};
+        py.detach(move || -> Result<i64, String> {
             let parsed = NaiveDate::parse_from_str(&date, "%Y.%m.%d")
                 .map_err(|e| format!("invalid date '{}': {}", date, e))?;
             let par_str = format!(
@@ -479,13 +533,9 @@ impl Engine {
                 parsed.month(),
                 parsed.day()
             );
-
-            // Resolve the table directory
             let canon_hdb = std::fs::canonicalize(&hdb_path)
                 .map_err(|e| format!("cannot resolve '{}': {}", hdb_path, e))?;
             let table_dir = canon_hdb.join(&table);
-
-            // Delete existing shards: {table_dir}/{date}_*
             if table_dir.exists() {
                 let prefix = format!("{}_", par_str);
                 for entry in std::fs::read_dir(&table_dir)
@@ -501,25 +551,16 @@ impl Engine {
                     }
                 }
             }
-
-            // Write fresh _0000 via write_partition_py (no existing shards)
-            let df =
-                polars::io::ipc::IpcStreamReader::new(std::io::Cursor::new(
-                    &ipc_bytes,
-                ))
-                .finish()
-                .map_err(|e: polars::error::PolarsError| e.to_string())?;
             let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
             let days = i32::try_from((parsed - epoch).num_days())
                 .map_err(|e| format!("date out of range: {}", e))?;
             let date_obj = SpicyObj::Date(days);
-            let sort_refs: Vec<&str> =
-                sort_columns.iter().map(|s| s.as_str()).collect();
+            let sort_refs: Vec<&str> = sort_columns.iter().map(|s| s.as_str()).collect();
             let obj = write_partition_py(
                 &canon_hdb.to_string_lossy(),
                 &date_obj,
                 &table,
-                &df,
+                &frame,
                 &sort_refs,
                 false,
             )
@@ -529,57 +570,44 @@ impl Engine {
                 _ => 0,
             })
         })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
-        Ok(n)
+        .map_err(PyRuntimeError::new_err)
     }
 
     // -----------------------------------------------------------------------
     // Phase 16 — Broker bindings (WL 1.1)
     //
-    // In-process pub/sub: publish() fans out Arrow IPC bytes to Python
-    // callbacks registered via subscribe(). Each subscriber gets a bounded
-    // mpsc channel (capacity 1024); a background thread per subscription
-    // reads from the channel and invokes the callback with GIL acquired.
-    //
-    // This is independent of the Rust broker's IPC dispatch path (which
-    // writes to TCP socket handles for inter-process communication).
+    // In-process pub/sub: publish() fans out IPC bytes to Python callbacks
+    // registered via subscribe(). Each subscriber gets a bounded mpsc
+    // channel (capacity 1024); a background thread per subscription reads
+    // from the channel and invokes the callback with the GIL held.
     // -----------------------------------------------------------------------
 
-    /// Publish Arrow IPC bytes to all in-process subscribers of a topic.
-    ///
-    /// Returns the publisher-side monotonic sequence number (per-topic,
-    /// starting at 1). Backpressure: if a subscriber's channel is full
-    /// (1024 pending messages), the message is silently dropped for that
-    /// subscriber.
+    /// Publish raw IPC bytes to all subscribers of a topic.
+    /// Returns the publisher-side per-topic monotonic sequence number
+    /// (starts at 1). Backpressure: full channels drop the message.
     fn publish(&self, topic: &str, ipc_bytes: &[u8]) -> PyResult<i64> {
         self.check_fork()?;
         let seq = {
             let mut seqs = self.topic_seq.lock().map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "topic_seq lock poisoned: {}", e
-                ))
+                PyRuntimeError::new_err(format!("topic_seq lock poisoned: {}", e))
             })?;
             let entry = seqs.entry(topic.to_owned()).or_insert(0);
             *entry += 1;
             *entry
         };
         let subs = self.py_subscribers.lock().map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "py_subscribers lock poisoned: {}", e
-            ))
+            PyRuntimeError::new_err(format!("py_subscribers lock poisoned: {}", e))
         })?;
         if let Some(senders) = subs.get(topic) {
             let bytes = ipc_bytes.to_vec();
             for sender in senders {
-                // Backpressure: try_send drops the message if the channel
-                // is full. The parity test allows receiving fewer than
-                // published frames under pressure.
                 if let Err(mpsc::TrySendError::Full(_)) =
                     sender.try_send((topic.to_owned(), seq, bytes.clone()))
                 {
                     log::warn!(
                         "chili broker: subscriber backpressure on topic={}, dropping seq={}",
-                        topic, seq
+                        topic,
+                        seq
                     );
                 }
             }
@@ -587,15 +615,26 @@ impl Engine {
         Ok(seq)
     }
 
+    /// Serialize a polars DataFrame and publish to subscribers.
+    /// Faster than the Python wrapper's `df.write_ipc_stream()` path —
+    /// serialization happens Rust-side with the GIL released.
+    fn tick_upd(&self, py: Python<'_>, table: &str, df: PyDataFrame) -> PyResult<i64> {
+        self.check_fork()?;
+        let mut frame: DataFrame = df.into();
+        let bytes = py
+            .detach(move || -> Result<Vec<u8>, polars::error::PolarsError> {
+                let mut buf = Vec::new();
+                IpcStreamWriter::new(&mut buf).finish(&mut frame)?;
+                Ok(buf)
+            })
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        self.publish(table, &bytes)
+    }
+
     /// Register a Python callback for published frames on the given topics.
-    ///
-    /// `callback(topic: str, seq: int, ipc_bytes: bytes)` is invoked from
-    /// a background Rust thread for each published frame. The callback
-    /// must not block — dispatch to an asyncio event loop or queue.
-    ///
+    /// Callback signature: `callback(topic: str, seq: int, ipc_bytes: bytes)`.
     /// Each call spawns one background thread per topic that acquires the
-    /// GIL only when invoking the callback. This avoids deadlocks with
-    /// concurrent `eval()` calls that release the GIL (Phase 6).
+    /// GIL only when invoking the callback.
     fn subscribe(
         &self,
         py: Python<'_>,
@@ -604,69 +643,47 @@ impl Engine {
     ) -> PyResult<()> {
         self.check_fork()?;
         let mut subs = self.py_subscribers.lock().map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "py_subscribers lock poisoned: {}", e
-            ))
+            PyRuntimeError::new_err(format!("py_subscribers lock poisoned: {}", e))
         })?;
         for topic in topics {
-            let (sender, receiver) =
-                mpsc::sync_channel::<(String, i64, Vec<u8>)>(1024);
+            let (sender, receiver) = mpsc::sync_channel::<(String, i64, Vec<u8>)>(1024);
             let cb = callback.clone_ref(py);
             let shutdown = Arc::clone(&self.broker_shutdown);
             std::thread::Builder::new()
                 .name(format!("chili-broker-{}", topic))
                 .spawn(move || {
                     while let Ok((topic, seq, bytes)) = receiver.recv() {
-                        // Exit immediately if the engine has been dropped —
-                        // don't drain the queue and thrash the GIL.
                         if shutdown.load(Ordering::Relaxed) {
                             break;
                         }
-                        Python::with_gil(|py| {
-                            let py_bytes = PyBytes::new_bound(py, &bytes);
-                            if let Err(e) =
-                                cb.call1(py, (topic.as_str(), seq, py_bytes))
-                            {
-                                log::warn!(
-                                    "chili broker callback error: {}", e
-                                );
+                        Python::attach(|py| {
+                            let py_bytes = PyBytes::new(py, &bytes);
+                            if let Err(e) = cb.call1(py, (topic.as_str(), seq, py_bytes)) {
+                                log::warn!("chili broker callback error: {}", e);
                             }
                         });
                     }
-                    // Channel closed — drop callback with GIL for safe
-                    // Py_DECREF.
-                    Python::with_gil(|_py| drop(cb));
+                    Python::attach(|_py| drop(cb));
                 })
                 .map_err(|e| {
-                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                        "failed to spawn broker thread: {}", e
-                    ))
+                    PyRuntimeError::new_err(format!("failed to spawn broker thread: {}", e))
                 })?;
             subs.entry(topic).or_default().push(sender);
         }
         Ok(())
     }
 
-    /// Broadcast an end-of-day signal to ALL in-process subscribers.
-    ///
-    /// Sends `("__eod__", 0, eod_message)` to every subscriber channel
-    /// regardless of topic. Subscribers can detect EOD by checking
-    /// `topic == "__eod__"` in their callback.
+    /// Broadcast end-of-day signal to ALL subscribers regardless of topic.
+    /// Subscribers see `topic == "__eod__"` in their callback.
     fn broker_eod(&self, eod_message: &[u8]) -> PyResult<()> {
         self.check_fork()?;
         let subs = self.py_subscribers.lock().map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "py_subscribers lock poisoned: {}", e
-            ))
+            PyRuntimeError::new_err(format!("py_subscribers lock poisoned: {}", e))
         })?;
         let bytes = eod_message.to_vec();
         for senders in subs.values() {
             for sender in senders {
-                let _ = sender.try_send((
-                    "__eod__".to_owned(),
-                    0,
-                    bytes.clone(),
-                ));
+                let _ = sender.try_send(("__eod__".to_owned(), 0, bytes.clone()));
             }
         }
         Ok(())
@@ -674,31 +691,21 @@ impl Engine {
 }
 
 // ---------------------------------------------------------------------------
-// Helper that mirrors df_to_ipc_bytes but returns PolarsError so it can be
-// called outside the GIL. The caller maps the error to a String and re-wraps
-// it as a PyErr after re-acquiring the GIL.
-// ---------------------------------------------------------------------------
-fn df_to_ipc_bytes_unchecked(df: &mut DataFrame) -> Result<Vec<u8>, polars::error::PolarsError> {
-    let mut buf = Vec::new();
-    IpcStreamWriter::new(&mut buf).finish(df)?;
-    Ok(buf)
-}
-
-// ---------------------------------------------------------------------------
 // Module entry point
 // ---------------------------------------------------------------------------
 
 #[pymodule]
-fn chili(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn chili(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    let py = m.py();
     m.add_class::<Engine>()?;
     // Phase 13 — register structured exception types so Python callers
     // can `from chili import ChiliError, PepperParseError, ...`
-    m.add("ChiliError", ChiliError::type_object_bound(py))?;
-    m.add("PepperParseError", PepperParseError::type_object_bound(py))?;
-    m.add("PepperEvalError", PepperEvalError::type_object_bound(py))?;
-    m.add("PartitionError", PartitionError::type_object_bound(py))?;
-    m.add("TypeMismatchError", TypeMismatchError::type_object_bound(py))?;
-    m.add("NameError", NameError::type_object_bound(py))?;
-    m.add("SerializationError", SerializationError::type_object_bound(py))?;
+    m.add("ChiliError", py.get_type::<ChiliError>())?;
+    m.add("PepperParseError", py.get_type::<PepperParseError>())?;
+    m.add("PepperEvalError", py.get_type::<PepperEvalError>())?;
+    m.add("PartitionError", py.get_type::<PartitionError>())?;
+    m.add("TypeMismatchError", py.get_type::<TypeMismatchError>())?;
+    m.add("NameError", py.get_type::<NameError>())?;
+    m.add("SerializationError", py.get_type::<SerializationError>())?;
     Ok(())
 }

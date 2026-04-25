@@ -16,5 +16,9 @@ crates/chili-py/uv.lock
 __pycache__/
 *.pyc
 
+# Python tooling caches (cherry-picked from upstream b0f20e5)
+.mypy_cache/
+.venv/
+
 # Regenerable HDB fixtures — kept out of git (see memory: project_chili_wishlist_collaboration)
 docs/bench/mdata-collab/fixtures/

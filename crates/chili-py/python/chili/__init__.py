@@ -1,21 +1,39 @@
 """
 Chili Python bindings — high-performance kdb+/q-compatible analytical engine.
 
-The Rust extension (compiled via maturin) is imported as the `chili` native
-module placed alongside this package by maturin's `python-source = "python"`
-layout.  This wrapper handles the Arrow IPC bridge: DataFrames cross the
-Rust/Python boundary as Arrow IPC bytes and are deserialized into polars
-DataFrames here in Python.
+The Rust extension (compiled via maturin) is imported as the `chili.chili`
+native module placed alongside this package by maturin's
+``python-source = "python"`` layout. As of 0.7.5 the engine returns polars
+DataFrames directly through ``pyo3_polars::PyDataFrame`` — there is no
+Arrow IPC round-trip on either eval results or partition writes.
 """
 from __future__ import annotations
 
-import io
 from typing import Optional
 
-import pyarrow as pa
 import polars as pl
 
-from .chili import Engine as _Engine  # the PyO3 Rust class
+from .chili import (  # the PyO3 Rust extension
+    Engine as _Engine,
+    ChiliError,
+    PepperParseError,
+    PepperEvalError,
+    PartitionError,
+    TypeMismatchError,
+    NameError,
+    SerializationError,
+)
+
+__all__ = [
+    "Engine",
+    "ChiliError",
+    "PepperParseError",
+    "PepperEvalError",
+    "PartitionError",
+    "TypeMismatchError",
+    "NameError",
+    "SerializationError",
+]
 
 
 class Engine:
@@ -48,36 +66,16 @@ class Engine:
     # -----------------------------------------------------------------------
 
     def close(self) -> None:
-        """Release the Rust engine state immediately.
-
-        After calling ``close()``, any subsequent call to ``eval()``,
-        ``wpar()``, ``load()``, or ``reload()`` will raise ``AttributeError``.
-        Use this instead of relying on Python's garbage collector to reclaim
-        the Rust state — especially in migration scripts and tests where
-        deterministic cleanup matters.
-        """
+        """Release the Rust engine state immediately."""
         self._inner = None  # type: ignore[assignment]
         self._hdb_path = None
 
     def unload(self) -> None:
-        """Drop all loaded partitions but keep the engine alive.
-
-        Subsequent queries on partitioned tables will error with "table not
-        found" until ``load()`` or ``reload()`` is called again. The HDB
-        path is preserved so ``reload()`` still works after ``unload()``.
-        Non-partitioned variables, registered functions, and IPC connections
-        are unaffected.
-        """
+        """Drop all loaded partitions but keep the engine alive."""
         self._inner.unload()
 
     def reload(self) -> None:
-        """Re-scan the most recently loaded HDB directory for new partitions.
-
-        Equivalent to ``engine.unload(); engine.load(original_path)`` but
-        preserves the engine's other state (variables, functions, connections).
-
-        Raises ``RuntimeError`` if no HDB directory has been loaded yet.
-        """
+        """Re-scan the most recently loaded HDB directory for new partitions."""
         if self._hdb_path is None:
             raise RuntimeError(
                 "No HDB directory has been loaded yet. Call engine.load(path) first."
@@ -98,15 +96,7 @@ class Engine:
     # -----------------------------------------------------------------------
 
     def stats(self) -> dict:
-        """Return engine-internal metrics as a Python dict.
-
-        Keys:
-          - ``partitions_loaded``: number of loaded partitioned tables
-          - ``parse_cache_len``: entries in the LRU parse cache
-          - ``hdb_path``: last-loaded HDB path (or None)
-
-        Useful for Prometheus metric export or health checks.
-        """
+        """Return engine-internal metrics as a Python dict."""
         return {
             "partitions_loaded": self._inner.table_count(),
             "parse_cache_len": self._inner.parse_cache_len(),
@@ -120,23 +110,10 @@ class Engine:
     def set_column_scale(self, table: str, column: str, factor: int) -> None:
         """Register a dequantization scale factor for a column.
 
-        After calling ``set_column_scale("ohlcv_1d", "close", 1_000_000)``,
-        any ``engine.eval()`` result from ``ohlcv_1d`` that contains a
-        ``close`` column of type ``Int64`` will be automatically cast to
-        ``Float64`` and divided by ``factor`` before returning the DataFrame.
-
-        This is the mdata "Option B" approach: set the scale once at engine
-        construction time and forget about it. No query-string changes needed.
-
-        Parameters
-        ----------
-        table : str
-            Table name (e.g. ``"ohlcv_1d"``).
-        column : str
-            Column name (e.g. ``"close"``).
-        factor : int
-            Scale factor (e.g. ``1_000_000``). The stored Int64 value is
-            divided by this factor to produce Float64.
+        After ``set_column_scale("ohlcv_1d", "close", 1_000_000)``, any
+        ``eval()`` result from ``ohlcv_1d`` containing an ``Int64`` ``close``
+        column is auto-cast to ``Float64`` and divided by ``factor`` before
+        being returned.
         """
         self._column_scales.setdefault(table, {})[column] = factor
 
@@ -145,24 +122,7 @@ class Engine:
         self._column_scales.clear()
 
     def query_plan(self, query: str) -> str:
-        """Return the polars query plan for a pepper query WITHOUT executing it.
-
-        Equivalent to DuckDB's ``EXPLAIN``. Shows the logical plan that
-        polars' lazy engine would execute, including predicate pushdown,
-        projection pushdown, and partition pruning.
-
-        Requires an HDB to be loaded (the plan depends on partition layout).
-
-        Parameters
-        ----------
-        query : str
-            A pepper query string.
-
-        Returns
-        -------
-        str
-            The human-readable logical plan.
-        """
+        """Return the polars query plan for a pepper query WITHOUT executing it."""
         if self._hdb_path is None:
             raise RuntimeError(
                 "No HDB directory has been loaded yet. Call engine.load(path) first."
@@ -170,41 +130,23 @@ class Engine:
         return self._inner.query_plan(query, self._hdb_path)
 
     def eval(self, query: str) -> pl.DataFrame:
-        """
-        Evaluate a Chili/pepper query and return the result as a polars DataFrame.
+        """Evaluate a Chili/pepper query.
+
+        Returns the result directly as a ``polars.DataFrame`` via
+        ``pyo3_polars::PyDataFrame`` — zero-copy, no Arrow IPC round-trip.
 
         If ``set_column_scale()`` has been called for any columns in the
-        result table, those columns are automatically dequantized from
-        Int64 to Float64 before returning (Phase 15 / WL 3.4).
-
-        Parameters
-        ----------
-        query : str
-            A Chili or pepper (kdb+/q) query string, e.g.
-            ``"select from ohlcv_1d where date=2024.01.02d"``
-
-        Returns
-        -------
-        polars.DataFrame
+        result, those columns are auto-dequantized from Int64 to Float64
+        before returning.
         """
-        ipc_bytes: bytes = self._inner.eval(query)
-        df = pl.from_arrow(pa.ipc.open_stream(io.BytesIO(ipc_bytes)).read_all())
-        return self._apply_column_scales(df, query)
+        result = self._inner.eval(query)
+        if isinstance(result, pl.DataFrame):
+            return self._apply_column_scales(result, query)
+        return result  # type: ignore[return-value]
 
     def _apply_column_scales(self, df: pl.DataFrame, query: str) -> pl.DataFrame:
-        """Phase 15 — auto-dequantize columns registered via set_column_scale.
-
-        For each (table, column, factor) that matches a column in `df`,
-        cast the column from Int64 to Float64 and divide by factor.
-        Only applies if the column dtype is Int64 (Float64 columns are
-        left untouched, which handles the case where the HDB hasn't been
-        quantized yet).
-        """
         if not self._column_scales:
             return df
-        # Try to detect the table name from the query (best-effort: look
-        # for "from <table>" pattern). If the query doesn't match any
-        # registered table, no scaling is applied.
         for table, scales in self._column_scales.items():
             if f"from {table}" not in query:
                 continue
@@ -216,7 +158,7 @@ class Engine:
                     )
             if cast_exprs:
                 df = df.with_columns(cast_exprs)  # pyright: ignore[reportUnknownMemberType]
-            break  # Only match the first table
+            break
         return df
 
     # -----------------------------------------------------------------------
@@ -224,79 +166,34 @@ class Engine:
     # -----------------------------------------------------------------------
 
     def publish(self, topic: str, ipc_bytes: bytes) -> int:
-        """Publish Arrow IPC bytes to all subscribers of a topic.
+        """Publish raw IPC bytes to all subscribers of a topic.
 
-        Parameters
-        ----------
-        topic : str
-            Topic name (typically the table name, e.g. ``"trade"``).
-        ipc_bytes : bytes
-            Arrow IPC stream bytes (e.g. from ``df.write_ipc_stream()``).
-
-        Returns
-        -------
-        int
-            Publisher-side monotonic sequence number for this topic,
-            starting at 1.
+        Returns the publisher-side per-topic monotonic sequence number.
+        Use this when you already have IPC-encoded bytes (e.g. forwarded
+        from a network broker). For a polars DataFrame, prefer
+        ``tick_upd()`` — it serializes Rust-side with the GIL released.
         """
         return self._inner.publish(topic, ipc_bytes)
 
-    def subscribe(
-        self,
-        topics: list[str],
-        callback,
-    ) -> None:
+    def subscribe(self, topics: list[str], callback) -> None:
         """Register a callback invoked for each published batch.
 
-        Parameters
-        ----------
-        topics : list[str]
-            Topics to subscribe to.
-        callback : Callable[[str, int, bytes], None]
-            Called with ``(topic, seq, ipc_bytes)`` from a background
-            Rust thread. Must not block — dispatch to an event loop
-            or queue for async processing.
+        ``callback(topic: str, seq: int, ipc_bytes: bytes)`` is invoked
+        from a background Rust thread. Must not block — dispatch to an
+        event loop or queue.
         """
         self._inner.subscribe(topics, callback)
 
     def tick_upd(self, table: str, df: pl.DataFrame) -> int:
         """Serialize a DataFrame and publish to subscribers.
 
-        Convenience method combining Arrow IPC serialization with
-        ``publish()``. Equivalent to::
-
-            buf = io.BytesIO()
-            df.write_ipc_stream(buf)
-            engine.publish(table, buf.getvalue())
-
-        Parameters
-        ----------
-        table : str
-            Topic/table name.
-        df : polars.DataFrame
-            Data to publish.
-
-        Returns
-        -------
-        int
-            Sequence number.
+        Serialization runs Rust-side with the GIL released — faster than
+        calling ``df.write_ipc_stream()`` + ``publish()`` from Python.
         """
-        buf = io.BytesIO()
-        df.write_ipc_stream(buf)
-        return self._inner.publish(table, buf.getvalue())
+        return self._inner.tick_upd(table, df)
 
     def broker_eod(self, eod_message: bytes) -> None:
-        """Broadcast end-of-day signal to all subscribers.
-
-        Sends ``("__eod__", 0, eod_message)`` to every subscriber
-        callback regardless of topic. Subscribers can detect EOD by
-        checking ``topic == "__eod__"`` in their callback.
-
-        Parameters
-        ----------
-        eod_message : bytes
-            Payload bytes sent with the EOD signal.
-        """
+        """Broadcast end-of-day signal to all subscribers."""
         self._inner.broker_eod(eod_message)
 
     def overwrite_partition(
@@ -310,35 +207,12 @@ class Engine:
         """Replace an existing partition with new data.
 
         Unlike ``wpar()`` (which appends a new shard ``_0001``, ``_0002``,
-        etc.), this deletes all existing shard files for the given date and
-        writes a single fresh ``_0000`` file.
-
-        Use for in-place HDB rewrites (dtype migrations, re-sorting, etc.).
-        Schema validation is still enforced.
-
-        Parameters
-        ----------
-        df : polars.DataFrame
-            Replacement data.
-        hdb_path : str
-            Root HDB directory path.
-        table : str
-            Table name.
-        date : str
-            Partition date in ``YYYY.MM.DD`` format.
-        sort_columns : list[str], optional
-            Column names to sort by before writing.
-
-        Returns
-        -------
-        int
-            Bytes written.
+        etc.), this deletes all existing shard files for the given date
+        and writes a single fresh ``_0000`` file. Use for in-place HDB
+        rewrites (dtype migrations, re-sorting, etc.).
         """
-        buf = io.BytesIO()
-        df.write_ipc_stream(buf)
-        ipc_bytes = buf.getvalue()
         return self._inner.overwrite_partition(
-            ipc_bytes, hdb_path, table, date, sort_columns or []
+            df, hdb_path, table, date, sort_columns or []
         )
 
     def wpar(
@@ -349,44 +223,14 @@ class Engine:
         date: str,
         sort_columns: Optional[list[str]] = None,
     ) -> int:
+        """Append a polars DataFrame as a new partition shard.
+
+        ``sort_columns`` (recommended ``["symbol"]`` for analytical
+        workloads): when set, chili sorts the partition and forces a
+        small parquet ``row_group_size`` (16384) so later queries can
+        prune row groups via column min/max statistics — required for
+        ``where symbol=X`` to skip row groups (Phase 10 / WL 2.2).
         """
-        Write a DataFrame as a partition to an HDB directory.
-
-        Parameters
-        ----------
-        df : polars.DataFrame
-            Data to write.
-        hdb_path : str
-            Root HDB directory path (must already exist).
-        table : str
-            Table name (subdirectory under hdb_path).
-        date : str
-            Partition date in ``YYYY.MM.DD`` format, e.g. ``"2024.01.02"``.
-        sort_columns : list[str], optional
-            Column names to sort the partition by before writing. When set,
-            chili also forces a small parquet ``row_group_size`` (16384) so
-            polars can later prune row groups via column min/max statistics.
-
-            Required for ``where symbol=X`` queries to skip parquet row
-            groups (Phase 10 / mdata wishlist 2.2). Without this option,
-            chili writes a single row group per partition and ``where``
-            predicates are applied at the row level after the full partition
-            is read into memory.
-
-            Recommended setting for symbol-filtered analytical workloads:
-            ``sort_columns=["symbol"]``.
-
-        Returns
-        -------
-        int
-            Bytes written.
-        """
-        buf = io.BytesIO()
-        # write_ipc_stream produces Arrow IPC stream format, which IpcStreamReader
-        # on the Rust side expects. Do NOT use write_ipc() — that writes the IPC
-        # file format (with footer) which IpcStreamReader cannot parse.
-        df.write_ipc_stream(buf)
-        ipc_bytes = buf.getvalue()
         return self._inner.wpar(
-            ipc_bytes, hdb_path, table, date, sort_columns or []
+            df, hdb_path, table, date, sort_columns or []
         )

@@ -4,10 +4,46 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.7.5] — 2026-04-26
+
+### Changed (chili-py FFI — major perf rework, breaking)
+
+- **Removed Arrow IPC bytes round-trip from `eval()`.** `Engine.eval()` now returns `polars.DataFrame` directly via `pyo3_polars::PyDataFrame` (zero-copy wrapper). Previously the result crossed the FFI as IPC bytes and was decoded Python-side via `pa.ipc.open_stream(BytesIO(bytes)).read_all()` + `pl.from_arrow`. Encode + decode + buffer copies were ~5 ms each on a 3 MB result; small evals now measure ~9 µs/call end-to-end.
+- **Removed Arrow IPC bytes round-trip from `wpar()` and `overwrite_partition()`.** Both now accept a `polars.DataFrame` directly (via `PyDataFrame`). The Python wrapper no longer calls `df.write_ipc_stream(buf)` before invoking the FFI.
+- **Added `Engine.tick_upd(table, df)`** with Rust-side IPC serialization (GIL released). Replaces the Python-side `df.write_ipc_stream() + publish()` path that the wrapper previously used. The wire format and subscriber callback signature are unchanged — subscribers still receive IPC bytes.
+- **Adopted `spicy_to_py` / `spicy_from_py_bound` conversion helpers** ported from upstream `purple-chili/chili` commit `bf9fa14`. Lays groundwork for future `set_var` / `fn_call` surface without the FFI bytes detour.
+- **Bumped `pyo3` 0.22 → 0.27 and added `pyo3-polars 0.26`.** Required for the direct-DataFrame path. Migration: `Python::with_gil` → `Python::attach`, `py.allow_threads` → `py.detach`, `PyTzInfo::utc(py)` now returns `Result<Borrowed, _>`, exception types via `py.get_type::<T>()` instead of `T::type_object_bound(py)`.
+- **Minimum Python version raised to 3.10** (from 3.7) — required by `pyo3 0.27`'s `abi3-py310` feature.
+- **Dropped `pyarrow` dependency.** No longer needed with the direct-PyDataFrame path. `polars >= 0.20` remains the only runtime dep for `chili-pie`.
+
+### Added (chili-py)
+
+- **`Engine.tick_upd(table, df)`** — DataFrame → Rust-side IPC serialize → publish. Faster than the Python-side `df.write_ipc_stream()` path; serialization runs with the GIL released.
+- **9 regression tests** (`tests/test_direct_dataframe.py`) pinning the new contract: eval returns `pl.DataFrame`, wpar/overwrite_partition reject bytes input, structured exceptions still importable post-pyo3-bump.
+
+### Compatibility note for downstream consumers (mdata, nxcar)
+
+- `engine.eval(query)` now returns `pl.DataFrame` directly. Code that decoded IPC bytes (`pa.ipc.open_stream(...)` etc.) must drop that step.
+- `engine.wpar(df, ...)` / `engine.overwrite_partition(df, ...)` accept the DataFrame as the first argument. Code that pre-serialized to IPC bytes must remove the `df.write_ipc_stream(buf)` step.
+- Python ≥ 3.10 required.
+
+### Cherry-picked from upstream
+
+- Workspace `chrono` dep (`b0f20e5`-style consolidation): `chrono = "0.4"` promoted to `workspace.dependencies`; per-crate refs use `chrono = { workspace = true }`.
+- `.gitignore` additions: `.mypy_cache/`, `.venv/`.
+
+### Not adopted from upstream (intentional)
+
+- `chili-pie → chili-sauce` package rename (`a0a42f6`): mdata/nxcar import `chili-pie`. Will revisit when upstream actually publishes `chili-sauce` to PyPI.
+- Upstream's low-level `PyEngineState` class + `fn_call` dispatcher: local `Engine` class is a higher-level API mdata depends on (broker pubsub, fork-safety, structured exceptions, query_plan, set_column_scale, overwrite_partition, GIL release).
+- manylinux 2_28 GH workflows (`0bfc8c5`): we don't ship via that pipeline.
+
+## [Pre-0.7.5]
+
 ### Added
 
 - **Headless mode** (`--headless` flag) to run Chili as a stable daemon without TTY. Automatically triggered when `--port > 0` and stdin is not a TTY (subprocess/pipe/systemd). IPC server threads remain active while main thread is parked.
-- **Python bindings** (`crates/chili-py`) via PyO3 + maturin. New `Engine` class exposes `load()`, `eval()`, and `wpar()` for direct Python access to the Chili runtime. DataFrames cross the Rust/Python boundary as Arrow IPC bytes (compatible with py-polars).
+- **Python bindings** (`crates/chili-py`) via PyO3 + maturin. New `Engine` class exposes `load()`, `eval()`, and `wpar()` for direct Python access to the Chili runtime. (Original IPC-bytes design; replaced by direct PyDataFrame in 0.7.5.)
 
 ### Fixed
 

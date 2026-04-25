@@ -2,11 +2,25 @@
 
 High-performance kdb+/q-compatible analytical engine accessible from Python via PyO3 + maturin.
 
+**Package name:** `chili-pie` (PyPI). Importable module: `chili`. Local fork; the upstream `purple-chili/chili` author plans to publish his own bindings as `chili-sauce` but the two have different surface APIs.
+
+**Requirements:** Python ≥ 3.10, Polars ≥ 0.20. No `pyarrow` dependency.
+
+## What's new in 0.7.5 (2026-04-26)
+
+The Rust↔Python boundary no longer uses Arrow IPC bytes:
+
+- `engine.eval(query)` returns `polars.DataFrame` directly (zero-copy via `pyo3_polars::PyDataFrame`). No `pa.ipc.open_stream` decode.
+- `engine.wpar(df, ...)` and `engine.overwrite_partition(df, ...)` accept the DataFrame directly. No `df.write_ipc_stream(buf)` pre-step.
+- `engine.tick_upd(table, df)` serializes Rust-side with the GIL released; the wire format and subscriber callback contract are unchanged (subscribers still receive IPC bytes).
+
+If you're upgrading from 0.7.4: drop any `pa.ipc.*` decoding in eval-result handling and any `df.write_ipc_stream(buf)` pre-write. Function signatures otherwise unchanged.
+
 ## Build
 
 ```bash
 cd crates/chili-py
-maturin develop
+uv run maturin develop --release
 ```
 
 This compiles the Rust extension and installs it into the active Python environment as the `chili` module.

@@ -10,10 +10,12 @@ name = "chili"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { workspace = true }
+pyo3 = { workspace = true, features = ["extension-module"] }
+pyo3-polars = "0.26.0"
 chili-core = { path = "../chili-core" }
 chili-op = { path = "../chili-op" }
-polars = { workspace = true, default-features = true, features = ["ipc_streaming", "lazy"] }
+polars = { workspace = true, default-features = true, features = ["lazy"] }
+indexmap = "2.12.0"
 log = "0.4"
-chrono = "0.4"
+chrono = { workspace = true }
 mimalloc = { version = "0.1", default-features = false }
