@@ -59,6 +59,7 @@ cd crates/chili-py && uv run python tests/bench_concurrent.py --save mine
 | Document | Purpose |
 |----------|---------|
 | [`docs/releases/v0.7.5_claude.md`](docs/releases/v0.7.5_claude.md) | **0.7.5 release notes (2026-04-26)** — bytes-removal FFI rewrite, pyo3 0.27 bump, mdata/nxcar migration guide |
+| [`docs/proposals/python_bindings_comparison_and_wishlist.md`](docs/proposals/python_bindings_comparison_and_wishlist.md) | `PyEngineState` (upstream `chili-sauce`) vs `Engine` (local `chili-pie`) — feature comparison and wishlist for upstream review |
 | [`crates/chili-py/README.md`](crates/chili-py/README.md) | Python bindings (chili-py): build, install, full API surface |
 | [`CHANGELOG.md`](CHANGELOG.md) | Release notes: all shipped features, bug fixes, and optimization phases |
 | [`docs/bench/baseline.md`](docs/bench/baseline.md) | Pre-sweep benchmark baseline (`pre-all`, 2026-04-11) |
