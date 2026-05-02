@@ -30,8 +30,18 @@ impl<'a> Stack<'a> {
         }
     }
 
+    pub fn with_handle(handle: i64) -> Self {
+        let mut stack = Stack::default();
+        stack.h = handle;
+        stack
+    }
+
+    pub fn set_handle(&mut self, handle: i64) {
+        self.h = handle;
+    }
+
     pub fn get_var(&self, id: &str) -> Result<SpicyObj, SpicyError> {
-        if id == "this.h" && self.h > 0 {
+        if id == "this.h" {
             Ok(SpicyObj::I64(self.h))
         } else if id == "this.user" && !self.user.is_empty() {
             Ok(SpicyObj::Symbol(self.user.clone()))

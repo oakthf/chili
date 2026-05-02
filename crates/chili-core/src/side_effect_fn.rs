@@ -164,7 +164,8 @@ fn replay_q(state: &EngineState, _stack: &mut Stack, args: &[&SpicyObj]) -> Spic
     };
     let end = args[2].to_i64()?;
     let table_names = args[3].to_str_vec()?;
-    state.replay_q_msgs_log(file, start, end, &table_names)
+    let handle = args[4].to_i64()?;
+    state.replay_q_msgs_log(file, start, end, &table_names, handle)
 }
 
 // replay9[file; start; end; table_names; eval]
@@ -191,10 +192,11 @@ fn replay_chili(
     let end = args[2].to_i64()?;
     let table_names = args[3].to_str_vec()?;
     let eval = args[4].to_bool()?;
-    state.replay_chili_msgs_log(path, start, end, start_time, &table_names, eval)
+    let handle = args[5].to_i64()?;
+    state.replay_chili_msgs_log(path, start, end, start_time, &table_names, eval, handle)
 }
 
-fn sub_q(state: &EngineState, _stack: &mut Stack, args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
+fn sub_q(state: &EngineState, stack: &mut Stack, args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
     let socket = args[0];
     let table_names = args[1];
     let is_sub_all = table_names.size() == 0;
@@ -230,7 +232,7 @@ fn sub_q(state: &EngineState, _stack: &mut Stack, args: &[&SpicyObj]) -> SpicyRe
         }
     }
 
-    let tick_count = state.get_tick_count();
+    let tick_count = state.get_tick_count(stack.h as usize);
 
     if is_sub_all {
         // only replay the log file from the previous tick count
@@ -239,10 +241,17 @@ fn sub_q(state: &EngineState, _stack: &mut Stack, args: &[&SpicyObj]) -> SpicyRe
             tick_count,
             log_info[1].to_i64()?,
             &table_names,
+            h,
         )?;
     } else {
         // replay the log file from the beginning
-        state.replay_q_msgs_log(log_info[0].str()?, 0, log_info[1].to_i64()?, &table_names)?;
+        state.replay_q_msgs_log(
+            log_info[0].str()?,
+            0,
+            log_info[1].to_i64()?,
+            &table_names,
+            h,
+        )?;
     }
     state.handle_publisher(&h)?;
     // return schemas
@@ -264,8 +273,9 @@ fn del(state: &EngineState, _stack: &mut Stack, args: &[&SpicyObj]) -> SpicyResu
 }
 
 fn tick(state: &EngineState, _stack: &mut Stack, args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
-    let inc = args[0].to_i64()?;
-    state.tick(inc)
+    let index = args[0].to_i64()? as usize;
+    let inc = args[1].to_i64()?;
+    state.tick(index, inc)
 }
 
 fn set(state: &EngineState, _stack: &mut Stack, args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
@@ -525,18 +535,18 @@ pub static SIDE_EFFECT_FN: LazyLock<HashMap<String, Func>> = LazyLock::new(|| {
             "replay_q".to_owned(),
             Func::new_side_effect_built_in_fn(
                 Some(Box::new(replay_q)),
-                4,
+                5,
                 "replay_q",
-                &["file", "start", "end", "table_names"],
+                &["file", "start", "end", "table_names", "handle"],
             ),
         ),
         (
             "replay".to_owned(),
             Func::new_side_effect_built_in_fn(
                 Some(Box::new(replay_chili)),
-                5,
+                6,
                 "replay",
-                &["file", "start", "end", "table_names", "eval"],
+                &["file", "start", "end", "table_names", "eval", "handle"],
             ),
         ),
         (
@@ -554,7 +564,7 @@ pub static SIDE_EFFECT_FN: LazyLock<HashMap<String, Func>> = LazyLock::new(|| {
         ),
         (
             "tick".to_owned(),
-            Func::new_side_effect_built_in_fn(Some(Box::new(tick)), 1, "tick", &["inc"]),
+            Func::new_side_effect_built_in_fn(Some(Box::new(tick)), 2, "tick", &["index", "inc"]),
         ),
         (
             "set".to_owned(),

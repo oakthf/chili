@@ -437,16 +437,18 @@ impl PyEngineState {
         self.inner.parse_cache_len()
     }
 
-    /// Return the current tick counter.
-    fn get_tick_count(&self) -> i64 {
+    /// Return the tick counter at the given index (default 0).
+    #[pyo3(signature = (index=0))]
+    fn get_tick_count(&self, index: usize) -> i64 {
         let _ = self.check_fork();
-        self.inner.get_tick_count()
+        self.inner.get_tick_count(index)
     }
 
-    /// Increment the tick counter by `inc` and return the updated value.
-    fn tick(&self, py: Python<'_>, inc: i64) -> PyResult<Py<PyAny>> {
+    /// Increment the tick counter at `index` by `inc` and return the updated value.
+    #[pyo3(signature = (index=0, inc=1))]
+    fn tick(&self, py: Python<'_>, index: usize, inc: i64) -> PyResult<Py<PyAny>> {
         self.check_fork()?;
-        let obj = map_spicy_error(self.inner.tick(inc))?;
+        let obj = map_spicy_error(self.inner.tick(index, inc))?;
         spicy_to_py(py, obj)
     }
 

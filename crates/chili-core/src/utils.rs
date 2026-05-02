@@ -247,15 +247,22 @@ pub fn handle_q_conn(
 
         if message_type == MessageType::Sync {
             match res {
-                Ok(obj) => {
-                    let mut v8 = serde6::serialize(&obj).unwrap();
-                    if !is_local {
-                        v8 = serde6::compress(v8);
+                Ok(obj) => match serde6::serialize(&obj) {
+                    Ok(mut v8) => {
+                        if !is_local {
+                            v8 = serde6::compress(v8);
+                        }
+                        let _ = rw.write(&[1, 2, 0, 0]);
+                        let _ = rw.write_all(&((v8.len() + 8) as u32).to_le_bytes());
+                        let _ = rw.write_all(&v8);
                     }
-                    let _ = rw.write(&[1, 2, 0, 0]);
-                    let _ = rw.write_all(&((v8.len() + 8) as u32).to_le_bytes());
-                    let _ = rw.write_all(&v8);
-                }
+                    Err(e) => {
+                        let err = serde6::serialize(&SpicyObj::Err(e.to_string())).unwrap();
+                        let _ = rw.write_all(&[1, 2, 0, 0]);
+                        let _ = rw.write_all(&(err.len() as u32 + 8).to_le_bytes());
+                        let _ = rw.write_all(&err);
+                    }
+                },
                 Err(e) => {
                     let err_msg = RE_STYLE.replace_all(&e.to_string(), "").to_string();
                     let err = serde6::serialize(&SpicyObj::Err(err_msg)).unwrap();
@@ -346,10 +353,16 @@ pub fn handle_chili_conn(
 
         if message_type == MessageType::Sync {
             match res {
-                Ok(obj) => {
-                    let v8 = serde9::serialize(&obj, !is_local).unwrap();
-                    let _ = crate::write_chili_ipc_msg(rw, &v8, MessageType::Response);
-                }
+                Ok(obj) => match serde9::serialize(&obj, !is_local) {
+                    Ok(v8) => {
+                        let _ = crate::write_chili_ipc_msg(rw, &v8, MessageType::Response);
+                    }
+                    Err(e) => {
+                        let err = serde9::serialize_err(&e.to_string());
+                        let _ = rw.write_all(&err);
+                        error!("failed to serialize response: {}", e);
+                    }
+                },
                 Err(e) => {
                     let err_msg = RE_STYLE.replace_all(&e.to_string(), "").to_string();
                     let err = serde9::serialize_err(&err_msg);

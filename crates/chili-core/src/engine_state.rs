@@ -86,7 +86,7 @@ pub struct EngineState {
     source: RwLock<Vec<(String, String)>>,
     // handle number, rw, is_local, version, ipc type
     handle: RwLock<IndexMap<i64, Handle>>,
-    tick_count: RwLock<i64>,
+    tick_count: RwLock<Vec<i64>>,
     job: RwLock<IndexMap<i64, Job>>,
     topic_map: RwLock<HashMap<String, Vec<i64>>>,
     arc_self: RwLock<Option<Arc<Self>>>,
@@ -143,7 +143,7 @@ impl EngineState {
             par_df: RwLock::new(HashMap::new()),
             source: RwLock::new(source),
             handle: RwLock::new(IndexMap::new()),
-            tick_count: RwLock::new(0),
+            tick_count: RwLock::new(vec![0i64; 1024]),
             job: RwLock::new(IndexMap::new()),
             topic_map: RwLock::new(HashMap::new()),
             arc_self: RwLock::new(None),
@@ -435,6 +435,7 @@ impl EngineState {
         start: i64,
         end: i64,
         table_names: &Vec<&str>,
+        handle: i64,
     ) -> SpicyResult<SpicyObj> {
         if end == 0 {
             info!("no messages to replay");
@@ -469,7 +470,7 @@ impl EngineState {
             }
         }
 
-        let tick_count = { *self.tick_count.read() as usize };
+        let tick_count = { self.tick_count.read()[handle as usize] as usize };
 
         let mut msgs_file = fs::OpenOptions::new()
             .read(true)
@@ -500,7 +501,7 @@ impl EngineState {
             if is_sub_all || table_names.contains(&table_name.as_str()) {
                 if count >= tick_count {
                     let list = serde6::deserialize(&msg, &mut 0, false)?;
-                    let res = self.eval(&mut Stack::default(), &list, "");
+                    let res = self.eval(&mut Stack::with_handle(handle), &list, "");
                     if res.is_err() {
                         let err = res.err().unwrap();
                         error!("failed to replay {} message, error: {}", i, err);
@@ -528,6 +529,7 @@ impl EngineState {
         start_time: i64,
         table_names: &Vec<&str>,
         eval: bool,
+        handle: i64,
     ) -> SpicyResult<SpicyObj> {
         let mut file = OpenOptions::new()
             .read(true)
@@ -590,7 +592,7 @@ impl EngineState {
                                 .str()?,
                         )
                     {
-                        let res = self.eval(&mut Stack::default(), &list, "");
+                        let res = self.eval(&mut Stack::with_handle(handle), &list, "");
                         if res.is_err() {
                             let err = res.err().unwrap();
                             error!(
@@ -1612,14 +1614,14 @@ impl EngineState {
         ))
     }
 
-    pub fn tick(&self, inc: i64) -> SpicyResult<SpicyObj> {
+    pub fn tick(&self, index: usize, inc: i64) -> SpicyResult<SpicyObj> {
         let mut tick_count = self.tick_count.write();
-        *tick_count += inc;
-        Ok(SpicyObj::I64(*tick_count))
+        tick_count[index] += inc;
+        Ok(SpicyObj::I64(tick_count[index]))
     }
 
-    pub fn get_tick_count(&self) -> i64 {
-        *self.tick_count.read()
+    pub fn get_tick_count(&self, index: usize) -> i64 {
+        self.tick_count.read()[index]
     }
 
     pub fn get_table_names(&self, start_with: &str) -> SpicyResult<SpicyObj> {

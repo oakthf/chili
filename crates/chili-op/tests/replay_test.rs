@@ -17,14 +17,14 @@ mod tests {
         let src = "
         upd: {[table; data]
             table upsert data;
-            tick[1]
+            tick[this.h; 1]
         };
         ";
         let nodes = parse(src, 0, "repl.pep").unwrap();
         state.eval_ast(nodes, "", src).unwrap();
         let nodes = parse(
             &format!(
-                "replay_q[\"{}\"; 0; 5; `trade]",
+                "replay_q[\"{}\"; 0; 5; `trade; 0]",
                 &tp_log_path.to_str().unwrap()
             ),
             0,
@@ -35,7 +35,7 @@ mod tests {
         assert_eq!(state.get_var("trade").unwrap().size(), 10);
         let nodes = parse(
             &format!(
-                "replay_q[\"{}\"; 5; 81; `trade]",
+                "replay_q[\"{}\"; 5; 81; `trade; 0]",
                 &tp_log_path.to_str().unwrap()
             ),
             0,
@@ -54,14 +54,14 @@ mod tests {
         let src = "
         upd: {[table; data]
             table upsert data;
-            tick[1]
+            tick[this.h; 1]
         };
         ";
         let nodes = parse(src, 0, "repl.pep").unwrap();
         state.eval_ast(nodes, "", src).unwrap();
         let nodes = parse(
             &format!(
-                "replay_q[\"{}\"; 5; 81; `trade]",
+                "replay_q[\"{}\"; 5; 81; `trade; 0]",
                 &tp_log_path.to_str().unwrap()
             ),
             0,

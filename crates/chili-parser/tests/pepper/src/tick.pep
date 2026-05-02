@@ -20,9 +20,9 @@ tick .broker.validateSeq[.tick.msgLog; 0b];
   .log.info ("received"; count data; "for"; table);
   .tick.msgHandle (`upd; table; data);
   .broker.publish[`upd; table; data];
-  // tick[1] is a built-in function for updating internal tick count
+  // tick[this.h; 1] is a built-in function for updating internal tick count
   // use `tick 0` to get current tick count, `tick neg tick 0` to reset tick count.
-  tick[1];
+  tick[this.h; 1];
 };
 
 .tick.subscribe: {[tables]
@@ -30,7 +30,7 @@ tick .broker.validateSeq[.tick.msgLog; 0b];
   // this is reserved for current stack
   // this.h is the handle for the IPC connection of current stack
   .broker.subscribe[this.h; ] each tables;
-  (.tick.msgLog; tick[0]; .tick.schema)
+  (.tick.msgLog; tick[this.h; 0]; .tick.schema)
 };
 
 .tick.unsubscribe: {[tables]
