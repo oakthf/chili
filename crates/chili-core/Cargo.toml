@@ -74,7 +74,8 @@ anyhow = "1.0"
 regex = "1.12"
 chumsky = { workspace = true }
 ariadne = { workspace = true }
-lru = "0.17"
+lru = "0.18.0"
+parking_lot = "0.12"
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }

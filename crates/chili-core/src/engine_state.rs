@@ -7,12 +7,13 @@ use std::{
     net::{TcpListener, TcpStream},
     num::NonZeroUsize,
     path::PathBuf,
-    sync::{Arc, LazyLock, Mutex, RwLock},
+    sync::{Arc, LazyLock},
     thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use lru::LruCache;
+use parking_lot::{Mutex, RwLock};
 
 use chili_parser::Language;
 use indexmap::IndexMap;
@@ -179,28 +180,25 @@ impl EngineState {
     }
 
     pub fn register_fn(&self, map: &LazyLock<HashMap<String, Func>>) {
-        let mut vars = self.vars.write().unwrap();
+        let mut vars = self.vars.write();
         map.iter().for_each(|(k, v)| {
             vars.insert(k.to_owned(), SpicyObj::Fn(v.clone()));
         });
     }
 
     pub fn set_arc_self(&self, arc: Arc<Self>) -> SpicyResult<()> {
-        let mut arc_self = self
-            .arc_self
-            .write()
-            .map_err(|e| SpicyError::Err(e.to_string()))?;
+        let mut arc_self = self.arc_self.write();
         *arc_self = Some(arc);
         Ok(())
     }
 
     pub fn shutdown(&self) {
-        self.handle.write().unwrap().clear();
+        self.handle.write().clear();
     }
 
     pub fn get_displayed_vars(&self) -> SpicyResult<HashMap<String, String>> {
         let mut vars = HashMap::new();
-        for (key, obj) in self.vars.read().unwrap().iter() {
+        for (key, obj) in self.vars.read().iter() {
             if obj.is_fn() {
                 let func = obj.fn_().unwrap();
                 if func.arg_num == func.params.len() {
@@ -217,10 +215,7 @@ impl EngineState {
     }
 
     pub fn get_var(&self, id: &str) -> Result<SpicyObj, SpicyError> {
-        let vars = self
-            .vars
-            .read()
-            .map_err(|_| SpicyError::ReadLockErr(id.to_owned()))?;
+        let vars = self.vars.read();
         match vars.get(id) {
             Some(obj) => Ok(obj.clone()),
             None => Err(SpicyError::NameErr(id.to_owned())),
@@ -228,35 +223,23 @@ impl EngineState {
     }
 
     pub fn has_var(&self, id: &str) -> Result<bool, SpicyError> {
-        let vars = self
-            .vars
-            .read()
-            .map_err(|_| SpicyError::ReadLockErr(id.to_owned()))?;
+        let vars = self.vars.read();
         Ok(vars.contains_key(id))
     }
 
     pub fn set_var(&self, id: &str, args: SpicyObj) -> SpicyResult<()> {
-        let mut vars = self
-            .vars
-            .write()
-            .map_err(|_| SpicyError::WriteLockErr(id.to_owned()))?;
+        let mut vars = self.vars.write();
         vars.insert(id.to_owned(), args);
         Ok(())
     }
 
     pub fn del_var(&self, id: &str) -> SpicyResult<SpicyObj> {
-        let mut vars = self
-            .vars
-            .write()
-            .map_err(|_| SpicyError::WriteLockErr(id.to_owned()))?;
+        let mut vars = self.vars.write();
         Ok(vars.remove(id).unwrap_or(SpicyObj::Null))
     }
 
     pub fn upsert_var(&self, id: &str, arg: &SpicyObj) -> SpicyResult<SpicyObj> {
-        let mut vars = self
-            .vars
-            .write()
-            .map_err(|_| SpicyError::WriteLockErr(id.to_owned()))?;
+        let mut vars = self.vars.write();
         let obj = match vars.get_mut(id) {
             Some(obj) => obj,
             None => {
@@ -296,10 +279,7 @@ impl EngineState {
     }
 
     pub fn insert_var(&self, id: &str, args: &SpicyObj, by: &[&str]) -> SpicyResult<SpicyObj> {
-        let mut vars = self
-            .vars
-            .write()
-            .map_err(|_| SpicyError::WriteLockErr(id.to_owned()))?;
+        let mut vars = self.vars.write();
         let count: usize;
         let df = {
             let arg0 = match vars.get_mut(id) {
@@ -372,10 +352,7 @@ impl EngineState {
             let mut types: Vec<String> = vec![];
             let mut columns: Vec<String> = vec![];
             let mut is_built_in: Vec<bool> = vec![];
-            let var_map = self
-                .vars
-                .read()
-                .map_err(|e| SpicyError::ReadLockErr(e.to_string()))?;
+            let var_map = self.vars.read();
             for (k, v) in var_map.iter() {
                 if pattern.is_empty() || k.starts_with(pattern) {
                     vars.push(k.to_owned());
@@ -416,10 +393,7 @@ impl EngineState {
             let mut types: Vec<String> = vec![];
             let mut columns: Vec<String> = vec![];
             let mut is_built_in: Vec<bool> = vec![];
-            let par_df_map = self
-                .par_df
-                .read()
-                .map_err(|e| SpicyError::ReadLockErr(e.to_string()))?;
+            let par_df_map = self.par_df.read();
             for (k, v) in par_df_map.iter() {
                 if pattern.is_empty() || k.starts_with(pattern) {
                     vars.push(k.to_owned());
@@ -495,12 +469,7 @@ impl EngineState {
             }
         }
 
-        let tick_count = {
-            *self
-                .tick_count
-                .read()
-                .map_err(|e| SpicyError::EvalErr(e.to_string()))? as usize
-        };
+        let tick_count = { *self.tick_count.read() as usize };
 
         let mut msgs_file = fs::OpenOptions::new()
             .read(true)
@@ -650,10 +619,7 @@ impl EngineState {
     pub fn open_handle(&self, uri: &str, h: i64) -> SpicyResult<SpicyObj> {
         let mut callback = None;
         let uri = if h > 0 {
-            let handles = self
-                .handle
-                .read()
-                .map_err(|e| SpicyError::Err(e.to_string()))?;
+            let handles = self.handle.read();
             if handles.contains_key(&h) {
                 let handle = handles.get(&h).unwrap();
                 callback = handle.on_disconnected.clone();
@@ -761,16 +727,13 @@ impl EngineState {
     }
 
     pub fn close_handle(&self, handle_num: &i64) -> SpicyResult<SpicyObj> {
-        let mut handle = self
-            .handle
-            .write()
-            .map_err(|e| SpicyError::Err(e.to_string()))?;
+        let mut handle = self.handle.write();
         handle.shift_remove(handle_num);
         Ok(SpicyObj::Null)
     }
 
     pub fn list_handle(&self) -> SpicyResult<DataFrame> {
-        let handles = self.handle.read().unwrap();
+        let handles = self.handle.read();
         let len = handles.len();
         let mut num = Vec::with_capacity(len);
         let mut socket = Vec::with_capacity(len);
@@ -801,10 +764,7 @@ impl EngineState {
     }
 
     pub fn disconnect_handle(&self, handle_num: &i64) -> SpicyResult<SpicyObj> {
-        let mut handle = self
-            .handle
-            .write()
-            .map_err(|e| SpicyError::Err(e.to_string()))?;
+        let mut handle = self.handle.write();
         handle.get_mut(handle_num).unwrap().conn_type = ConnType::Disconnected;
         Ok(SpicyObj::Null)
     }
@@ -819,10 +779,7 @@ impl EngineState {
         conn_type: ConnType,
         h: i64,
     ) -> SpicyResult<SpicyObj> {
-        let mut handle = self
-            .handle
-            .write()
-            .map_err(|e| SpicyError::Err(e.to_string()))?;
+        let mut handle = self.handle.write();
         let h = if handle.contains_key(&h) {
             h
         } else {
@@ -844,10 +801,7 @@ impl EngineState {
     }
 
     pub fn set_callback(&self, h: &i64, callback: String) -> SpicyResult<()> {
-        let mut handle = self
-            .handle
-            .write()
-            .map_err(|e| SpicyError::Err(e.to_string()))?;
+        let mut handle = self.handle.write();
         if let Some(handle) = handle.get_mut(h) {
             handle.on_disconnected = Some(callback);
         } else {
@@ -857,10 +811,7 @@ impl EngineState {
     }
 
     pub fn get_callback(&self, h: &i64) -> SpicyResult<String> {
-        let handle = self
-            .handle
-            .read()
-            .map_err(|e| SpicyError::Err(e.to_string()))?;
+        let handle = self.handle.read();
         if let Some(handle) = handle.get(h) {
             Ok(handle.on_disconnected.clone().unwrap_or_default())
         } else {
@@ -869,18 +820,12 @@ impl EngineState {
     }
 
     pub fn handle_publisher(&self, h: &i64) -> SpicyResult<()> {
-        let mut handles = self
-            .handle
-            .write()
-            .map_err(|e| SpicyError::Err(e.to_string()))?;
+        let mut handles = self.handle.write();
         let publisher = handles.shift_remove(h);
 
         match publisher {
             Some(handle) => {
-                let arc_self = self
-                    .arc_self
-                    .read()
-                    .map_err(|e| SpicyError::Err(e.to_string()))?;
+                let arc_self = self.arc_self.read();
 
                 let arc_self = Arc::clone(arc_self.as_ref().unwrap());
                 if handle.conn_type != ConnType::Outgoing {
@@ -930,10 +875,7 @@ impl EngineState {
     }
 
     pub fn sync(&self, h: &i64, msg: &SpicyObj) -> SpicyResult<SpicyObj> {
-        let mut handle = self
-            .handle
-            .write()
-            .map_err(|e| SpicyError::Err(e.to_string()))?;
+        let mut handle = self.handle.write();
         match handle.get_mut(h) {
             Some(Handle {
                 rw: Some(rw),
@@ -1079,19 +1021,13 @@ impl EngineState {
     }
 
     pub fn add_subscriber(&self, topic: &str, h: i64) -> SpicyResult<()> {
-        let mut topic_map = self
-            .topic_map
-            .write()
-            .map_err(|e| SpicyError::Err(e.to_string()))?;
+        let mut topic_map = self.topic_map.write();
         topic_map.entry(topic.to_owned()).or_insert(vec![]).push(h);
         Ok(())
     }
 
     pub fn remove_subscriber(&self, topic: &str, h: i64) -> SpicyResult<()> {
-        let mut topic_map = self
-            .topic_map
-            .write()
-            .map_err(|e| SpicyError::Err(e.to_string()))?;
+        let mut topic_map = self.topic_map.write();
         topic_map
             .entry(topic.to_owned())
             .or_insert(vec![])
@@ -1100,10 +1036,7 @@ impl EngineState {
     }
 
     pub fn publish(&self, table: &str, bytes: &[Vec<u8>]) -> SpicyResult<()> {
-        let mut topic_map = self
-            .topic_map
-            .write()
-            .map_err(|e| SpicyError::Err(e.to_string()))?;
+        let mut topic_map = self.topic_map.write();
         let subscribers = match topic_map.get(table) {
             Some(subscribers) => subscribers.clone(),
             None => {
@@ -1117,10 +1050,7 @@ impl EngineState {
             return Ok(());
         }
 
-        let mut handle = self
-            .handle
-            .write()
-            .map_err(|e| SpicyError::Err(e.to_string()))?;
+        let mut handle = self.handle.write();
         for subscriber in subscribers {
             if let Some(v) = handle.get_mut(&subscriber) {
                 if v.conn_type == ConnType::Disconnected {
@@ -1158,10 +1088,7 @@ impl EngineState {
 
     pub fn signal_eod(&self, args: &SpicyObj) -> SpicyResult<()> {
         let handles: Vec<i64> = {
-            let handle = self
-                .handle
-                .read()
-                .map_err(|e| SpicyError::Err(e.to_string()))?;
+            let handle = self.handle.read();
             handle
                 .iter()
                 .filter(|(_, v)| v.conn_type == ConnType::Publishing)
@@ -1181,10 +1108,7 @@ impl EngineState {
     }
 
     pub fn handle_subscriber(&self, h: &i64) -> SpicyResult<()> {
-        let mut handles = self
-            .handle
-            .write()
-            .map_err(|e| SpicyError::Err(e.to_string()))?;
+        let mut handles = self.handle.write();
         let handle = handles.get_mut(h).ok_or(SpicyError::InvalidHandleErr(*h))?;
 
         if handle.conn_type == ConnType::Publishing {
@@ -1203,10 +1127,7 @@ impl EngineState {
     }
 
     pub fn list_topic_map(&self) -> SpicyResult<DataFrame> {
-        let topic_map = self
-            .topic_map
-            .read()
-            .map_err(|e| SpicyError::Err(e.to_string()))?;
+        let topic_map = self.topic_map.read();
         let mut topics = Vec::new();
         let mut subscribers: Vec<i64> = Vec::new();
         let mut offsets: Vec<i32> = Vec::with_capacity(topic_map.len() + 1);
@@ -1241,10 +1162,7 @@ impl EngineState {
     }
 
     pub fn get_source(&self, index: usize) -> SpicyResult<(String, String)> {
-        let source = self
-            .source
-            .read()
-            .map_err(|e| SpicyError::EvalErr(e.to_string()))?;
+        let source = self.source.read();
         Ok(source
             .get(index)
             .cloned()
@@ -1260,10 +1178,7 @@ impl EngineState {
         // and bloating the source registry under concurrent Python load.
         // O(n) scan is fine because the registry is small (typically <1000
         // entries) and writes are off the hot path.
-        let mut source = self
-            .source
-            .write()
-            .map_err(|e| SpicyError::EvalErr(e.to_string()))?;
+        let mut source = self.source.write();
         if let Some(idx) = source.iter().position(|(p, s)| p == path && s == src) {
             return Ok(idx);
         }
@@ -1286,7 +1201,8 @@ impl EngineState {
         let cache_key = (path.to_string(), source.to_string());
 
         // Fast path: cache hit
-        if let Ok(mut cache) = self.parse_cache.lock() {
+        {
+            let mut cache = self.parse_cache.lock();
             if let Some(ast) = cache.get(&cache_key) {
                 return Ok((**ast).clone());
             }
@@ -1311,7 +1227,8 @@ impl EngineState {
         };
 
         let arc = Arc::new(parsed.clone());
-        if let Ok(mut cache) = self.parse_cache.lock() {
+        {
+            let mut cache = self.parse_cache.lock();
             cache.put(cache_key, arc);
         }
         Ok(parsed)
@@ -1319,7 +1236,7 @@ impl EngineState {
 
     /// Returns the current parse cache size (mostly for tests / observability).
     pub fn parse_cache_len(&self) -> usize {
-        self.parse_cache.lock().map(|c| c.len()).unwrap_or(0)
+        self.parse_cache.lock().len()
     }
 
     pub fn parse_raw_fn(&self, fn_body: &str, lang: Language) -> Result<Vec<AstNode>, SpicyError> {
@@ -1424,7 +1341,6 @@ impl EngineState {
         if self
             .source
             .read()
-            .map_err(|e| SpicyError::EvalErr(e.to_string()))?
             .iter()
             .any(|(p, s)| p == &full_path && s == &src)
         {
@@ -1480,10 +1396,7 @@ impl EngineState {
     }
 
     pub fn get_par_df(&self, name: &str) -> SpicyResult<PartitionedDataFrame> {
-        let par_df = self
-            .par_df
-            .read()
-            .map_err(|e| SpicyError::EvalErr(e.to_string()))?;
+        let par_df = self.par_df.read();
         match par_df.get(name) {
             Some(p) => Ok(p.clone()),
             None => Err(SpicyError::Err(format!(
@@ -1494,10 +1407,7 @@ impl EngineState {
     }
 
     pub fn clear_par_df(&self) -> SpicyResult<()> {
-        let mut par_df = self
-            .par_df
-            .write()
-            .map_err(|e| SpicyError::EvalErr(e.to_string()))?;
+        let mut par_df = self.par_df.write();
         par_df.clear();
         Ok(())
     }
@@ -1549,10 +1459,7 @@ impl EngineState {
         // Phase 2: acquire the write lock exactly once and extend. This is
         // the only place the lock is held during load_par_df, and its
         // duration is bounded by HashMap::insert, not filesystem I/O.
-        let mut par_df = self
-            .par_df
-            .write()
-            .map_err(|e| SpicyError::EvalErr(e.to_string()))?;
+        let mut par_df = self.par_df.write();
         for (k, v) in new_entries {
             par_df.insert(k, v);
         }
@@ -1706,23 +1613,17 @@ impl EngineState {
     }
 
     pub fn tick(&self, inc: i64) -> SpicyResult<SpicyObj> {
-        let mut tick_count = self
-            .tick_count
-            .write()
-            .map_err(|e| SpicyError::EvalErr(e.to_string()))?;
+        let mut tick_count = self.tick_count.write();
         *tick_count += inc;
         Ok(SpicyObj::I64(*tick_count))
     }
 
     pub fn get_tick_count(&self) -> i64 {
-        *self.tick_count.read().unwrap()
+        *self.tick_count.read()
     }
 
     pub fn get_table_names(&self, start_with: &str) -> SpicyResult<SpicyObj> {
-        let vars = self
-            .vars
-            .read()
-            .map_err(|e| SpicyError::EvalErr(e.to_string()))?;
+        let vars = self.vars.read();
         let mut table_names = Vec::new();
         for (k, obj) in vars.iter() {
             if k.starts_with(start_with) && obj.is_df() {
@@ -1738,7 +1639,7 @@ impl EngineState {
     pub fn execute_jobs(&self) {
         let mut active_jobs: HashMap<i64, Job> = HashMap::new();
         {
-            let jobs = self.job.read().unwrap();
+            let jobs = self.job.read();
             for (id, job) in jobs.iter() {
                 if job.is_active && job::get_local_now_ns() >= job.next_run_time {
                     active_jobs.insert(*id, job.clone());
@@ -1772,19 +1673,19 @@ impl EngineState {
                 job.last_run_time = Some(job::get_local_now_ns());
             }
 
-            self.job.write().unwrap().extend(active_jobs);
+            self.job.write().extend(active_jobs);
         }
     }
 
     pub fn add_job(&self, job: Job) -> i64 {
-        let mut jobs = self.job.write().unwrap();
+        let mut jobs = self.job.write();
         let id = jobs.len() as i64 + 1;
         jobs.insert(id, job);
         id
     }
 
     pub fn list_job(&self) -> SpicyResult<DataFrame> {
-        let jobs = self.job.read().unwrap();
+        let jobs = self.job.read();
         let mut id = vec![];
         let mut fn_name = vec![];
         let mut start_time = vec![];
@@ -1834,14 +1735,14 @@ impl EngineState {
     }
 
     pub fn set_job_status(&self, id: i64, is_active: bool) -> SpicyResult<i64> {
-        let mut jobs = self.job.write().unwrap();
+        let mut jobs = self.job.write();
         let job = jobs.get_mut(&id).unwrap();
         job.is_active = is_active;
         Ok(id)
     }
 
     pub fn set_job_status_by_pattern(&self, pattern: &str, is_active: bool) -> SpicyResult<Series> {
-        let mut jobs = self.job.write().unwrap();
+        let mut jobs = self.job.write();
         let mut ids = vec![];
         for (id, job) in jobs.iter_mut() {
             if job.description.contains(pattern) {
@@ -1853,7 +1754,7 @@ impl EngineState {
     }
 
     pub fn clear_job(&self) -> SpicyResult<()> {
-        let mut jobs = self.job.write().unwrap();
+        let mut jobs = self.job.write();
         jobs.clear();
         Ok(())
     }
@@ -1923,11 +1824,11 @@ impl EngineState {
         );
         status.insert(
             "partitioned_df_count".into(),
-            SpicyObj::I64(self.par_df.read().unwrap().len() as i64),
+            SpicyObj::I64(self.par_df.read().len() as i64),
         );
         status.insert(
             "parse_cache_len".into(),
-            SpicyObj::I64(self.parse_cache.lock().unwrap().len() as i64),
+            SpicyObj::I64(self.parse_cache.lock().len() as i64),
         );
         status.insert(
             "partitioned_df_paths".into(),
@@ -1935,7 +1836,6 @@ impl EngineState {
                 "path".into(),
                 self.par_df
                     .read()
-                    .unwrap()
                     .iter()
                     .map(|(_, p)| p.path.clone())
                     .collect::<Vec<String>>(),
