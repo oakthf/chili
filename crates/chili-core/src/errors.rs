@@ -18,6 +18,9 @@ pub enum SpicyError {
     #[error("Invalid Handle err {0}")]
     InvalidHandleErr(i64),
 
+    #[error("Handle number {0} out of range, allowed range is 0..{1}")]
+    HandleOutOfRangeErr(i64, usize),
+
     #[error("Parser err: {0}")]
     ParserErr(String),
 

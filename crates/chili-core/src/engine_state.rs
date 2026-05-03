@@ -79,6 +79,10 @@ pub struct Handle {
 /// near 100%.
 const PARSE_CACHE_CAPACITY: usize = 256;
 
+/// Maximum allowed handle number for tick_count indexing.
+/// Handle numbers must be in the range 0..MAX_HANDLE_NUM.
+const MAX_HANDLE_NUM: usize = 1024;
+
 pub struct EngineState {
     debug: bool,
     vars: RwLock<HashMap<String, SpicyObj>>,
@@ -143,7 +147,7 @@ impl EngineState {
             par_df: RwLock::new(HashMap::new()),
             source: RwLock::new(source),
             handle: RwLock::new(IndexMap::new()),
-            tick_count: RwLock::new(vec![0i64; 1024]),
+            tick_count: RwLock::new(vec![0i64; MAX_HANDLE_NUM]),
             job: RwLock::new(IndexMap::new()),
             topic_map: RwLock::new(HashMap::new()),
             arc_self: RwLock::new(None),
@@ -470,7 +474,11 @@ impl EngineState {
             }
         }
 
-        let tick_count = { self.tick_count.read()[handle as usize] as usize };
+        let handle_idx = handle as usize;
+        if handle_idx >= MAX_HANDLE_NUM {
+            return Err(SpicyError::HandleOutOfRangeErr(handle, MAX_HANDLE_NUM));
+        }
+        let tick_count = { self.tick_count.read()[handle_idx] as usize };
 
         let mut msgs_file = fs::OpenOptions::new()
             .read(true)
@@ -1416,7 +1424,7 @@ impl EngineState {
 
     pub fn load_par_df(&self, path: &str) -> SpicyResult<()> {
         // Two-phase load:
-        //   1. (outside lock) enumerate top-level table entries; build each
+        //   1. (outside lock) recursively enumerate table entries; build each
         //      PartitionedDataFrame in parallel via rayon; read the schema
         //      sentinel for each table at the same time so queries that miss
         //      a partition never re-open the schema file (Proposal J).
@@ -1425,28 +1433,14 @@ impl EngineState {
         //      directory traversal" to "one atomic HashMap::extend", so
         //      concurrent readers are no longer blocked during reload.
 
-        // Phase 1a: collect top-level table entries. We eagerly materialise
-        // into Vec<(PathBuf, String, bool)> because DirEntry is not Send on
-        // all platforms, so we cannot pass the iterator directly to rayon.
-        let paths = match fs::read_dir(path) {
-            Ok(p) => p,
-            Err(e) => {
-                return Err(SpicyError::EvalErr(format!("OS err: {}", e)));
-            }
-        };
-        let entries: Vec<(PathBuf, String, bool)> = paths
-            .filter_map(|e| match e {
-                Ok(entry) => {
-                    let is_file = entry.metadata().ok().map(|m| m.is_file()).unwrap_or(false);
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    Some((entry.path(), name, is_file))
-                }
-                Err(e) => {
-                    eprintln!("OS err: {}", e);
-                    None
-                }
-            })
-            .collect();
+        // Phase 1a: recursively collect table entries. We traverse
+        // subdirectories until we hit one whose first file starts with a
+        // digit (partition data). Intermediate directory names are joined
+        // with '.' to form the qualified table name, e.g.
+        //   /path/sub1/table → sub1.table
+        let root = PathBuf::from(path);
+        let mut entries: Vec<(PathBuf, String, bool)> = Vec::new();
+        Self::collect_table_entries(&root, &[], &mut entries)?;
 
         // Phase 1b: build each PartitionedDataFrame in parallel. Each table
         // is independent so rayon `par_iter` is safe and gives roughly Nx
@@ -1466,6 +1460,83 @@ impl EngineState {
             par_df.insert(k, v);
         }
         Ok(())
+    }
+
+    /// Recursively collect table entries under `dir`. `prefix` accumulates
+    /// parent directory names to form dot-separated qualified table names.
+    ///
+    /// For each child of `dir`:
+    /// - **File** → emitted as a single-file table with the qualified name.
+    /// - **Directory containing partition files** (files whose name starts
+    ///   with a digit, e.g. `2024.01.01_data` or `2025_01`) → emitted as a
+    ///   partitioned table entry for `build_par_df_entry`.
+    /// - **Directory without partition files** → treated as a namespace;
+    ///   its name is appended to `prefix` and we recurse.
+    fn collect_table_entries(
+        dir: &PathBuf,
+        prefix: &[String],
+        out: &mut Vec<(PathBuf, String, bool)>,
+    ) -> SpicyResult<()> {
+        let read_dir = fs::read_dir(dir)
+            .map_err(|e| SpicyError::EvalErr(format!("OS err: {}", e)))?;
+
+        let children: Vec<(PathBuf, String, bool)> = read_dir
+            .filter_map(|e| match e {
+                Ok(entry) => {
+                    let is_file = entry.metadata().ok().map(|m| m.is_file()).unwrap_or(false);
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    Some((entry.path(), name, is_file))
+                }
+                Err(e) => {
+                    eprintln!("OS err: {}", e);
+                    None
+                }
+            })
+            .collect();
+
+        for (child_path, child_name, is_file) in children {
+            if is_file {
+                // Single-file table.
+                let qualified_name = Self::build_qualified_name(prefix, &child_name);
+                out.push((child_path, qualified_name, true));
+            } else if Self::dir_has_partition_files(&child_path) {
+                // Directory with partition files → table entry.
+                let qualified_name = Self::build_qualified_name(prefix, &child_name);
+                out.push((child_path, qualified_name, false));
+            } else {
+                // Namespace directory → recurse deeper.
+                let mut new_prefix = prefix.to_vec();
+                new_prefix.push(child_name);
+                Self::collect_table_entries(&child_path, &new_prefix, out)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Build a dot-separated qualified table name from prefix segments and a
+    /// leaf name. Returns just the leaf name when `prefix` is empty.
+    fn build_qualified_name(prefix: &[String], name: &str) -> String {
+        if prefix.is_empty() {
+            name.to_owned()
+        } else {
+            let mut parts: Vec<&str> = prefix.iter().map(|s| s.as_str()).collect();
+            parts.push(name);
+            parts.join(".")
+        }
+    }
+
+    /// Return `true` if `dir` contains at least one file whose name starts
+    /// with an ASCII digit (i.e. a partition file like `2024.01.01_data` or
+    /// `2025_01`).
+    fn dir_has_partition_files(dir: &PathBuf) -> bool {
+        match fs::read_dir(dir) {
+            Ok(entries) => entries.filter_map(|e| e.ok()).any(|entry| {
+                let is_file = entry.metadata().ok().map(|m| m.is_file()).unwrap_or(false);
+                let name = entry.file_name().to_string_lossy().to_string();
+                is_file && name.chars().next().is_some_and(|c| c.is_ascii_digit())
+            }),
+            Err(_) => false,
+        }
     }
 
     /// Build a single `PartitionedDataFrame` entry for one top-level entry
@@ -1615,13 +1686,19 @@ impl EngineState {
     }
 
     pub fn tick(&self, index: usize, inc: i64) -> SpicyResult<SpicyObj> {
+        if index >= MAX_HANDLE_NUM {
+            return Err(SpicyError::HandleOutOfRangeErr(index as i64, MAX_HANDLE_NUM));
+        }
         let mut tick_count = self.tick_count.write();
         tick_count[index] += inc;
         Ok(SpicyObj::I64(tick_count[index]))
     }
 
-    pub fn get_tick_count(&self, index: usize) -> i64 {
-        self.tick_count.read()[index]
+    pub fn get_tick_count(&self, index: usize) -> SpicyResult<i64> {
+        if index >= MAX_HANDLE_NUM {
+            return Err(SpicyError::HandleOutOfRangeErr(index as i64, MAX_HANDLE_NUM));
+        }
+        Ok(self.tick_count.read()[index])
     }
 
     pub fn get_table_names(&self, start_with: &str) -> SpicyResult<SpicyObj> {

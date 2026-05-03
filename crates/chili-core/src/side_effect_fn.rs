@@ -232,7 +232,7 @@ fn sub_q(state: &EngineState, stack: &mut Stack, args: &[&SpicyObj]) -> SpicyRes
         }
     }
 
-    let tick_count = state.get_tick_count(stack.h as usize);
+    let tick_count = state.get_tick_count(stack.h as usize)?;
 
     if is_sub_all {
         // only replay the log file from the previous tick count

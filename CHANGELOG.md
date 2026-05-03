@@ -8,6 +8,13 @@ All notable changes to this project will be documented in this file.
 
 - Python bindings "chili-sauce" for the Chili engine
 - Modified `write_partition` and related functions to support an `overwrite` option, allowing existing partitions to be replaced.
+- `HandleOutOfRangeErr` error variant for handle numbers outside 0..1024
+- `load_par_df` now recursively traverses subdirectories to discover tables, producing dot-separated qualified names (e.g. `load("/path/sub")` loads `sub.trade`, `sub.order`)
+- Support for multiple subscribers and recovery
+
+### Fixed
+
+- Added bounds guard on `tick_count` access — handle numbers outside 0..1024 now return an error instead of panicking
 
 ## [0.7.5] - 2026-04-15
 

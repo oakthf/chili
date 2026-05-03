@@ -439,9 +439,9 @@ impl PyEngineState {
 
     /// Return the tick counter at the given index (default 0).
     #[pyo3(signature = (index=0))]
-    fn get_tick_count(&self, index: usize) -> i64 {
-        let _ = self.check_fork();
-        self.inner.get_tick_count(index)
+    fn get_tick_count(&self, index: usize) -> PyResult<i64> {
+        self.check_fork()?;
+        map_spicy_error(self.inner.get_tick_count(index))
     }
 
     /// Increment the tick counter at `index` by `inc` and return the updated value.
