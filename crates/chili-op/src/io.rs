@@ -306,7 +306,7 @@ pub fn write_partition(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
     let rechunk = *args[5].bool().unwrap();
     let overwrite = *args[6].bool().unwrap();
     write_partition_native(
-        hdb_path, partition, table_name, &df, &columns, rechunk, overwrite,
+        hdb_path, partition, table_name, df, &columns, rechunk, overwrite,
     )
 }
 

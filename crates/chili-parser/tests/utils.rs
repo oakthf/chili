@@ -114,9 +114,7 @@ pub fn should_fail_pepper_expr(src: &str, msg: &str) {
 
 #[track_caller]
 pub fn assert_eq_tokens(src: &str, src_path: &str, expected: Vec<&str>, include_punc: bool) {
-    let (tokens, errs) = chili_parser::Token::lexer()
-        .parse(src)
-        .into_output_errors();
+    let (tokens, errs) = chili_parser::Token::lexer().parse(src).into_output_errors();
 
     if !errs.is_empty() {
         print_errs(errs, src_path, src);

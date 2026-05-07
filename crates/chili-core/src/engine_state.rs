@@ -100,6 +100,7 @@ pub struct EngineState {
     /// distinct entries (the cached AST embeds source positions referencing
     /// the original source_id, which is preserved by NOT calling set_source
     /// on a cache hit).
+    #[allow(clippy::type_complexity)]
     parse_cache: Mutex<LruCache<(String, String), Arc<Vec<AstNode>>>>,
     user: String,
     lazy_mode: bool,
@@ -297,7 +298,7 @@ impl EngineState {
                     Ok(SpicyObj::I64(records.height() as i64))
                 }
                 SpicyObj::MixedList(list) => {
-                    let df1 = convert_list_to_df(&list, &df)?;
+                    let df1 = convert_list_to_df(list, df)?;
                     df.extend(&df1)
                         .map_err(|e| SpicyError::Err(e.to_string()))?;
                     Ok(SpicyObj::I64(df1.height() as i64))
@@ -349,7 +350,7 @@ impl EngineState {
                             df.clone()
                         }
                         SpicyObj::MixedList(list) => {
-                            let records = convert_list_to_df(&list, &df)?;
+                            let records = convert_list_to_df(list, df)?;
                             df.extend(&records)
                                 .map_err(|e| SpicyError::Err(e.to_string()))?;
                             df.clone()
@@ -560,6 +561,7 @@ impl EngineState {
         Ok(SpicyObj::I64(replayed_count as i64))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn replay_chili_msgs_log(
         &self,
         path: &str,
@@ -1958,8 +1960,8 @@ impl EngineState {
                 "path".into(),
                 self.par_df
                     .read()
-                    .iter()
-                    .map(|(_, p)| p.path.clone())
+                    .values()
+                    .map(|p| p.path.clone())
                     .collect::<Vec<String>>(),
             )),
         );

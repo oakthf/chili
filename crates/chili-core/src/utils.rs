@@ -1,9 +1,8 @@
 use std::{
-    cell::LazyCell,
     env,
     io::{Read, Write},
     net::TcpStream,
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::Duration,
 };
 
@@ -196,7 +195,7 @@ pub fn write_chili_ipc_msg(
     Ok(())
 }
 
-const RE_STYLE: LazyCell<Regex> = LazyCell::new(|| Regex::new(r"\x1B\[[0-9;]*m").unwrap());
+static RE_STYLE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\x1B\[[0-9;]*m").unwrap());
 
 pub fn handle_q_conn(
     rw: &mut dyn ReadWrite,
