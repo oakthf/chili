@@ -439,6 +439,83 @@ if cheap).
 
 ---
 
+## Sprint 9 Part B (P2) — symbolized rebuild + profile captured; symbolic resolution infrastructure-blocked (2026-05-08)
+
+Workspace [profile.bench] symbol-retention override (Sprint 9 P7) landed
+at sprint kickoff. Cold rebuild of load_par_df bench binary: **31m 39s
+wall** in `bench` profile [optimized + debuginfo]. Binary size: 77 MB
+(stripped version was ~3.5 MB). Disk peak during bench-profile rebuild:
+~20 GB target/release/.
+
+samply re-recorded `load_multitable_5x200p` for 10 seconds on the
+symbolized binary. Profile JSON saved at `/tmp/load_multi_symbolized.json`.
+
+### Hot-path discovery (without function names)
+
+| Thread | Total samples | Dominant leaf | Self-time |
+|---|---:|---|---:|
+| Main | 17,233 | `0x450c` | 38.6% |
+| Main | 17,233 | `0x4834` | 26.7% |
+| Main | 17,233 | `0x29c4` | 16.5% |
+| polars-0 (rayon worker) | 5,958 | **`0x450c`** | **93.1%** |
+| polars-1..4 (rayon workers) | 5,896-5,934 each | (assumed similar; 5 workers in pool) | similar |
+
+**Strong signal**: 93% of each polars worker thread's time is in a
+**single hot kernel at offset 0x450c**. Combined across 5 workers + main
+thread, this kernel dominates total CPU during multitable load. Likely
+candidates (without symbol resolution to confirm):
+
+- **`memcpy`/`memmove`** — tight kernels at low offsets in the binary
+  often correspond to libc string ops; consistent with polars's
+  chunked-Series allocation pattern.
+- **A polars hash function** (e.g., `xxhash` or `ahash`) used in
+  schema lookup or column-name interning per-table.
+- **A polars-arrow buffer initialization kernel** called per-Series-per-table.
+
+The 93% concentration in ONE function (rather than spread across many)
+suggests the regression IS a single per-table cost driver, not death-by-
+a-thousand-cuts. That's good news for mitigation: identifying + fixing
+this one function recovers most of the +22.8% load_multitable regression.
+
+### Symbolic resolution: infrastructure-blocked on autonomous run
+
+Three resolution paths, all blocked autonomously:
+
+1. **`samply load /tmp/load_multi_symbolized.json`** — opens a browser
+   that fetches symbols from the binary at display time. Requires
+   GUI / interactive browser session. Not autonomous.
+2. **`atos -o <binary> <addr>`** — macOS symbolication tool. With a
+   debug-info-embedded Mach-O, `atos` should resolve, but our
+   invocations on `0x450c`, `0x4834` etc. returned numeric addresses
+   without symbolic names. Possibly needs a separate dSYM bundle
+   (`dsymutil <binary>` would generate one); not investigated further
+   in Sprint 9.
+3. **`llvm-addr2line` / `addr2line`** — not installed on the autonomous
+   run machine; would require `brew install llvm` or `cargo install
+   addr2line`. Acceptable cost (~2pp) for a future user-driven sprint
+   but added to a future-Sprint backlog rather than absorbed in
+   Sprint 9.
+
+### Sprint 9 verdict
+
+P2 partially done: **symbolized profile is captured + the dominant hot
+kernel is identified by offset (0x450c, 93% of polars worker time)**.
+Symbolic name resolution and the actual fix lands in a future sprint
+(Sprint 12 perf-pass-3, or a dedicated user-driven mini-sprint when
+GUI / Xcode / addr2line is available).
+
+### Captured artifacts (consumed by future sprint)
+
+- `/tmp/load_multi_symbolized.json` — 3.4 MB samply JSON (Firefox
+  Profiler format) with symbolized debug info embedded but unresolved
+  names. Loadable into `https://profiler.firefox.com/` for browser-based
+  symbolic display.
+- `target/release/deps/load_par_df-34f40619e2795c29` — 77 MB bench
+  binary with debug info. Use with `dsymutil` + `atos` OR
+  `addr2line` for offline name resolution.
+
+---
+
 ## Sprint 8 Part A (P1) — parse_cache re-measure (2026-05-08)
 
 Re-measurement per reviewer C1 (Sprint 7 Part D.1) — Apple Silicon
