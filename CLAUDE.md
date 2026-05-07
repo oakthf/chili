@@ -113,7 +113,7 @@ Global:
 
 - Branch: `claude-2` (working, post-pivot) / `main` (read-only upstream mirror, user-managed) / `claude` (parked-historical, tagged `claude-baseline-2026-05-07`).
 - Remote: none. Do not re-add.
-- Pivoted from `claude` to `claude-2` on 2026-05-07. claude-2 forked from main tip `f8b6360`. Sprints 3-11 ratified (autonomous run; user pre-ratification).
+- Pivoted from `claude` to `claude-2` on 2026-05-07. claude-2 forked from main tip `f8b6360`. **Sprints 3-12 ratified — original 12-sprint roadmap closed.**
 - Pivot rationale: cherry-pick conflict accumulation on FFI-rewrite divergence surface — see `docs/standards/iteration_lessons.md` lesson 4 + `docs/history/sprints/sprint_2_dispatch_brief_2026-05-07.md`.
 - Date pin: 2026-05-08.
 - Versions on claude-2: chili-py at **0.8.1** (Sprint 7 Part A wheel); workspace at 0.8.0; Python polars pinned to `1.39.3`; Rust polars pinned to `pola-rs/polars` at **`py-1.39.3` tag** (local clone `/tmp/polars-py-1.39.3` — see ADR 0003 Sprint 8 P0 to migrate to GitHub-hosted git ref).
@@ -123,5 +123,5 @@ Global:
 - ADR 0002 (`engine.eval(lazy=True)`) shipped Sprint 4 commit `f23e40a`; **ADR 0003 RESOLVED Sprint 7 Part A** via option 3b (polars py-1.39.3 fork + q-style fmt patch) — lazy=True path now usable end-to-end with predicate pushdown across FFI. **ADR 0004 (Sprint 10):** pepper retains Polars-aligned primitive set; does NOT track k9 minimization (substrate divergence is intentional per shakti_analysis §4.3).
 - mdata delivery: **chili-sauce 0.8.1 wheel** at `dist/chili_sauce-0.8.1-cp310-abi3-macosx_11_0_arm64.whl` + handoff doc `docs/sync/mdata_chili_2026-05-08_delivery.md` (wheel-only install protocol; forbids editable installs).
 - Wheel cut workflow: `task release-py-sauce` produces `dist/<wheel>`. **NEVER** ship editable installs to mdata (lesson 14).
-- Next: Sprint 12 = perf-pass-3 + Iceberg eval + Sprint 9 carry-over (P2 load_multitable mitigation; 93% of polars worker time on offset 0x450c per Sprint 9 capture; needs symbolic resolution infra). User-driven backlog: P0 (GitHub-host polars fork), P6 (KDB-X CE GA test), addr2line/dSYM setup for autonomous symbolication.
+- Next: Sprint 13+ are scoped on incoming work (mdata feedback, perf-prioritization, ADR triggers). User-driven backlog: P0 (GitHub-host polars fork; the load-bearing landmine for fresh chili clones), KDB-X CE comparison (when GA + interactive registration), mdata sign-off on 0.8.1 delivery, Sprint 13 P2 Box::new mitigation candidates documented in bench rebaseline doc.
 - Open items: see `~/.claude/projects/-Users-oakadmin-code-chili/memory/MEMORY.md`.
