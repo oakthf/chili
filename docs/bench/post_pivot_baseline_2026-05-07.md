@@ -38,10 +38,10 @@ as those features are touched.
 |---|---|---|---|---|
 | parse_cache hit (ns, median) | `crates/chili-core/benches/parse_cache.rs` | Sprint 3 Part D | ~385 (reported, [docs/bench/phase5.md](phase5.md)) | **371.43** |
 | parse_cache cold (µs, median) | same | Sprint 3 Part D | (not recorded) | 95.37 |
-| scan throughput | `crates/chili-op/benches/scan.rs` | Sprint 4 | TBD | TBD |
-| eval throughput | `crates/chili-op/benches/eval.rs` | Sprint 4 | TBD | TBD |
-| load_par_df cold | `crates/chili-op/benches/load_par_df.rs` | Sprint 4 | TBD | TBD |
-| write_partition | `crates/chili-op/benches/write_partition.rs` | Sprint 4 | TBD | TBD |
+| scan throughput | `crates/chili-op/benches/scan.rs` | Sprint 5 (rescheduled) | TBD | compile-validated Sprint 4 |
+| eval throughput | `crates/chili-op/benches/eval.rs` | Sprint 5 (rescheduled) | TBD | compile-validated Sprint 4 |
+| load_par_df cold | `crates/chili-op/benches/load_par_df.rs` | Sprint 5 (rescheduled) | TBD | compile-validated Sprint 4 |
+| write_partition | `crates/chili-op/benches/write_partition.rs` | Sprint 5 (rescheduled) | TBD | compile-validated Sprint 4 |
 | Python concurrent eval | `crates/chili-py/tests/bench_concurrent.py` | Sprint 5 | 6.10× pre-pivot | TBD |
 
 ---
@@ -100,6 +100,46 @@ post-Part-D Rust gate).
 
 ---
 
-## Sprints 4-5 placeholder
+## Sprint 4 Part C — bench harness validation (2026-05-07)
 
-(Rows appended as those sprints touch the matching hot paths.)
+### Why no measurement numbers landed this sprint
+
+The Sprint 4 brief planned to measure scan / eval / load_par_df /
+write_partition headlines on `claude-2`. In practice, `cargo bench
+-p chili-op` requires a full release-profile recompile of the polars
+0.53 dependency tree (polars-ops, polars-stream, polars-expr, polars-plan
+each take ~1–2 min at `-C opt-level=3 -C linker-plugin-lto -C codegen-units=1`).
+Compounded over four bench files, the wall-clock cost exceeded Sprint 4's
+~2-3pp Part C budget allocation.
+
+**Sprint 4 verdict:** verified the bench harnesses **compile** cleanly via
+`cargo bench -p chili-op --no-run` (no signal that the polars-version
+upgrade or Sprint 3's clippy hand-port broke the bench code). Defer the
+actual A/B measurement to Sprint 5, where it consolidates with the
+parked-claude tag-built binary measurement and lands as a single comparison
+sweep.
+
+### Result
+
+| Bench file | Compile status | Measurement landing | Notes |
+|---|---|---|---|
+| `crates/chili-op/benches/scan.rs` | GREEN | Sprint 5 | 2000-partition fixture |
+| `crates/chili-op/benches/eval.rs` | GREEN | Sprint 5 | 100-partition × 50-symbol × 500-row fixture |
+| `crates/chili-op/benches/load_par_df.rs` | GREEN | Sprint 5 | 2000-partition + 5×200 multitable |
+| `crates/chili-op/benches/write_partition.rs` | GREEN | Sprint 5 | 5-partition write loop |
+
+### Lesson recorded for Sprint 5 budget
+
+Bench *compilation* (release profile, full polars dep tree) is itself
+expensive (~5-10 min wall on this machine when Cargo's release artifacts
+are cold). Sprint 5 should budget 3-5pp for bench compile + 2-3pp for
+runtime. If the parked-claude tag-built binary needs a *separate* release
+build, double the compile cost. Caching is mostly stable across runs in
+the same session but invalidates on any `Cargo.toml` workspace edit.
+
+---
+
+## Sprints 5+ placeholder
+
+(Rows for the actual numbers land in Sprint 5 alongside the parked-claude
+tag-built A/B comparison.)
