@@ -539,6 +539,42 @@ impl PyEngineState {
         let pydf = PyDataFrame(df);
         Ok(pydf)
     }
+
+    /// Return the polars query plan as a string, without executing the query.
+    ///
+    /// Spins up a temporary lazy-mode pepper engine, loads the HDB, evaluates
+    /// the query to a `LazyFrame`, and returns its `describe_plan()`. Useful
+    /// for query-tuning workflows. The current engine is unaffected.
+    fn query_plan(&self, py: Python<'_>, query: &str, hdb_path: &str) -> PyResult<String> {
+        self.check_fork()?;
+        let query = query.to_owned();
+        let hdb_path = hdb_path.to_owned();
+        py.detach(move || -> Result<String, String> {
+            let plan_state = EngineState::new(false, true, true);
+            plan_state.register_fn(&LOG_FN);
+            plan_state.register_fn(&BUILT_IN_FN);
+            plan_state
+                .load_par_df(&hdb_path)
+                .map_err(|e| e.to_string())?;
+            let query_obj = SpicyObj::String(query);
+            let mut stack = Stack::new(None, 0, 0, "");
+            let obj = plan_state
+                .eval(&mut stack, &query_obj, "plan.pep")
+                .map_err(|e| e.to_string())?;
+            match unwrap_return(obj) {
+                SpicyObj::LazyFrame(lf) => lf.describe_plan().map_err(|e| e.to_string()),
+                SpicyObj::DataFrame(_) => Err(
+                    "query collected eagerly — lazy plan not available for this query shape"
+                        .into(),
+                ),
+                other => Err(format!(
+                    "query returned {}, expected LazyFrame",
+                    other.get_type_name()
+                )),
+            }
+        })
+        .map_err(PyRuntimeError::new_err)
+    }
 }
 
 /// PyO3 module entry point — registers the `EngineState` class and

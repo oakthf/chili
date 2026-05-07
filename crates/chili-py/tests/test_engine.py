@@ -334,3 +334,91 @@ class TestLogBuiltins:
 class TestTableCount:
     def test_table_count_zero_on_fresh_engine(self, engine: ChiliEngine):
         assert engine.table_count() == 0
+
+
+class TestColumnScale:
+    """Read-side dequantization helper (golden rule 4)."""
+
+    def test_set_clear_round_trip(self, engine: ChiliEngine):
+        engine.set_column_scale("ohlcv_1d", "close", 1_000_000)
+        engine.set_column_scale("ohlcv_1d", "open", 1_000_000)
+        assert engine._column_scales == {
+            "ohlcv_1d": {"close": 1_000_000, "open": 1_000_000}
+        }
+        engine.clear_column_scales()
+        assert engine._column_scales == {}
+
+    def test_apply_dequantizes_int64_column(self, engine: ChiliEngine):
+        engine.set_column_scale("ohlcv_1d", "close", 100)
+        df = pl.DataFrame({"sym": ["A", "B"], "close": [12345, 67890]})
+        out = engine._apply_column_scales(df, "select close from ohlcv_1d")
+        assert out["close"].dtype == pl.Float64
+        assert out["close"].to_list() == [123.45, 678.90]
+
+    def test_apply_skips_non_referenced_table(self, engine: ChiliEngine):
+        engine.set_column_scale("ohlcv_1d", "close", 100)
+        df = pl.DataFrame({"sym": ["A"], "close": [12345]})
+        out = engine._apply_column_scales(df, "select close from ohlcv_1m")
+        assert out["close"].dtype == pl.Int64
+
+    def test_apply_no_op_when_no_scales(self, engine: ChiliEngine):
+        df = pl.DataFrame({"close": [12345]})
+        out = engine._apply_column_scales(df, "select close from ohlcv_1d")
+        assert out.equals(df)
+
+
+@pytest.fixture()
+def tmp_hdb(tmp_path):
+    """Build a small HDB on disk: ohlcv_1d / 2024.01.01 with two rows."""
+    hdb_dir = tmp_path / "hdb"
+    hdb_dir.mkdir()
+    df = pl.DataFrame(
+        {
+            "sym": ["AAPL", "MSFT"],
+            "close": [19000, 38000],
+        }
+    )
+    e = ChiliEngine()
+    hdb = str(hdb_dir)
+    e.write_partitioned_df(df, hdb, "ohlcv_1d", "2024.01.01")
+    e.shutdown()
+    return hdb
+
+
+class TestOverwritePartition:
+    def test_overwrite_returns_positive(self, engine: ChiliEngine, tmp_hdb):
+        new_df = pl.DataFrame({"sym": ["AAPL"], "close": [20000]})
+        result = engine.overwrite_partition(new_df, tmp_hdb, "ohlcv_1d", "2024.01.01")
+        # wpar returns bytes-written or row-count depending on shard layout;
+        # the contract here is "did not error" + "returned a non-zero int."
+        assert isinstance(result, int)
+        assert result > 0
+
+
+class TestQueryPlan:
+    def test_query_plan_returns_string(self, tmp_hdb):
+        # query_plan internally creates a temp pepper-syntax engine; the
+        # caller-visible engine just needs an HDB path passed.
+        e = ChiliEngine(pepper=True)
+        try:
+            plan = e.query_plan(
+                "select last close by sym from ohlcv_1d where date=2024.01.01", tmp_hdb
+            )
+            assert isinstance(plan, str)
+            assert len(plan) > 0
+        finally:
+            e.shutdown()
+
+    def test_query_plan_uses_cached_hdb_path(self, tmp_hdb):
+        e = ChiliEngine(pepper=True)
+        try:
+            e.load_partitioned_df(tmp_hdb)
+            plan = e.query_plan("select last close by sym from ohlcv_1d where date=2024.01.01")
+            assert isinstance(plan, str)
+            assert len(plan) > 0
+        finally:
+            e.shutdown()
+
+    def test_query_plan_raises_without_hdb(self, engine: ChiliEngine):
+        with pytest.raises(RuntimeError, match="No HDB path provided"):
+            engine.query_plan("select * from ohlcv_1d")

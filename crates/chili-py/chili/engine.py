@@ -35,6 +35,8 @@ class ChiliEngine:
         self.is_tick_loaded = False
         self.is_sub_loaded = False
         self.engine = EngineState(debug, lazy, pepper, job_interval, memory_limit)
+        self._hdb_path: Optional[str] = None
+        self._column_scales: Dict[str, Dict[str, int]] = {}
 
     def eval(self, source: str, src_path: Optional[str] = None) -> Any:
         """Evaluate a Chili or Pepper expression string.
@@ -47,10 +49,15 @@ class ChiliEngine:
 
         Returns:
             The result of the evaluation, converted to a Python type.
+            DataFrames are auto-dequantized via registered column scales
+            (see :meth:`set_column_scale`).
         """
         if src_path is None:
             src_path = "repl.chi" if self.is_repl_use_chili_syntax() else "repl.pep"
-        return self.engine.eval(source, src_path)
+        result = self.engine.eval(source, src_path)
+        if isinstance(result, pl.DataFrame):
+            return self._apply_column_scales(result, source)
+        return result
 
     def get_var(self, id: str) -> Any:
         """Retrieve the value of a variable by name.
@@ -202,7 +209,7 @@ class ChiliEngine:
         df: pl.DataFrame,
         hdb_path: str,
         table: str,
-        date: str,
+        date: Any,
         sort_columns: Optional[list[str]] = None,
         rechunk: bool = False,
         overwrite: bool = False,
@@ -213,7 +220,8 @@ class ChiliEngine:
             df: The data to write.
             hdb_path: Root directory of the partitioned database.
             table: Table name (sub-directory under each date partition).
-            date: Partition date string (e.g. ``"2024.01.01"``).
+            date: Partition date — accepts ``datetime.date`` directly or
+                  a ``"YYYY.MM.DD"`` string.
             sort_columns: Optional columns to sort by before writing.
             rechunk: Re-chunk the data into a single contiguous allocation.
             overwrite: If ``True``, overwrite an existing partition.
@@ -221,8 +229,20 @@ class ChiliEngine:
         Returns:
             The number of rows written.
         """
+        from datetime import date as _date_t, datetime as _dt_t
+
+        if isinstance(date, str):
+            partition = _dt_t.strptime(date, "%Y.%m.%d").date()
+        elif isinstance(date, (_date_t, _dt_t)):
+            partition = date
+        else:
+            partition = date  # let the engine validate
+        sort_cols_arg: Any = pl.Series(
+            "sort_columns", sort_columns or [], dtype=pl.Categorical
+        )
         return self.fn_call(
-            "wpar", [df, hdb_path, table, date, sort_columns, rechunk, overwrite]
+            "wpar",
+            [hdb_path, partition, table, df, sort_cols_arg, rechunk, overwrite],
         )
 
     def load_partitioned_df(self, hdb_path: str) -> None:
@@ -234,6 +254,7 @@ class ChiliEngine:
             hdb_path: Root directory of the partitioned database.
         """
         self.fn_call("load", [hdb_path])
+        self._hdb_path = hdb_path
 
     def clear_partitioned_df(self) -> None:
         """Remove all loaded partitioned DataFrames from memory."""
@@ -242,6 +263,88 @@ class ChiliEngine:
     def table_count(self) -> int:
         """Return the number of partitioned tables currently loaded."""
         return self.engine.table_count()
+
+    # -----------------------------------------------------------------------
+    # Column scale dequantization (golden rule 4 read-side helper)
+    # -----------------------------------------------------------------------
+
+    def set_column_scale(self, table: str, column: str, factor: int) -> None:
+        """Register a dequantization scale factor for a column.
+
+        After ``set_column_scale("ohlcv_1d", "close", 1_000_000)``, any
+        ``eval()`` result whose query references ``ohlcv_1d`` and contains
+        an ``Int64`` ``close`` column is auto-cast to ``Float64`` and
+        divided by ``factor`` before being returned.
+
+        The on-disk schema stays Int64-quantized (golden rule 4); this is
+        a read-time helper for callers that want Float64 ergonomics.
+        """
+        self._column_scales.setdefault(table, {})[column] = factor
+
+    def clear_column_scales(self) -> None:
+        """Remove all registered column scale factors."""
+        self._column_scales.clear()
+
+    def _apply_column_scales(
+        self, df: "pl.DataFrame", query: str
+    ) -> "pl.DataFrame":
+        if not self._column_scales:
+            return df
+        for table, scales in self._column_scales.items():
+            if f"from {table}" not in query:
+                continue
+            cast_exprs = []
+            for col_name, factor in scales.items():
+                if col_name in df.columns and df[col_name].dtype == pl.Int64:
+                    cast_exprs.append(
+                        pl.col(col_name).cast(pl.Float64) / factor
+                    )
+            if cast_exprs:
+                df = df.with_columns(cast_exprs)
+            break
+        return df
+
+    def overwrite_partition(
+        self,
+        df: pl.DataFrame,
+        hdb_path: str,
+        table: str,
+        date: str,
+        sort_columns: Optional[list[str]] = None,
+        rechunk: bool = False,
+    ) -> int:
+        """Overwrite a date-partitioned table on disk with new data.
+
+        Deletes all existing shard files for the given date partition, then
+        writes ``df`` as the new content. Use this for replacing a partition
+        in place (e.g., bulk corrections, dedupe replays).
+
+        Distinct from ``write_partitioned_df(overwrite=True)`` only in
+        naming — preserves the API surface mdata depends on.
+        """
+        return self.write_partitioned_df(
+            df, hdb_path, table, date, sort_columns, rechunk, overwrite=True
+        )
+
+    def query_plan(self, query: str, hdb_path: Optional[str] = None) -> str:
+        """Return the polars query plan for *query* without executing it.
+
+        Internally spins up a temporary lazy-mode engine, loads the HDB,
+        evaluates *query* to obtain a ``LazyFrame``, and returns its
+        ``describe_plan()`` string. The current engine state is unaffected.
+
+        Args:
+            query: The pepper / chili query string.
+            hdb_path: HDB root directory. Defaults to the most recently
+                loaded path on this engine (via ``load_partitioned_df``).
+        """
+        path = hdb_path if hdb_path is not None else self._hdb_path
+        if path is None:
+            raise RuntimeError(
+                "No HDB path provided and no prior load_partitioned_df() call. "
+                "Pass hdb_path= explicitly or call load_partitioned_df() first."
+            )
+        return self.engine.query_plan(query, path)
 
     def start_tcp_listener(
         self,
