@@ -232,6 +232,26 @@ py-1.39.3 polars than on rs-0.53.0+hinmeru. Likely candidates:
 **Sprint 8 Part 1 P2 task:** profile a 5-table load on py-1.39.3 vs
 rs-0.53.0 polars; identify the per-table linear cost driver; mitigate.
 
+Concrete first-move profiling command (avoids the three-way ambiguity
+of polars-plan-setup / mimalloc-interaction / schema-validation):
+
+```bash
+# Baseline criterion run with profiling sampling enabled:
+cargo bench -p chili-op --bench load_par_df -- \
+    load/load_multitable_5x200p --profile-time 30
+# Then collect a flamegraph via samply (preferred on macOS over
+# Instruments for ad-hoc rust profiling):
+cargo install samply --locked  # one-time
+samply record \
+    target/release/deps/load_par_df-* \
+    --bench load_multitable_5x200p --profile-time 10
+samply load   # opens the flamegraph in browser
+# Look for the per-table cost driver: should appear as a 5x repeated
+# stack frame absent from single-table loads. Likely candidates:
+# polars-plan LazyFrame::scan_parquet setup, polars-io schema inference,
+# or mimalloc allocation pattern for chunked Series initialization.
+```
+
 #### R3 — eval bench query parser regression (chili syntax tightened on claude-2)
 
 `crates/chili-op/benches/eval.rs` panicked on first variant

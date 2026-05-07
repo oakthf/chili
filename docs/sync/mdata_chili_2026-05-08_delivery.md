@@ -187,11 +187,9 @@ uv pip install /Users/oakadmin/code/chili/dist/chili_sauce-0.8.1-cp310-abi3-maco
 
 ### 4.3 Verify install is wheel-based (NOT editable)
 
-```bash
-uv pip show chili-sauce
-```
+Two checks — both must pass.
 
-Expected output:
+**Check 1:** `uv pip show chili-sauce`
 
 ```
 Name: chili-sauce
@@ -202,6 +200,27 @@ Location: /Users/oakadmin/code/mdata/.venv/lib/python3.12/site-packages
               If Location points anywhere inside chili's repo
               (e.g., /Users/oakadmin/code/chili/crates/chili-py/...),
               this is an EDITABLE install — uninstall and redo.
+```
+
+**Check 2:** the most reliable verification — `chili.__file__` resolution
+at import time. This catches `.pth`-file editable ghosts that survived
+an apparently-successful `uv pip uninstall` (a known failure mode of
+`pip install -e`):
+
+```bash
+python -c "import chili; print(chili.__file__)"
+```
+
+Expected output: a path **inside** mdata's `site-packages`, e.g.
+`/Users/oakadmin/code/mdata/.venv/lib/python3.12/site-packages/chili/__init__.py`.
+
+If the printed path is **anywhere inside chili's source repo** (e.g.,
+`/Users/oakadmin/code/chili/crates/chili-py/chili/__init__.py`), an
+editable install is still active. Find the offending `.pth`:
+
+```bash
+find /Users/oakadmin/code/mdata/.venv -name "*.pth" -exec grep -l chili {} \;
+# Remove any matching .pth file; redo §4.1 + §4.2.
 ```
 
 ### 4.4 Smoke test

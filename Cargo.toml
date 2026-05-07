@@ -58,9 +58,14 @@ codegen-units = 1
 #      hinmeru/polars-core-patch.git fork was carrying (now ported into
 #      chili's local clone as a single 30-line patch on top of py-1.39.3
 #      polars-core).
-# Local clone path: /tmp/polars-py-1.39.3 (must exist for any chili build
-# until the fork is hosted on a stable URL — see ADR 0003 amendment for
-# migration plan).
+# Local clone path: /tmp/polars-py-1.39.3 MUST EXIST locally — see ADR 0003
+# amendment "Outstanding migration work" §1 for the GitHub-hosted-fork
+# migration plan (Sprint 8 P0). On a fresh clone of this repo, OR on a
+# CI runner, OR after a macOS reboot (which flushes /tmp), `cargo build`
+# will fail with `no such file` until /tmp/polars-py-1.39.3 is recreated
+# (re-clone pola-rs/polars at py-1.39.3 tag and re-apply the q-style fmt
+# patch from commit 8d56f02 in the local clone) OR the patch block is
+# rewritten to use git-based refs.
 [patch.crates-io]
 polars         = { path = "/tmp/polars-py-1.39.3/crates/polars" }
 polars-arrow   = { path = "/tmp/polars-py-1.39.3/crates/polars-arrow" }
