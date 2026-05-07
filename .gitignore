@@ -23,3 +23,4 @@ polars-core
 # these locks are managed there, not committed alongside the workspace.
 crates/chili-py/Cargo.lock
 crates/chili-py/uv.lock
+/dist/
