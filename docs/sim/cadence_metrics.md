@@ -17,6 +17,7 @@ existing locations and is not retro-fitted into this table.
 | Sprint | Theme | Pred pp | Actual pp | Variance % | Mid-sprint pivots | User-touch | Gate defects | Test count delta | Wrap timestamp |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---|
 | 1 | Strategic research + main↔claude inventory | 22–35 | ~25 | −11% (low edge) | 0 | 0 (kickoff/ratification only; no mid-sprint user msg) | 0 (research; no Rust touched) | 0 | 2026-05-07 ~00:10 SGT |
+| 2 | claude-2 pivot (v1 halt + v2 ratify-and-execute) | 8–14 (v2 brief; v1+v2 implied 13–23) | ~20–22 | +73% to +91% vs v2 midpoint; ~+27% within implied total band | 1 (v1 halt → pivot to v2) | ~6 (Part A scope ratification, env-fix go-ahead, mid-Part-B answer for next steps, Part B continue ratification, Part C-D-E continue ratification, post-Part-A check-in) | 1 (bare main fmt diff in chili-parser/tests/chili/test_error.rs; fixed via cargo fmt --all in 4fbe5eb) + clippy still RED on claude-2 deferred to Sprint 3 | 0 | 2026-05-07 (Part E commit) |
 
 ---
 

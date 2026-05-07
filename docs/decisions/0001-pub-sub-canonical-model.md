@@ -1,8 +1,8 @@
 # ADR-0001 — Pub/sub canonical model
 
-**Date:** 2026-05-07 (drafted Sprint 2 v2 Part C; ratified at Sprint 2 v2 wrap)
-**Status:** Draft — pending user ratification at Sprint 2 v2 wrap
-**Cutover commits:** TBD (claude-2 baseline already adopts upstream's tick/sub by virtue of being forked from main tip; Sprint 4 confirms by per-feature port decisions)
+**Date:** 2026-05-07 (drafted + ratified Sprint 2 v2 Part C)
+**Status:** Accepted (user ratified 2026-05-07 alongside the pivot direction; this Part C entry records the formal ADR ratification on `claude-2`)
+**Cutover commits:** Already in effect — claude-2 was forked from main tip on 2026-05-07 (`f8b6360`, tagged `main-pivot-2026-05-07`); main's tick/sub framework (commit `7948744`) is already on claude-2 as the only pub/sub surface. claude's models are parked-historical on `claude` branch (tagged `claude-baseline-2026-05-07`). Sprint 5 parallel-binary A/B comparison validates retirement.
 
 ---
 
