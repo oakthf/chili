@@ -84,6 +84,7 @@ Start here: [`README.md`](README.md) — performance summary + Document Index of
 - [`docs/standards/iteration_lessons.md`](docs/standards/iteration_lessons.md) — durable rules promoted from sprint retros.
 - [`docs/sync/`](docs/sync/) — `decisions-needed.md` (irreversible decisions) + `ideas.md` (tagged backlog).
 - [`docs/decisions/`](docs/decisions/) — ADRs (reversible decisions; see `README.md` for convention).
+- [`docs/sync/mdata_chili_2026-05-07_delivery.md`](docs/sync/mdata_chili_2026-05-07_delivery.md) — Sprint 5 wheel delivery handoff for mdata (held until sign-off).
 - [`docs/history/`](docs/history/) — frozen historical docs; never modify, only add.
 
 ## Rules map
@@ -115,12 +116,14 @@ Global:
 
 - Branch: `claude-2` (working, post-pivot) / `main` (read-only upstream mirror, user-managed) / `claude` (parked-historical, tagged `claude-baseline-2026-05-07`).
 - Remote: none. Do not re-add.
-- Pivoted from `claude` to `claude-2` on 2026-05-07. claude-2 forked from main tip `f8b6360`. Sprints 3 + 4 ratified 2026-05-07 (autonomous run; user pre-ratification).
+- Pivoted from `claude` to `claude-2` on 2026-05-07. claude-2 forked from main tip `f8b6360`. Sprints 3 + 4 + 5 ratified 2026-05-07 (autonomous run; user pre-ratification).
 - Pivot rationale: cherry-pick conflict accumulation on FFI-rewrite divergence surface — see `docs/standards/iteration_lessons.md` lesson 4 + `docs/history/sprints/sprint_2_dispatch_brief_2026-05-07.md`.
 - Date pin: 2026-05-07.
-- Versions on claude-2: workspace + chili-py at 0.8.0 (inherited from main tip `f8b6360`).
+- Versions on claude-2: workspace + chili-py at 0.8.0 (inherited from main tip `f8b6360`); Python polars pinned to `1.39.3` per ADR 0003.
 - Python min: 3.10 (raised from 3.7 by pyo3 0.27 abi3-py310). See `docs/dev_setup.md` for env setup.
-- Test count on claude-2 (post-Sprint-4): **166 Rust** (`cargo test --workspace --exclude chili-py`) + **60 chili-py pytest passing + 4 xfailed** (`uv run pytest`; xfail = polars 1.39 Python / 0.53 Rust DSL skew, Sprint 5 pin).
-- Bench gate (golden rule 6): parse_cache hit **371.43 ns** on claude-2 (PASS, < 400 ns target; outperforms parked-claude's reported ~385 ns). Sprint 5 adds the scan/eval/load/write A/B sweep.
-- ADR 0002 (`engine.eval(lazy=True)`) shipped Sprint 4 commit `f23e40a`; chili-py clippy gate now GREEN end-to-end.
+- Test count on claude-2 (post-Sprint-5): **166 Rust** (`cargo test --workspace --exclude chili-py`) + **61 chili-py pytest passing + 4 xfailed** (`uv run pytest`; xfail = polars-core-patch fork DSL incompat per ADR 0003).
+- Bench gate (golden rule 6): parse_cache hit **371.43 ns** on claude-2 (PASS, < 400 ns target; outperforms parked-claude's reported ~385 ns). Full A/B sweep (scan / eval / load / write) deferred to Sprint 7 post-housekeeping.
+- ADR 0002 (`engine.eval(lazy=True)`) shipped Sprint 4 commit `f23e40a`; ADR 0003 (PyLazyFrame DSL incompat) accepted Sprint 5 — lazy path is documented but unusable until pyo3-polars upstream fix.
+- mdata delivery wheel cut Sprint 5: `crates/chili-py/target/wheels/chili_sauce-0.8.0-cp310-abi3-macosx_11_0_arm64.whl` + handoff doc `docs/sync/mdata_chili_2026-05-07_delivery.md`.
+- Next: Sprint 6 = deep housekeeping (every-5-sprints sweep per cadence rule).
 - Open items: see `~/.claude/projects/-Users-oakadmin-code-chili/memory/MEMORY.md`.

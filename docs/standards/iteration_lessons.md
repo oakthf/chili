@@ -390,3 +390,83 @@ regression.
 XPASS break the suite + 1pp avoided on the "did this regress?"
 investigation cost when an unrelated chili change surfaces a different
 failure mode. Recurs every sprint that touches polars FFI surfaces.
+
+### ADR a structural blocker the moment cost-of-resolution exceeds cost-of-deferral
+
+**Rule.** When a Sprint discovers a structural blocker — a constraint
+baked into the dependency graph or external API surface, NOT just a
+bug — and the fix path costs >5pp while the workaround / deferral path
+costs <1pp, draft an ADR documenting the blocker + the explicit defer
+decision + all viable resolution paths ranked by cost. The ADR is the
+discovery's durable home; without it the structural finding rots in
+retro notes and gets re-discovered in a future sprint at full cost.
+Don't rely on retro mentions — those don't bind future sprints. An ADR
+with `Status: Accepted (defer-resolution)` does.
+
+**Why.** Sprint 5 Part A, 2026-05-07. Tested 4 Python polars versions
+(1.20, 1.30, 1.39.0, 1.39.3). All failed to match Rust polars 0.53.0's
+`DSL_SCHEMA_HASH`. Investigation revealed the root cause is chili's
+`hinmeru/polars-core-patch.git#v0.53.0` fork — its `polars-plan`
+source hashes differently from any stock Python polars wheel. NO
+version pin on the Python side resolves this; the only fixes are
+(a) pyo3-polars upstream releases a DSL-decoupled transfer
+(~0.5pp when it ships); (b) chili replaces the patch fork with stock
+polars (5-15pp); (c) chili custom-builds a Python polars to match
+(5-10pp + ongoing publish maintenance). Without ADR 0003, a future
+sprint would re-test versions, re-investigate, and re-conclude — the
+same sunk discovery cost. With ADR 0003 documenting the structural
+finding + ranked resolution paths, any future sprint can immediately
+decide which path to pursue (or wait for option a to ship). The ADR
+also surfaces the decision to `Status: Accepted (defer-resolution)`,
+making the choice non-silent for future-self review.
+
+**Apply where.** Any Sprint that surfaces "X is not version-fixable
+because Y" or "this works around Z by Y but the real fix is W which
+costs >5pp." Especially load-bearing for: pyo3-polars version
+transitions (lesson 5 + ADR 0003 territory); polars-core-patch fork
+maintenance; FFI ABI changes; cross-project version-skew constraints
+between chili and mdata or nxcar. Inverse case (a clean fix exists at
+≤1pp) doesn't warrant an ADR — just fix it.
+
+**Cost saved.** ~3-5pp per future sprint that would otherwise
+re-investigate the same structural blocker + risk reduction on a future
+engineer attempting a fix that ranks lower in the ADR's cost-ranked
+options without realizing the higher-ranked option exists. Recurs
+every sprint that touches the affected surface.
+
+### `uv sync` triggered by pyproject `dependencies` change rebuilds maturin wheel at release profile
+
+**Rule.** When editing `pyproject.toml` `[project] dependencies = [...]`
+or `[dependency-groups] dev = [...]` (or any field that changes the
+project state hash), `uv sync` will rebuild any maturin-managed
+editable install at the **release profile**. On chili-py with the
+polars 0.53 dep tree, that's a 5+ min wall cost on the first `uv sync`
+after each pyproject change. Subsequent `uv run pytest` invocations
+reuse the cached release artifacts. Plan accordingly: pyproject edits
+in a sprint should be batched and committed BEFORE running tests, and
+the test gate budget should include that one-time rebuild cost
+(~3-5pp on chili).
+
+**Why.** Sprint 5 Part A, 2026-05-07. Added `polars==1.39.3` to
+pyproject for the mdata wheel pin. uv sync triggered a release-profile
+rebuild that took ~5-7 min wall and burned ~3pp before pytest could
+even run. Predicted Part A cost (1.5-2.5pp) was based on "edit
+pyproject + run existing pytest" — actual was 4-5pp because of the
+rebuild. The coupling exists because pyproject is the source of truth
+for both Python deps AND maturin's Rust build state; uv treats any
+field change as project-state invalidation. Generalizes to any
+maturin-managed editable Python project.
+
+**Apply where.** Any sprint that edits `crates/chili-py/pyproject.toml`.
+Especially: dep-bump sprints (pyo3, pyo3-polars, polars); ADR resolution
+sprints touching Python deps; wheel-rev sprints. Specifically: Sprint 6
+deep housekeeping should NOT edit pyproject without budgeting the
+rebuild cost; future ADR 0003 resolution sprints (option a:
+pyo3-polars upgrade) MUST budget ~5pp for this rebuild on top of the
+upstream version bump. Inverse case (pure-Python project, no maturin)
+doesn't apply.
+
+**Cost saved.** ~3-5pp per sprint that edits pyproject + runs pytest
+in the same wrap. Recurs on every dep-bump sprint, ADR resolution
+sprint, and wheel-rev sprint. Saves the calibration drift that comes
+from "I predicted this at 2pp but it took 5pp because of the rebuild."
