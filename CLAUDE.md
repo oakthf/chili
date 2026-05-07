@@ -115,11 +115,12 @@ Global:
 
 - Branch: `claude-2` (working, post-pivot) / `main` (read-only upstream mirror, user-managed) / `claude` (parked-historical, tagged `claude-baseline-2026-05-07`).
 - Remote: none. Do not re-add.
-- Pivoted from `claude` to `claude-2` on 2026-05-07. claude-2 forked from main tip `f8b6360`. Sprint 3 ratified 2026-05-07 (autonomous run; user pre-ratification).
+- Pivoted from `claude` to `claude-2` on 2026-05-07. claude-2 forked from main tip `f8b6360`. Sprints 3 + 4 ratified 2026-05-07 (autonomous run; user pre-ratification).
 - Pivot rationale: cherry-pick conflict accumulation on FFI-rewrite divergence surface — see `docs/standards/iteration_lessons.md` lesson 4 + `docs/history/sprints/sprint_2_dispatch_brief_2026-05-07.md`.
 - Date pin: 2026-05-07.
 - Versions on claude-2: workspace + chili-py at 0.8.0 (inherited from main tip `f8b6360`).
 - Python min: 3.10 (raised from 3.7 by pyo3 0.27 abi3-py310). See `docs/dev_setup.md` for env setup.
-- Test count on claude-2 (post-Sprint-3): **166 Rust** (`cargo test --workspace --exclude chili-py`) + **58 chili-py pytest** (`uv run pytest`).
-- Bench gate (golden rule 6): parse_cache hit **371.43 ns** on claude-2 (PASS, < 400 ns target; outperforms parked-claude's reported ~385 ns).
+- Test count on claude-2 (post-Sprint-4): **166 Rust** (`cargo test --workspace --exclude chili-py`) + **60 chili-py pytest passing + 4 xfailed** (`uv run pytest`; xfail = polars 1.39 Python / 0.53 Rust DSL skew, Sprint 5 pin).
+- Bench gate (golden rule 6): parse_cache hit **371.43 ns** on claude-2 (PASS, < 400 ns target; outperforms parked-claude's reported ~385 ns). Sprint 5 adds the scan/eval/load/write A/B sweep.
+- ADR 0002 (`engine.eval(lazy=True)`) shipped Sprint 4 commit `f23e40a`; chili-py clippy gate now GREEN end-to-end.
 - Open items: see `~/.claude/projects/-Users-oakadmin-code-chili/memory/MEMORY.md`.
