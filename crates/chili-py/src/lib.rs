@@ -382,8 +382,8 @@ impl PyEngineState {
     fn upsert(&self, id: &str, value: Bound<'_, PyAny>) -> PyResult<i64> {
         self.check_fork()?;
         let obj = spicy_from_py_bound(&value)?;
-        let obj = map_spicy_error(self.inner.upsert_var(id, &obj));
-        Ok(obj.map(|o| *o.i64().unwrap_or(&0i64))?)
+        let obj = map_spicy_error(self.inner.upsert_var(id, &obj))?;
+        Ok(*obj.i64().unwrap_or(&0i64))
     }
 
     /// Insert rows into a DataFrame variable, deduplicating by `by` columns.
@@ -393,8 +393,8 @@ impl PyEngineState {
         self.check_fork()?;
         let obj = spicy_from_py_bound(&value)?;
         let by = by.iter().map(|s| s.as_str()).collect::<Vec<&str>>();
-        let obj = map_spicy_error(self.inner.insert_var(id, &obj, &by));
-        Ok(obj.map(|o| *o.i64().unwrap_or(&0i64))?)
+        let obj = map_spicy_error(self.inner.insert_var(id, &obj, &by))?;
+        Ok(*obj.i64().unwrap_or(&0i64))
     }
 
     /// Return engine statistics as a Python dict.
