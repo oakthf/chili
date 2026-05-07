@@ -626,18 +626,36 @@ The following questions require user clarification before final porting decision
 
 ---
 
-### 7.2 PyLazyFrame support on claude — is it complete?
+### 7.2 PyLazyFrame support on claude-2 — RESOLVED 2026-05-07
 
-**Issue:** Main's commit `98fbd7f` adds `numpy` dep and `PyLazyFrame` support. Claude's imports suggest `pyo3_polars::PyDataFrame` extensively, but `PyLazyFrame` was not surveyed in detail.
+**Resolution (2026-05-07):**
 
-**Questions:**
-- Does claude's `chili-py` currently support returning `polars.LazyFrame` from `eval(lazy=True)` without errors?
-- If so, does main's `98fbd7f` add new functionality beyond what's already present?
-- If not, is LazyFrame support deferred for a future phase, or should it land as part of the FFI stabilization?
+- **claude-2 has full `PyLazyFrame` support natively** (inherited from main commits
+  `8a48f48` "Add lazy evaluation support" + `98fbd7f` "expose PyLazyFrame in Python
+  bindings"). `pyo3-polars` 0.26 is configured with `features = ["lazy"]`;
+  `crates/chili-py/src/lib.rs:40` imports `PyLazyFrame`; `crates/chili-py/src/lib.rs:261`
+  has the direct return path `SpicyObj::LazyFrame(lf) => Ok(PyLazyFrame(lf).into_pyobject(py)?...)`.
+- **claude (parked-historical) deliberately does NOT expose lazy returns to Python.** Its
+  `eval` impl eagerly materializes `LazyFrame` → `DataFrame` inside `py.allow_threads()`
+  — paired with golden rule 5 (GIL release). claude's choice was: return only
+  DataFrames; preserve the 6.10× concurrent throughput pattern.
+- **The eager-vs-lazy default for `engine.eval` is a Python API design choice, NOT a
+  GIL constraint.** pyo3-polars 0.26's `LazyFrame.collect()` impl wraps heavy work in
+  `py.allow_threads()` itself — GIL release is preserved on the lazy path too. Claim
+  to the contrary surfaced in Sprint 2 v2 wrap conversation; verified false; promoted
+  to iteration lesson 5 (`docs/standards/iteration_lessons.md`).
+- **ADR 0002 ratified 2026-05-07 (Option b — opt-in lazy):**
+  - Default: `engine.eval(query, lazy=False)` returns `PyDataFrame` (claude behavior).
+  - Opt-in: `engine.eval(query, lazy=True)` returns `PyLazyFrame`.
+  - Both paths preserve golden rule 5 (eager via chili's existing `allow_threads`
+    closure; lazy via pyo3-polars' built-in `.collect()` impl).
+  - mdata refactor cost: zero (default unchanged).
+  - Implementation: Sprint 4 (~1-2pp port; add `lazy` parameter; tests).
+- **Sprint 3 Part C `query_plan` port is unblocked.** `query_plan` builds a LazyFrame
+  internally and returns a string (the optimized plan) — uses existing `PyLazyFrame`
+  surface; doesn't need any new FFI.
 
-**Impact:** LazyFrame is not blocking for mdata's immediate workloads (Phase 17 uses eager DataFrames), but may be useful for query optimization workflows (query_plan introspection).
-
-**Recommendation:** Spot-check `crates/chili-py/src/lib.rs` for `PyLazyFrame` usage and clarify scope before Sprint 3 kicks off.
+**See:** `../decisions/0002-eval-lazy-eager-default.md` for the full ADR.
 
 ---
 

@@ -184,3 +184,48 @@ cost that would have recurred every upstream sync. New plan's pivot sprint is ~1
 ports for claude-only features are ~10-15pp combined. Net: cheaper *and* the end state
 is "claude-2 ≈ main + delta," which is the strategic vision target end-state per
 `project_chili_vision`.
+
+### Verify framework-level GIL-release behavior before scoping FFI design around GIL
+
+**Rule.** Before claiming a Python ↔ Rust FFI design constraint is "load-bearing
+because of the GIL" (e.g., "we can't return type X because the user would call
+`.method()` with GIL held"), verify what the underlying framework wrapper
+actually does. Many pyo3 wrappers (pyo3-polars, pyo3-numpy, etc.) already call
+`py.allow_threads()` internally on their heavy methods — the GIL is released
+during the actual computation, NOT held as the naive "Python is calling a
+method on a Python object" mental model suggests. Verify by reading the
+wrapper's source (e.g., pyo3-polars' `LazyFrame.collect` impl) or with a
+concurrent-throughput micro-bench. The symmetric trap also applies: don't claim
+"GIL is released" without checking the wrapper actually does that.
+
+**Why.** Sprint 2 v2 wrap conversation, 2026-05-07. While elaborating
+PyLazyFrame for the user, I framed the lazy-eval design choice as constrained
+by golden rule 5 (GIL released around `Engine::eval` for the 6.10× concurrent
+throughput win), claiming `engine.eval(lazy=True)` returning a `PyLazyFrame`
+would force `.collect()` to run with the GIL held. The user asked "is GIL
+release and LazyFrame mutually exclusive?" — prompting me to actually check
+pyo3-polars' source. `pyo3-polars` 0.26's `LazyFrame.collect()` impl calls
+`py.allow_threads(|| lf.collect())` internally — the GIL release is preserved.
+My initial framing led to a too-conservative recommendation (options a/b
+only, with c framed as "high refactor cost solely on grounds we now know
+are wrong") when in fact option (c) was viable on GIL grounds (still high
+mdata-refactor cost, but for a different reason — breaking change for every
+caller, not GIL constraints). Caught at ~0pp this turn because the user's
+single question surfaced it in conversation; future-self scoping a sprint
+around the false constraint could have burned 5-15pp on avoidable
+architecture work + shipped a needlessly degraded API surface.
+
+**Apply where.** Any Python ↔ Rust FFI design discussion where someone (incl.
+me) claims "X is constrained because of the GIL." Especially: pyo3-polars
+(LazyFrame / DataFrame / Series collect / write methods), pyo3-numpy,
+pyo3-asyncio, ndarray FFI. Generalizes to ANY framework-level "free behavior"
+claim in design discussions: verify the framework actually behaves the claimed
+way before scoping decisions around it. The symmetric trap (claiming GIL
+release when none is happening) is just as dangerous; both directions warrant
+verification.
+
+**Cost saved.** ~0pp this occurrence (conversation catch — user's question
+forced verification). Future-occurrence estimate: 5-15pp per avoided sprint
+that would have been scoped around a false GIL constraint, plus risk reduction
+on shipping API surfaces unnecessarily limited by misunderstood framework
+behavior.

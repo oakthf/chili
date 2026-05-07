@@ -184,7 +184,7 @@ Land the additive Class 3 features from `claude_only_features_inventory_2026-05-
 **Port:**
 - Add `query_plan(query, hdb_path)` PyO3 binding.
 - Internally: create a temporary lazy-mode engine, load the HDB, parse + evaluate to `LazyFrame`, return `.describe_plan()`.
-- **Note (for the user's PyLazyFrame question):** this method DEPENDS on `LazyFrame` support in chili-py's FFI surface. If claude-2's chili-py can return a `LazyFrame` (via `pyo3_polars::PyLazyFrame`), this port is straightforward. If not, this port may surface that gap.
+- **Confirmed unblocked:** claude-2 has full `PyLazyFrame` support natively (inherited from main; verified 2026-05-07 in inventory §7.2 resolution). The Python-facing `engine.eval(lazy=True)` API addition is a separate Python API choice — see ADR 0002 (`docs/decisions/0002-eval-lazy-eager-default.md`, ratified 2026-05-07 Option b: opt-in lazy via `lazy=False` default + `lazy=True` parameter); implementation lands in **Sprint 4**, NOT this sprint. Sprint 3 only needs the internal LazyFrame use for `query_plan`.
 
 **Tests:** Pytest case verifying `engine.query_plan("select last close by symbol from ohlcv_1d")` returns a non-empty string containing expected plan keywords.
 
@@ -375,7 +375,7 @@ State current 5h-pp delta + absolute % at every checkpoint and at wrap.
 The following user answers shape this brief:
 
 1. **Package name:** keep `chili` (matches current pyproject.toml). No rename action this sprint; continue holding per `project_chili_naming_watch.md` memory.
-2. **PyLazyFrame scope:** flagged as open question; will be elaborated to user separately. Sprint 3 Part C `query_plan` port may surface it; if so, escalate.
+2. **PyLazyFrame scope:** RESOLVED 2026-05-07. claude-2 has full `PyLazyFrame` support natively. ADR 0002 ratifies Option b (opt-in `lazy=True` parameter on `engine.eval`); implementation Sprint 4. Sprint 3 Part C `query_plan` port uses existing FFI surface; unblocked.
 3. **ADR 0001 ratification:** confirmed (Status: Accepted in Sprint 2 v2 wrap commit `3283af8`).
 4. **Parse cache 385ns invariant:** **NON-NEGOTIABLE.** Bench gate at Part D enforces ≤400ns; if main's implementation can't hit, Path 1 (port claude's shape) executes inline.
 5. **Tick_count shape:** resolved by ADR 0001; claude-2 inherits main's Vec shape.

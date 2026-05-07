@@ -76,6 +76,15 @@ Already promoted to `docs/standards/iteration_lessons.md` lesson 4 in commit `f5
 
 ### 2. (Candidate, not promoted yet) Subagent context drift on superseded planning docs
 
+(Lesson 5 — "Verify framework-level GIL-release behavior before scoping FFI design
+around GIL" — was ALSO promoted from this sprint's wrap conversation, on the
+same commit as the option (b) lazy/eager ADR ratification. Total lessons promoted
+from Sprint 2 v2: 2 (lesson 4 mid-sprint via `f5889f1`, lesson 5 wrap-side via
+follow-up commit). The "subagent context drift" candidate below stays a candidate
+pending another occurrence.)
+
+### 2a. (Candidate, not promoted yet) Subagent context drift on superseded planning docs
+
 **Rule.** When dispatching a subagent for research/audit on a topic where a recent ADR or planning doc supersedes older content, instruct the subagent EXPLICITLY to read the canonical authority first (e.g., "READ `docs/decisions/0001-pub-sub-canonical-model.md` BEFORE other docs and align all framing to its decision"). Subagents pattern-match on older planning docs by default and miss superseding ADRs.
 
 **Why.** Sprint 2 v2 Part B, 2026-05-07. The Explore subagent's draft inventory consistently framed the pub/sub recommendation as "ADR 0001 recommends Option (c) hybrid with measured retirement" — the **pre-pivot** Sprint 1 inventory recommendation, NOT ADR 0001's actual Option (a) decision. Likely root cause: agent referenced `competitive_position_2026-05-06.md` and `main_vs_claude_inventory_2026-05-06.md` §2.6 (both pre-date ADR 0001's authoring on 2026-05-07) and didn't read the ADR file directly. Main-thread correction pass touched ~12 sections; cost ~1 pp.
