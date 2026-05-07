@@ -69,6 +69,28 @@ direction inventory is Sprint 2 v2 Part B's deliverable):
 - Cross-process TCP pub/sub (`publish(handle, bytes)`) — likely retired per ADR 0001.
 - `overwrite_partition` separate fn (vs main's `write_partition(overwrite=…)` flag).
 
+## Pre-commit gate state on claude-2 at end of Part A
+
+Documenting per the Sprint 2 v2 brief Part A.4 directive: "Document failures;
+don't fix in this sprint — failures inform Sprint 3 port priorities."
+
+| Gate stage | Status | Note |
+|---|---|---|
+| `cargo fmt --all -- --check` | ✓ GREEN | One pre-existing fmt diff in `chili-parser/tests/chili/test_error.rs` was applied via `cargo fmt --all` in Part A initialization commit (`4fbe5eb`). |
+| `cargo clippy --all-targets -- -D warnings` | ✗ FAIL | ~19 pre-existing lints in `chili-core` (and possibly more cascading) inherited from bare main. Claude has the fixes in `9aa358d` but the cherry-pick conflicts on `crates/chili-core/src/engine_state.rs` (FFI-rewrite divergence — same surface that triggered the original Sprint 2 v1 halt). Lints include `needless_borrow`, `too_many_arguments`, `clone_on_copy`, `unnecessary_cast`, `field_reassign_with_default`, `declare_interior_mutable_const`. |
+| `cargo test --workspace --exclude chili-py` | ⏸ BLOCKED | Blocked by clippy gate failure — cannot run cleanly until clippy passes. The 162-test pass count from Sprint 2 v2 prep was on `claude` branch (which had all clippy fixes); claude-2 verification will land in Sprint 3. |
+| `cd crates/chili-py && uv run maturin develop && uv run pytest` | ⏸ DEFERRED | chili-py FFI surface needs port from claude before tests are meaningful. Sprint 3-4 territory. |
+
+**Successful clippy ports in Part A:** `71e2c41` (chili-parser/tests/utils.rs 11 lints,
+clean), `2e08649` (chili-parser/src/token.rs type_complexity allow, applied directly),
+`e829bd4` (chili-op clamp, clean cherry-pick), `a8d4014` partial (chili-op tests
+arithmetic_test.rs only; chili-py portion deferred).
+
+**Sprint 3 first deliverable:** Port `9aa358d`'s 19 chili-core lints by hand
+(not cherry-pick — engine_state.rs divergent shape will fight). After: re-run
+gate end-to-end on claude-2; expect green except chili-py-side which depends
+on FFI port progress.
+
 ## How to use this snapshot
 
 For A/B comparison vs claude-2 in Sprints 3-5:

@@ -6,23 +6,29 @@ Agent-facing map of this repo. Keep terse: this file is loaded into every conver
 
 This is a local working fork of [purple-chili/chili](https://purple-chili.github.io/) — a kdb+/q-style analytics engine on Polars + Arrow + Parquet, with `chili` (JS-like) and `pepper` (q-like) syntaxes. It reuses `kola` for q interop. Upstream is the canonical project; this repo exists because a separate user project, **mdata** (`~/code/mdata`, market-data warehouse, ~11K US equities), needed Python bindings, GIL-released eval, quantization, pub/sub, `overwrite_partition`, etc. that upstream lacked. The chili author has since picked up a subset of those changes (see `project_chili_background.md` memory for the commit range and table). See `README.md` for performance numbers and feature list.
 
-## Branch policy (load-bearing)
+## Branch policy (load-bearing — post-pivot 2026-05-07)
 
 **No remote.** `git remote -v` is empty by design. Never `git push`, `git pull`, `git fetch`, or re-add a remote. The user manually uploads upstream state into the local `main` branch.
 
 **`main` = upstream / external contributors.** Never commit to it, never check it out to make changes. Treat it as read-only.
 
-**`claude` = the only branch you commit to.** Verify with `git rev-parse --abbrev-ref HEAD` before every commit; if absent locally, `git checkout -b claude`.
+**`claude-2` = the only branch you commit to.** Verify with `git rev-parse --abbrev-ref HEAD` before every commit. Forked from `main` tip on 2026-05-07 as part of the pivot from cherry-pick to invert-and-restart (see `docs/standards/iteration_lessons.md` lesson 4 + `docs/sim/sprint_2_dispatch_brief_2026-05-07.md`).
 
-**Merging:** Only `main → claude` (when the user uploads new upstream state). Never `claude → main`, never any other direction. If a change must reach `main`, surface it and let the user handle it.
+**`claude` = parked-historical, immutable.** Tagged `claude-baseline-2026-05-07` for reproducible historical binary builds. Never commit to it, never delete it. It is the project's pre-pivot reference for A/B comparison + provenance. The full pre-pivot state lived there.
+
+**Merging:** Only `main → claude-2` (when the user uploads new upstream state). Never `claude-2 → main`. Never `claude → claude-2` (use `git checkout claude -- <path>` for selective doc copy if needed during port sprints). If a change must reach `main`, surface it and let the user handle it.
+
+**Tags pinned at pivot:** `claude-baseline-2026-05-07` (claude tip 2026-05-07), `main-pivot-2026-05-07` (main tip 2026-05-07).
 
 ## Pre-commit gate
 
 Run before every commit (matches `Taskfile.yml`):
 
 ```bash
-cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo test
+cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo test --workspace --exclude chili-py
 ```
+
+The `--workspace --exclude chili-py` is **load-bearing**: chili-py's pyo3 `extension-module` feature unifies into pyo3 across the workspace and tells pyo3 NOT to emit `-lpython` linker flags, which breaks `cargo test` for chili-core/chili-op standalone test binaries. See `docs/dev_setup.md` for the full env setup (`.cargo/config.toml` with PYO3_PYTHON + DYLD_FALLBACK_LIBRARY_PATH).
 
 For Python bindings work also run, from `crates/chili-py/`:
 
@@ -106,11 +112,12 @@ Global:
 
 ## Project state
 
-- Branch: `claude` (working) / `main` (read-only upstream mirror, user-managed).
+- Branch: `claude-2` (working, post-pivot) / `main` (read-only upstream mirror, user-managed) / `claude` (parked-historical, tagged `claude-baseline-2026-05-07`).
 - Remote: none. Do not re-add.
-- Upstream `e9092ce..b0f20e5` selectively merged into `claude` on 2026-04-26: bytes-removal FFI rewrite (eval/wpar/overwrite_partition/tick_upd return/accept `pl.DataFrame` directly via `pyo3_polars::PyDataFrame`), pyo3 0.22→0.27, pyo3-polars 0.26, `chrono` workspace dep, `.gitignore` additions. **NOT** merged: `chili-pie → chili-sauce` rename, manylinux 2_28 GH workflows, low-level `PyEngineState`. See `project_chili_background.md`.
-- Date pin: 2026-04-26.
-- Versions: workspace `0.7.4`; Python wheel `chili 0.7.5` per `crates/chili-py/pyproject.toml` (`name = "chili"`); Cargo crate `chili-py`; cdylib `chili`. Upstream main is mid-rename (variants seen on `claude..main`: `chili-sauce`, `py-sauce`); the chili author intends a future official rename to `chili-source` or `chili-pie` once distro-packaging stabilizes. **Hold the rename pending his official release notes** — see memory `project_chili_naming_watch.md`. Don't pick up rename commits into `claude` until user ratifies a target name.
-- Python min: 3.10 (raised from 3.7 by pyo3 0.27 abi3-py310).
-- Test count: 44 Python (35 baseline + 9 new direct-DataFrame regression tests) + 165 Rust = 209.
+- Pivoted from `claude` to `claude-2` on 2026-05-07. claude-2 forked from main tip `f8b6360`. Sprint 2 v2 Part A in progress; full project state refresh (test count, versions, exact main-tip merge inventory) lands in Part E.
+- Pivot rationale: cherry-pick conflict accumulation on FFI-rewrite divergence surface — see `docs/standards/iteration_lessons.md` lesson 4 + `docs/sim/sprint_2_dispatch_brief_2026-05-07.md`.
+- Date pin: 2026-05-07.
+- Versions on claude-2: inherited from main tip `f8b6360`. Workspace + chili-py versions verified in Part E retro.
+- Python min: 3.10 (raised from 3.7 by pyo3 0.27 abi3-py310). See `docs/dev_setup.md` for env setup.
+- Test count on claude-2: ~162 Rust verified during Part A; chili-py pytest run in Part A wrap. Full count in Part E.
 - Open items: see `~/.claude/projects/-Users-oakadmin-code-chili/memory/MEMORY.md`.
