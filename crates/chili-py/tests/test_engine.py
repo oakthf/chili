@@ -278,6 +278,13 @@ class TestTick:
         engine.tick(0, 7)
         assert engine.get_tick_count(0) == 10
 
+    def test_get_tick_count_no_arg_defaults_to_index_zero(self, engine: ChiliEngine):
+        # Sprint 5 Part D.1 regression — mdata handoff doc claims
+        # engine.get_tick_count() (no arg) defaults to index=0. Pin that.
+        assert engine.get_tick_count() == 0
+        engine.tick()  # default index=0, inc=1
+        assert engine.get_tick_count() == 1
+
 
 # ---------------------------------------------------------------------------
 # Parse cache

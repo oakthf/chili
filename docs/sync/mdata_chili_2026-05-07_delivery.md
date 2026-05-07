@@ -15,10 +15,13 @@ tip at tag `claude-baseline-2026-05-07` (commit `dea966e`).
 2. **`engine.eval(query, lazy=True)` is documented but unusable** for now —
    ADR 0003 documents the polars-core-patch fork DSL incompat. Don't
    wire `lazy=True` into mdata's production paths.
-3. **Pub/Sub: claude's two pub/sub models are retired** per ADR 0001.
-   mdata callers using `engine.publish(ipc_bytes)` and the in-process
-   Python broker need to refactor to main's tick/sub framework
-   (`init_tick` / `tick.upd` / `sub.init`). See Section 4 breakage report.
+3. **Pub/Sub: claude's two pub/sub models are *deliberately-retired pending
+   mdata feedback*** per ADR 0001. The ADR's "binds future work" clause
+   reserves reopening via a new ADR if mdata surfaces a hard blocker. Default
+   path: mdata callers using `engine.publish(ipc_bytes)` and the in-process
+   Python broker refactor to main's tick/sub framework (`init_tick` /
+   `tick.upd` / `sub.init`). If that's not viable, raise it now (§7 Ask 1)
+   and chili will draft an ADR to reconsider. See §4 breakage report.
 4. **`tick_count` shape changed** from claude's scalar `i64` to main's
    `Vec<i64>` (with index argument on `engine.get_tick_count(index)`).
    mdata callers need a one-line update.
@@ -70,9 +73,9 @@ pip install /path/to/chili_sauce-0.8.0-cp310-abi3-macosx_11_0_arm64.whl
 |---|---|---|---|
 | `engine.eval(query)` (eager) | Returns DataFrame | Returns DataFrame | No |
 | `engine.eval(query, lazy=True)` | (not present) | Returns LazyFrame **but unusable** end-to-end (ADR 0003) | No (don't use until ADR 0003 resolves) |
-| `engine.publish(ipc_bytes)` (in-process broker) | Present | **REMOVED** per ADR 0001 | YES — see §4 |
-| `engine.publish(table, df)` (tick/sub) | (different shape) | Present, main's canonical | YES — adopt new API |
-| `engine.subscribe(topic, callback)` | Present | **REMOVED** per ADR 0001 | YES — see §4 |
+| `engine.publish(ipc_bytes)` (in-process broker) | Present | **REMOVED** per ADR 0001 (deliberately-retired pending mdata feedback) | YES — see §4 |
+| `engine.publish(table, df)` (tick/sub) | parked-claude shape was `publish(table, ipc_bytes)` (parses bytes back into DataFrame internally) | Present, main's canonical (accepts polars DataFrame directly) | YES — adopt new API |
+| `engine.subscribe(topic, callback)` | Present (in-process Python callback) | **REMOVED** per ADR 0001 (deliberately-retired pending mdata feedback) | YES — see §4 |
 | `engine.get_tick_count()` (scalar) | Present | **REPLACED** by `get_tick_count(index)` | YES — one-line update |
 | `engine.tick(inc)` (scalar) | Present | **REPLACED** by `tick(index, inc)` | YES — one-line update |
 | `engine.write_partitioned_df(df, hdb_path, table, date, ...)` | Worked (custom-arg-order) | Fixed (canonical-arg-order) | Verify — likely no change for typical mdata usage |

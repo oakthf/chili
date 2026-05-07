@@ -77,9 +77,12 @@ hinmeru/polars-core-patch'd polars source. Adds a non-trivial publish/
 install pipeline to chili for marginal lazy=True benefit (eager path
 already works).
 
-Sprint 5 Part A applies (a)-track preparatory work: pin Python polars to
-1.39.3 (so when pyo3-polars publishes the fix, an upgrade path is
-clear); document via this ADR; keep xfail markers ready to auto-XPASS
+Sprint 5 Part A pins Python polars to 1.39.3 — the latest tested-stable
+on macOS arm64 with a clean `uv pip install`. The pin's value is **eager
+path test-result reproducibility**, not lazy-path preparedness; when
+pyo3-polars publishes a fix (option a), the pin is irrelevant to the
+upgrade path and may be bumped or removed at that time. Document the
+structural blocker via this ADR; keep xfail markers ready to auto-XPASS
 when the fix lands.
 
 ---
@@ -104,9 +107,14 @@ when the fix lands.
 
 - Eager (default) path: works end-to-end, GIL released, golden rule 5
   preserved. No user-visible change.
-- Lazy path: returns a Python `polars.LazyFrame` instance; calls on it
-  fail with `ComputeError`. Users should treat `lazy=True` as a
-  Sprint-5-era stub until ADR 0003 resolves.
+- Lazy path: returns a Python `polars.LazyFrame` instance (the
+  `isinstance(out, pl.LazyFrame)` check passes; cheap LazyFrame metadata
+  ops may also work). The failure point is on the FIRST call that
+  attempts to deserialize the underlying DSL — typically `.collect()`,
+  `.explain()`, or `.show_graph()` — which raises
+  `polars.exceptions.ComputeError: deserialization failed`. Users should
+  treat `lazy=True` as a Sprint-5-era stub for any code that wants to
+  actually evaluate the LazyFrame, until ADR 0003 resolves.
 
 ### Roll-forward recovery
 

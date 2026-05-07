@@ -182,15 +182,16 @@ class ChiliEngine:
         """Return the current number of entries in the LRU parse cache."""
         return self.engine.parse_cache_len()
 
-    def get_tick_count(self, index: int) -> int:
-        """Return the current tick counter value."""
+    def get_tick_count(self, index: int = 0) -> int:
+        """Return the current tick counter value at *index* (default 0)."""
         return self.engine.get_tick_count(index)
 
-    def tick(self, index: int,  inc: int) -> Any:
-        """Increment the tick counter.
+    def tick(self, index: int = 0, inc: int = 1) -> Any:
+        """Increment the tick counter at *index* by *inc*.
 
         Args:
-            inc: Amount to add to the counter.
+            index: Tick stream index (default 0).
+            inc: Amount to add to the counter (default 1).
 
         Returns:
             The updated tick count.
