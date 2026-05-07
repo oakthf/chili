@@ -1,5 +1,6 @@
 """Python bindings for Chili's ``EngineState`` (Rust ``chili-core``)."""
 
+import re
 from datetime import date
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -291,7 +292,13 @@ class ChiliEngine:
         if not self._column_scales:
             return df
         for table, scales in self._column_scales.items():
-            if f"from {table}" not in query:
+            # Word-boundary match preceded by `from` or `join` so e.g.
+            # `from trades` does not false-match `from all_trades`, AND so
+            # tables introduced by a join also dequantize. This is still
+            # a best-effort textual scan; a future sprint may move table
+            # detection into the engine eval result for full robustness.
+            pattern = r"\b(?:from|join)\s+" + re.escape(table) + r"\b"
+            if not re.search(pattern, query):
                 continue
             cast_exprs = []
             for col_name, factor in scales.items():
@@ -301,7 +308,6 @@ class ChiliEngine:
                     )
             if cast_exprs:
                 df = df.with_columns(cast_exprs)
-            break
         return df
 
     def overwrite_partition(
@@ -329,12 +335,16 @@ class ChiliEngine:
     def query_plan(self, query: str, hdb_path: Optional[str] = None) -> str:
         """Return the polars query plan for *query* without executing it.
 
-        Internally spins up a temporary lazy-mode engine, loads the HDB,
-        evaluates *query* to obtain a ``LazyFrame``, and returns its
-        ``describe_plan()`` string. The current engine state is unaffected.
+        Internally spins up a temporary **pepper-syntax** lazy-mode engine,
+        loads the HDB, evaluates *query* to obtain a ``LazyFrame``, and
+        returns its ``describe_plan()`` string. The current engine state
+        is unaffected. **Pepper syntax only** — chili-syntax queries will
+        fail to parse here even if the calling engine is in chili mode;
+        this matches parked-claude's behavior.
 
         Args:
-            query: The pepper / chili query string.
+            query: A pepper-syntax query string (e.g.,
+                ``"select last close by sym from ohlcv_1d where date=..."``).
             hdb_path: HDB root directory. Defaults to the most recently
                 loaded path on this engine (via ``load_partitioned_df``).
         """

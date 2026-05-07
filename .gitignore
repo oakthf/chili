@@ -13,3 +13,13 @@ polars-core
 # Local cargo config — machine-specific PYO3_PYTHON + DYLD_FALLBACK_LIBRARY_PATH paths.
 # See docs/dev_setup.md and .cargo/config.toml.example.
 .cargo/config.toml
+
+# Per-project Claude Code state — rate-timeline JSONL, work-metrics ledger,
+# anchors, local settings overrides. See ~/.claude/rules/work-metrics.md.
+.claude/state/
+.claude/settings.local.json
+
+# chili-py uses `uv` (out-of-workspace) for Python toolchain pinning;
+# these locks are managed there, not committed alongside the workspace.
+crates/chili-py/Cargo.lock
+crates/chili-py/uv.lock

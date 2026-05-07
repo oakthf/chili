@@ -366,6 +366,31 @@ class TestColumnScale:
         out = engine._apply_column_scales(df, "select close from ohlcv_1d")
         assert out.equals(df)
 
+    def test_apply_does_not_false_match_substring_table(self, engine: ChiliEngine):
+        # Word-boundary regex must not match `from trades` against `from
+        # all_trades`. Pre-fix code (`f"from {table}" not in query`) would
+        # have rescaled the `all_trades` query against the `trades` scale.
+        engine.set_column_scale("trades", "px", 100)
+        df = pl.DataFrame({"px": [12345]})
+        out = engine._apply_column_scales(df, "select px from all_trades")
+        assert out["px"].dtype == pl.Int64
+        assert out["px"].to_list() == [12345]
+
+    def test_apply_dequantizes_two_tables_in_join(self, engine: ChiliEngine):
+        # Both tables register a scale; result df has columns matching
+        # both. Pre-fix code stopped after the first match (single-table
+        # break) so only one of the two columns was rescaled.
+        engine.set_column_scale("ohlcv_1d", "close", 100)
+        engine.set_column_scale("trades", "px", 1000)
+        df = pl.DataFrame({"close": [12345], "px": [678900]})
+        out = engine._apply_column_scales(
+            df, "select close, px from ohlcv_1d join trades on sym"
+        )
+        assert out["close"].dtype == pl.Float64
+        assert out["px"].dtype == pl.Float64
+        assert out["close"].to_list() == [123.45]
+        assert out["px"].to_list() == [678.90]
+
 
 @pytest.fixture()
 def tmp_hdb(tmp_path):
