@@ -470,3 +470,131 @@ doesn't apply.
 in the same wrap. Recurs on every dep-bump sprint, ADR resolution
 sprint, and wheel-rev sprint. Saves the calibration drift that comes
 from "I predicted this at 2pp but it took 5pp because of the rebuild."
+
+### Empirical bisection beats version-guess speculation when external-version-skew is suspected
+
+**Rule.** When ADR or sprint analysis hypothesizes "the right version
+of upstream X exists and we just need to find it," budget a focused
+empirical bisection BEFORE building any fix infrastructure (vendoring,
+forking, custom-publishing, custom-building). A linear scan of 5-10
+published versions with one-line install commands and a single test
+invocation each costs ~5 minutes of wall time and produces hard data:
+either it confirms the hypothesis (find the matching version, done) OR
+it eliminates the hypothesis (no version matches, redirect resolution
+path to the next-cheapest option). Skipping the bisection and proceeding
+directly to the heavyweight resolution wastes effort on a path that may
+have a cheaper alternative the bisection would have surfaced.
+
+**Why.** Sprint 7 Part A, 2026-05-08. The original ADR 0003 (Sprint 5)
+implicitly assumed "find a Python polars version that matches Rust
+polars 0.53.0's DSL hash." The correct empirical move was to test
+Python polars 1.20 / 1.30 / 1.31-1.34 / 1.37 / 1.39 / 1.39.3 against
+chili's compiled-in hash. ~5 min wall, ~1pp tokens. Outcome: NO PyPI
+Python polars matches the hash chili emits (all 1.31-1.39 emit the same
+`124a6...` hash; chili emits `17d5d...`). Option-1 (version pin) is
+dead; option 3 (git-pin Rust to py-1.39.3) becomes the cheapest viable
+resolution. Without the bisection, Sprint 7 might have spent multi-pp
+searching for a non-existent matching version, OR jumped straight to
+option 3 without confirming option 1 was eliminated (wasting investment
+in option 3 if option 1 had actually worked).
+
+**Apply where.** Any ADR resolution sprint where "find the matching
+version" or "wait for upstream X to release Y" appears as a candidate
+path. Especially: pyo3-polars / polars-rs / pyo3 / maturin version
+transitions; Python deps where chili's wheel pins downstream consumers;
+"upstream is archived; what now?" scenarios. Generalizes to nxcar /
+mdata cross-project tests where one side's pin lags the other's.
+Doesn't apply when the bisection space is unbounded (e.g., "find the
+magic compiler flag combination") or when the hypothesis has already
+been ruled out by static analysis. Always pair the bisection with
+documenting the negative result in the ADR — even a "no version
+matched" outcome is durable evidence that future sprints reuse.
+
+**Cost saved.** ~3-5pp per ADR resolution sprint where bisection rules
+out a wrong-direction path before the heavyweight investment. Plus
+risk reduction on multi-week vendor/fork investment that becomes
+unnecessary if a simple version pin would have worked. Recurs whenever
+an external dep ABI changes near chili's pinned version.
+
+### Worktree-based A/B benchmark methodology
+
+**Rule.** When benchmarking two versions of a Rust binary that must
+compile from the same workspace tree, use `git worktree add
+/tmp/<branch>-bench <ref>` to create a separate working copy with its
+OWN `target/` directory. Run benches in each worktree **sequentially**,
+NEVER in parallel — release-profile compile saturates CPU and double-
+time = 2x serial wall, NOT half. Both bench results land in their
+respective `target/criterion/` trees and can be diffed/compared offline.
+For chili specifically: workspace target/ + chili-py/target/ are TWO
+separate trees per worktree (chili-py is `exclude`d from workspace);
+account for ~25 GB peak disk per worktree pair.
+
+**Why.** Sprint 7 Part B, 2026-05-08. Bench A/B sweep needed claude-2
+(current tip with py-1.39.3 polars source) AND parked-claude
+(`claude-baseline-2026-05-07` tag with hinmeru fork polars-core).
+Worktree at `/tmp/chili-parked-bench` produced parked-claude's bench
+numbers without touching `/Users/oakadmin/code/chili/target`. Subsequent
+claude-2 bench at the workspace produced its numbers in workspace's
+`target/release/`. Total wall: ~60 min for both; total disk peak: ~25 GB;
+results: 13 bench number pairs collected with zero cross-contamination
+of build artifacts. The alternative (manually checking out branches
+back-and-forth in the same workspace) corrupts incremental compile
+cache between A and B and produces non-comparable numbers.
+
+**Apply where.** Every future bench A/B sprint: Sprint 8 perf-pass-1
+(needs to compare pre-fix vs post-fix on each P1/P2 task), Sprint 9
+perf-pass-2, Sprint 12 perf-pass-3, any future "did we regress vs the
+last release" comparison. Generalizes to A/B comparison of any two
+Rust binaries from the same repo at different commits. Inverse case
+(single-binary benching) doesn't need the worktree — just bench the
+current tree. Pre-flight: check `df -h /` before adding a worktree —
+peak disk during a worktree-based A/B bench is 2x a single-binary
+bench's footprint.
+
+**Cost saved.** ~1pp per bench-pass sprint vs the alternative (manual
+checkout + rebuild + non-comparable numbers + "did A's compile
+contaminate B" doubt). Plus eliminated cross-bench cache pollution; each
+`target/criterion/` is independently reproducible.
+
+### Wheel-only install protocol for downstream consumers (NEVER `pip install -e`)
+
+**Rule.** When chili (or any compiled-binding Python project) ships to
+a downstream consumer, the install protocol MUST be wheel-based, NOT
+editable. Editable installs (`pip install -e <path>` /
+`uv pip install --editable`) link the consumer's runtime to chili's
+mid-build state, causing the consumer to break when chili's compile
+cycles invalidate intermediate artifacts. Document the wheel-only
+protocol with explicit uninstall + install + verification commands;
+provide a verification step that catches `.pth`-file editable-install
+ghosts (which survive `uv pip uninstall`).
+
+**Why.** Sprint 7 Part B context, 2026-05-08 (carried over from Sprint
+4-7 of the autonomous run). mdata installed chili 0.8.0 wheel as
+`pip install -e /Users/oakadmin/code/chili/crates/chili-py`. During
+chili's mid-Sprint compile work — Sprint 4 Part B's pyproject change
+triggered uv-sync rebuild; Sprint 5 Part A's polars pin triggered
+another; Sprint 7 Part A's polars source swap triggered a third —
+mdata's runtime broke because Python imports resolved to chili's
+mid-rebuild state. Cumulative cost across both projects: ~3-5pp on
+mdata-side downtime debugging + ~1pp on chili-side coordination per
+incident. Wheel-based install with `chili.__file__` resolution check
+(in `mdata_chili_2026-05-08_delivery.md` §4.3) guarantees the
+consumer's site-packages doesn't accidentally ghost-link the source
+repo. The two-check verification (`uv pip show` Location + `chili.__file__`
+import-time path) catches both the "Cargo metadata says editable" case
+AND the "`.pth` file linked the source dir despite uninstall" case.
+
+**Apply where.** Every chili-sauce wheel cut going forward (Sprint 12+
+assumed; any future delivery sprint that produces a wheel for an
+external consumer). Generalizes to any chili-built Python package +
+downstream consumer (mdata + future projects that depend on chili's
+Python bindings). Per-delivery instances tracked in
+`docs/sync/mdata_chili_<date>_delivery.md`. Inverse case (chili-internal
+pytest using `maturin develop`) is fine — that's chili's own dev loop,
+no external consumer; editable is acceptable there.
+
+**Cost saved.** ~3-5pp per delivery cycle that would otherwise see
+editable-install-induced consumer outages + ~1pp per outage on debugging
+which version mdata was actually running. Recurs every wheel cut +
+downstream-install pair. Saves consumer-trust cost too (mdata stops
+fearing chili's compile cycles).
