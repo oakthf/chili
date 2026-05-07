@@ -1,10 +1,145 @@
 # ADR-0003 — PyLazyFrame DSL hash incompatibility (Python ↔ Rust polars boundary)
 
-**Date:** 2026-05-07 (drafted Sprint 5 Part A; ADR opened on structural blocker discovery)
-**Status:** Accepted (defer-resolution; pin stock Python polars; xfail lazy-return tests; revisit when pyo3-polars publishes a release that decouples DSL hash from polars-core source identity)
-**Cutover:** Sprint 5 (Part A pin lands the resolution; lazy-return path remains xfailed end-to-end on the FFI boundary)
+**Date:** 2026-05-07 (drafted Sprint 5 Part A; ADR opened on structural blocker discovery; **amended 2026-05-08 Sprint 7 Part A** with corrected root cause + resolution via option 3b).
+**Status:** **RESOLVED 2026-05-08** Sprint 7 Part A — chili-side polars fork at `pola-rs/polars` `py-1.39.3` tag with q-style fmt patch on top; pyo3-polars sourced from the same monorepo. All 4 previously-xfailed lazy tests now XPASS; xfail markers removed.
+**Cutover:** Sprint 7 Part A.
 **Supersedes:** None.
-**Related:** ADR 0002 (lazy/eager default — Option b ratified Sprint 4; the Rust side ships, the Python ↔ Rust transfer is broken by this ADR).
+**Related:** ADR 0002 (lazy/eager default — Option b ratified Sprint 4; Sprint 7 made the lazy path actually usable end-to-end).
+
+---
+
+## 2026-05-08 amendment — corrected root-cause analysis (Sprint 7 Part A discovery)
+
+The original ADR 0003 (Sprint 5) **misdiagnosed the root cause**. Investigation
+in Sprint 7 Part A surfaced three corrections:
+
+### Correction 1: the hinmeru `polars-core-patch` fork was a red herring
+
+ADR 0003 originally claimed the DSL skew was caused by chili's
+`[patch.crates-io.polars-core] = hinmeru/polars-core-patch.git#v0.53.0`.
+**That was wrong.** Hard evidence:
+
+```
+$ diff -r /tmp/polars-core-patch-fork/src \
+         ~/.cargo/registry/.../polars-core-0.53.0/src
+Only difference: src/fmt.rs (~30 lines, q-style Datetime/Duration display)
+$ cmp /tmp/polars-core-patch-fork/Cargo.toml \
+      ~/.cargo/registry/.../polars-core-0.53.0/Cargo.toml
+IDENTICAL
+```
+
+The fork's only delta vs crates.io polars-core 0.53.0 is `fmt.rs` (purely
+Display formatting). `DSL_SCHEMA_HASH` lives in **`polars-plan`**, NOT
+`polars-core` — a different crate entirely. The fork couldn't possibly
+have been the cause of the DSL skew.
+
+### Correction 2: actual root cause is `polars-plan` source-version skew between Rust and Python sides
+
+- Rust side: chili's `pyo3-polars 0.26.0` (crates.io) → transitive dep
+  `polars-plan 0.53.0` (crates.io, source fixed at the rs-0.53.0 tag,
+  published 2026-02-08).
+- Python side: `polars==1.39.3` (PyPI, uploaded 2026-03-20) bundles a
+  `polars-plan` built from the polars monorepo at the `py-1.39.3` commit
+  — **6 weeks newer than the rs-0.53.0 tag**.
+
+Diff confirmed: 10+ files in `polars-plan/src/dsl/` differ between the two
+versions (`builder_dsl.rs`, `datatype_expr.rs`, `dt.rs`, `expr/mod.rs`,
+`file_scan/mod.rs`, etc.). The DSL_SCHEMA_HASH is computed at compile
+time from a hash file in the polars-plan source tree; different sources
+produce different hashes. The two sides therefore can't deserialize each
+other's lazy-plan blobs.
+
+### Correction 3: pyo3-polars upstream is archived
+
+`github.com/pola-rs/pyo3-polars` HEAD is the `archive` commit dated
+2025-07-28. The standalone repo is no longer maintained. pyo3-polars
+functionality has been **vendored into the main polars monorepo** at
+`pola-rs/polars/tree/main/pyo3-polars`. The README of the archived repo
+states this explicitly. ADR 0003's original "wait for pyo3-polars 0.27"
+path is therefore dead — there will never be a pyo3-polars 0.27 from the
+old repo.
+
+---
+
+## Resolution (Sprint 7 Part A, commit `<this commit>`)
+
+**Option 3b ratified and executed:**
+
+1. Cloned `pola-rs/polars` at the `py-1.39.3` tag to `/tmp/polars-py-1.39.3`.
+2. Applied a single 30-line q-style fmt patch to `crates/polars-core/src/fmt.rs`
+   (port of the hinmeru fork's only meaningful delta). Committed as
+   `8d56f02` in the local clone.
+3. Replaced chili's workspace `[patch.crates-io.polars-core]` (single
+   crate, hinmeru fork) with `[patch.crates-io]` block covering all 21
+   `polars-*` crates pointing at `/tmp/polars-py-1.39.3/crates/<name>`.
+4. Replicated the same patch block in `crates/chili-py/Cargo.toml`
+   (chili-py is excluded from workspace; needs its own patch block).
+5. Added `pyo3-polars = { path = "/tmp/polars-py-1.39.3/pyo3-polars/pyo3-polars" }`
+   to chili-py's patch block — the in-tree pyo3-polars 0.26.0 in the
+   polars monorepo is API-consistent with py-1.39.3 (the standalone
+   crates.io pyo3-polars 0.26.0 still requests `compute_boolean` polars-arrow
+   feature that was removed/folded post-0.53.0).
+6. Bumped `chrono` to `0.4.44` in Cargo.lock to satisfy py-1.39.3's
+   `^0.4.42` requirement.
+7. Patched `crates/chili-op/src/df.rs` LazyFrame::pivot call to add the
+   new `PivotColumnNaming::Auto` parameter (API drift between rs-0.53.0
+   and py-1.39.3).
+
+### Verification
+
+```
+cargo build --workspace --exclude chili-py: GREEN
+cargo test --workspace --exclude chili-py: 166 / 0 failed
+uv run maturin develop: GREEN (2m15s wall)
+uv run pytest: 65 passed, 0 xfailed (was 60 passed + 4 xfailed pre-Sprint-7)
+```
+
+The 4 previously-xfailed `TestEvalLazy` tests now pass:
+- `test_eval_lazy_true_returns_lazyframe` ✓
+- `test_eval_lazy_true_collect_round_trips_data` ✓
+- `test_eval_lazy_true_chains_filter` ✓ (predicate pushdown across FFI works)
+- `test_eval_lazy_default_on_lazy_engine_still_lazy` ✓
+
+Xfail markers removed; tests are now plain assertions.
+
+---
+
+## Outstanding migration work (NOT blocking lazy=True usage; tracked separately)
+
+The path-based `[patch.crates-io]` requires `/tmp/polars-py-1.39.3` to
+exist on the build machine. Acceptable for the autonomous-run experiment
+that confirmed the resolution. **For production / CI / multi-developer
+use**, the local clone needs a stable home:
+
+1. **Host the patched fork on GitHub.** User-driven step: push
+   `/tmp/polars-py-1.39.3` (with the q-style fmt commit on top of
+   py-1.39.3) to a chili-author or chili-org repo. Then change all
+   `path = "/tmp/..."` lines to `git = "..."` + `tag = "..."` /
+   `rev = "..."` in both Cargo.toml patch blocks.
+2. **Document the polars-version-bump procedure.** Each time chili wants
+   to track a newer Python polars wheel: re-clone polars at the new
+   `py-X.Y.Z` tag, re-apply the q-style fmt patch (~30 lines, low drift
+   risk), update the chili Cargo.toml git rev. Estimated cost per bump:
+   0.5pp.
+3. **Long-term: migrate from pyo3-polars to polars-python.** The official
+   PyO3 binding is now `polars-python` inside the polars monorepo.
+   chili-py uses pyo3-polars's `PyDataFrame`/`PyLazyFrame`/`PySeries`
+   types; these have polars-python equivalents but the API differs.
+   Estimated migration cost: ~5-10pp; not blocking; best landed when
+   chili next bumps the Python polars target.
+
+---
+
+## Original ADR text (preserved for provenance)
+
+The text below is the **original (pre-amendment) ADR 0003** as drafted
+in Sprint 5 Part A. The "Decision" section's option-(b) cost estimate
+of 5-15pp is now known to be inflated; the actual resolution (option 3b
+above) cost ~5pp in Sprint 7 Part A. The "Resolution paths" listing is
+also outdated: option (a) "wait for pyo3-polars 0.27" is dead because
+the upstream repo was archived.
+
+---
 
 ---
 

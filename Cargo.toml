@@ -46,6 +46,40 @@ lto = "fat"   # cross-crate inlining across polars boundary
 codegen-units = 1
 # panic = "abort"
 
-[patch.crates-io.polars-core]
-git = "https://github.com/hinmeru/polars-core-patch.git"
-tag = "v0.53.0"
+# Sprint 7 Part A — option 3b per ADR 0003 amendment.
+# All polars-* crates pinned to a local clone of pola-rs/polars at the
+# `py-1.39.3` tag, with a thin chili-side q-style fmt patch on top
+# (commit 8d56f02 in the local clone). This eliminates BOTH:
+#   1. The DSL_SCHEMA_HASH skew vs Python polars 1.39.3 (root cause: chili
+#      was building polars-plan from crates.io 0.53.0 while Python polars
+#      1.39.3's wheel embeds polars-plan from py-1.39.3 commit, ~6 weeks
+#      newer with substantial dsl/ source changes).
+#   2. The q-style Datetime/Duration display ergonomic that the
+#      hinmeru/polars-core-patch.git fork was carrying (now ported into
+#      chili's local clone as a single 30-line patch on top of py-1.39.3
+#      polars-core).
+# Local clone path: /tmp/polars-py-1.39.3 (must exist for any chili build
+# until the fork is hosted on a stable URL — see ADR 0003 amendment for
+# migration plan).
+[patch.crates-io]
+polars         = { path = "/tmp/polars-py-1.39.3/crates/polars" }
+polars-arrow   = { path = "/tmp/polars-py-1.39.3/crates/polars-arrow" }
+polars-buffer  = { path = "/tmp/polars-py-1.39.3/crates/polars-buffer" }
+polars-compute = { path = "/tmp/polars-py-1.39.3/crates/polars-compute" }
+polars-core    = { path = "/tmp/polars-py-1.39.3/crates/polars-core" }
+polars-dtype   = { path = "/tmp/polars-py-1.39.3/crates/polars-dtype" }
+polars-error   = { path = "/tmp/polars-py-1.39.3/crates/polars-error" }
+polars-expr    = { path = "/tmp/polars-py-1.39.3/crates/polars-expr" }
+polars-ffi     = { path = "/tmp/polars-py-1.39.3/crates/polars-ffi" }
+polars-io      = { path = "/tmp/polars-py-1.39.3/crates/polars-io" }
+polars-json    = { path = "/tmp/polars-py-1.39.3/crates/polars-json" }
+polars-lazy    = { path = "/tmp/polars-py-1.39.3/crates/polars-lazy" }
+polars-mem-engine = { path = "/tmp/polars-py-1.39.3/crates/polars-mem-engine" }
+polars-ops     = { path = "/tmp/polars-py-1.39.3/crates/polars-ops" }
+polars-parquet = { path = "/tmp/polars-py-1.39.3/crates/polars-parquet" }
+polars-plan    = { path = "/tmp/polars-py-1.39.3/crates/polars-plan" }
+polars-row     = { path = "/tmp/polars-py-1.39.3/crates/polars-row" }
+polars-schema  = { path = "/tmp/polars-py-1.39.3/crates/polars-schema" }
+polars-stream  = { path = "/tmp/polars-py-1.39.3/crates/polars-stream" }
+polars-time    = { path = "/tmp/polars-py-1.39.3/crates/polars-time" }
+polars-utils   = { path = "/tmp/polars-py-1.39.3/crates/polars-utils" }

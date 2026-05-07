@@ -89,13 +89,11 @@ class TestEvalLazy:
     Default `lazy=False` returns DataFrame; `lazy=True` returns LazyFrame.
     Both paths preserve golden rule 5 (GIL release).
 
-    Caveat (Sprint 4 Part B finding): the Python polars (1.39.3) shipped via
-    `uv` and the Rust polars (0.53.0) pinned in workspace Cargo.toml have
-    incompatible LazyFrame DSL schema hashes. PyLazyFrame transfer over the
-    FFI fails with `polars.exceptions.ComputeError: deserialization failed`
-    until the version skew is resolved (pin Python polars to the matching
-    DSL version, planned for Sprint 5). The lazy-return tests below are
-    marked xfail with `strict=False` so they pass once the pin lands.
+    Sprint 7 Part A resolved the DSL_SCHEMA_HASH mismatch (ADR 0003) by
+    git-pinning chili's Rust polars-* crates to `pola-rs/polars` at the
+    `py-1.39.3` tag (the same source Python polars 1.39.3 is built from)
+    and layering chili's q-style fmt patch on top. Lazy-frame transfer
+    over the FFI now works end-to-end.
     """
 
     def test_default_eval_returns_dataframe(self, pepper_engine: ChiliEngine):
@@ -107,20 +105,10 @@ class TestEvalLazy:
         out = pepper_engine.eval("([] x:1 2 3; y:4 5 6)", lazy=False)
         assert isinstance(out, pl.DataFrame)
 
-    @pytest.mark.xfail(
-        reason="ADR 0003: polars-core-patch fork DSL hash differs from stock Python polars; structural blocker, see docs/decisions/0003-pylazyframe-dsl-incompat.md",
-        strict=False,
-        raises=Exception,
-    )
     def test_eval_lazy_true_returns_lazyframe(self, pepper_engine: ChiliEngine):
         out = pepper_engine.eval("([] x:1 2 3; y:4 5 6)", lazy=True)
         assert isinstance(out, pl.LazyFrame)
 
-    @pytest.mark.xfail(
-        reason="ADR 0003: polars-core-patch fork DSL hash differs from stock Python polars; structural blocker, see docs/decisions/0003-pylazyframe-dsl-incompat.md",
-        strict=False,
-        raises=Exception,
-    )
     def test_eval_lazy_true_collect_round_trips_data(
         self, pepper_engine: ChiliEngine
     ):
@@ -131,13 +119,10 @@ class TestEvalLazy:
         assert collected["x"].to_list() == eager["x"].to_list()
         assert collected["y"].to_list() == eager["y"].to_list()
 
-    @pytest.mark.xfail(
-        reason="ADR 0003: polars-core-patch fork DSL hash differs from stock Python polars; structural blocker, see docs/decisions/0003-pylazyframe-dsl-incompat.md",
-        strict=False,
-        raises=Exception,
-    )
     def test_eval_lazy_true_chains_filter(self, pepper_engine: ChiliEngine):
-        # Verify a chained lazy op + collect executes without error.
+        # Chained lazy op + collect executes without error and produces the
+        # filtered data correctly. Predicate pushdown is now in effect across
+        # the FFI boundary because Rust + Python polars share the same DSL.
         out = (
             pepper_engine.eval("([] x:1 2 3 4 5)", lazy=True)
             .filter(pl.col("x") > 2)
@@ -145,11 +130,6 @@ class TestEvalLazy:
         )
         assert out["x"].to_list() == [3, 4, 5]
 
-    @pytest.mark.xfail(
-        reason="ADR 0003: polars-core-patch fork DSL hash differs from stock Python polars; structural blocker, see docs/decisions/0003-pylazyframe-dsl-incompat.md",
-        strict=False,
-        raises=Exception,
-    )
     def test_eval_lazy_default_on_lazy_engine_still_lazy(self, lazy_engine: ChiliEngine):
         # When the engine is constructed lazy=True, default eval (lazy=False
         # at the FFI boundary) collects the engine-internal LazyFrame to a

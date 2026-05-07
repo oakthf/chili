@@ -596,8 +596,7 @@ impl PyEngineState {
             match unwrap_return(obj) {
                 SpicyObj::LazyFrame(lf) => lf.describe_plan().map_err(|e| e.to_string()),
                 SpicyObj::DataFrame(_) => Err(
-                    "query collected eagerly — lazy plan not available for this query shape"
-                        .into(),
+                    "query collected eagerly — lazy plan not available for this query shape".into(),
                 ),
                 other => Err(format!(
                     "query returned {}, expected LazyFrame",
