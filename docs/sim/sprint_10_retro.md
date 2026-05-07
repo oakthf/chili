@@ -5,7 +5,7 @@
 **Actual:** ~1.5 pp
 **Variance:** −80% vs midpoint (7.5)
 **Owner:** coordinator-solo (main Claude); no code-reviewer dispatch (no code changes; ADR-only sprint).
-**Plan reference:** Roadmap [`roadmap_2026-05-07.md`](roadmap_2026-05-07.md) Sprint 10 row + `shakti_analysis.md` §4.3 research synthesis.
+**Plan reference:** Roadmap [`roadmap_2026-05-07.md`](../history/sim/roadmap_2026-05-07.md) Sprint 10 row + `shakti_analysis.md` §4.3 research synthesis.
 
 No formal dispatch brief — Sprint 10 was a research-synthesis sprint following the roadmap pointer; the question (`should pepper track k9?`) was already answered in `shakti_analysis.md` §4.3, so the sprint's job was to *ratify* that research conclusion as a durable ADR.
 
@@ -71,7 +71,7 @@ Position in band: well below low. Pattern continues: autonomous-run perf-pass / 
 - **Source research:** [`../research/shakti_analysis.md`](../research/shakti_analysis.md) §4.3
 - **Sprint 9 retro (predecessor):** [`sprint_9_retro.md`](sprint_9_retro.md)
 - **Cadence metrics row 10:** [`cadence_metrics.md`](cadence_metrics.md)
-- **Roadmap Sprint 10 row:** [`roadmap_2026-05-07.md`](roadmap_2026-05-07.md)
+- **Roadmap Sprint 10 row:** [`roadmap_2026-05-07.md`](../history/sim/roadmap_2026-05-07.md) (closed Sprint 12)
 
 ---
 

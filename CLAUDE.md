@@ -51,7 +51,7 @@ cd crates/chili-py && uv run python tests/bench_concurrent.py   # Python concurr
 
 ## Golden rules
 
-1. **Branch:** `claude` only. See above.
+1. **Branch:** `claude-2` only. See above.
 2. **Polars version is pinned** in workspace `Cargo.toml` (`0.53.0`). Bumps are coordinated changes — don't unpin in passing.
 3. **Edition 2024.** MSRV follows the toolchain in `rust-toolchain.toml` if present; otherwise stable.
 4. **Storage schema is Int64-quantized** for price columns. `set_column_scale` dequantizes to Float64 on read. Don't change the on-disk dtype without coordinating with the mdata storage layer.
@@ -66,22 +66,22 @@ cd crates/chili-py && uv run python tests/bench_concurrent.py   # Python concurr
 | `crates/chili-op`   | Query operators, scan, eval, write_partition |
 | `crates/chili-parser` | chili / pepper parsers (chumsky-based) |
 | `crates/chili-bin` | `chili` CLI binary |
-| `crates/chili-py`  | PyO3 / maturin Python bindings (`chili-pie`) |
+| `crates/chili-py`  | PyO3 / maturin Python bindings; ships as the **`chili-sauce`** wheel (import name `chili`). Directory name `chili-py` is legacy. |
 
 ## Docs map
 
-Start here: [`README.md`](README.md) — performance summary + Document Index of all live docs.
+Start here: this file (CLAUDE.md docs map below). [`README.md`](README.md) is the upstream user-facing intro (install + features).
 
-- [`CHANGELOG.md`](CHANGELOG.md) — release notes, all shipped phases.
+- [`CHANGELOG.md`](CHANGELOG.md) — release notes (upstream-aligned; claude-2 internal 0.8.1 wheel documented in delivery doc, not here).
 - [`crates/chili-py/README.md`](crates/chili-py/README.md) — Python API surface.
-- [`docs/bench/post_pivot_baseline_2026-05-07.md`](docs/bench/post_pivot_baseline_2026-05-07.md) — claude-2 post-pivot rebaseline (Sprint 3+ rolling; Sprint 7 absorbs A/B sweep).
-- [`docs/bench/mdata-collab/`](docs/bench/mdata-collab/) — mdata↔chili collaboration: schema, parity, comparison.
-- (pre-pivot bench artifacts — phase1-7,9 + baseline + summary — moved to `docs/history/bench/` Sprint 6 housekeeping.)
-- [`docs/research/`](docs/research/) — strategic research (kdb+ landscape, alternatives, Shakti, competitive position synthesis, claude-only-features inventory); start at `competitive_position_2026-05-06.md`. (Pre-pivot `main_vs_claude_inventory_2026-05-06.md` superseded by reverse inventory; moved to `docs/history/research/`.)
-- [`docs/sim/`](docs/sim/) — sprint cadence (briefs/retros + `cadence_metrics.md` + `roadmap_2026-05-07.md` post-pivot); templates are `_*_template.md`. Pre-pivot `roadmap_2026-05-06.md` is at `docs/history/sim/`.
-- [`docs/standards/iteration_lessons.md`](docs/standards/iteration_lessons.md) — durable rules promoted from sprint retros.
-- [`docs/sync/`](docs/sync/) — `decisions-needed.md` (irreversible decisions) + `ideas.md` (tagged backlog) + `mdata_chili_2026-05-07_delivery.md` (Sprint 5 wheel delivery handoff for mdata, held until sign-off). (Sprint 5 `mdata_breakage_report` superseded by delivery doc; moved to `docs/history/sync/`.)
-- [`docs/decisions/`](docs/decisions/) — ADRs (reversible decisions; see `README.md` for convention).
+- [`docs/dev_setup.md`](docs/dev_setup.md) — local env (PYO3_PYTHON, DYLD_FALLBACK_LIBRARY_PATH, `.cargo/config.toml`).
+- [`docs/bench/post_pivot_baseline_2026-05-07.md`](docs/bench/post_pivot_baseline_2026-05-07.md) — claude-2 post-pivot rebaseline (rolling; Sprints 7-9-12 each absorbed an A/B + perf-pass).
+- [`docs/bench/mdata-collab/`](docs/bench/mdata-collab/) — mdata↔chili collaboration: schema, parity, kdb+ comparison.
+- [`docs/research/`](docs/research/) — strategic research (kdb+ landscape, alternatives, Shakti, competitive position, claude-only-features inventory, Iceberg eval); start at `competitive_position_2026-05-06.md`.
+- [`docs/sim/`](docs/sim/) — sprint cadence: 12 ratified retros + `cadence_metrics.md` + `sprints_index.md`; templates are `_*_template.md`. Closed roadmap at [`docs/history/sim/roadmap_2026-05-07.md`](docs/history/sim/roadmap_2026-05-07.md).
+- [`docs/standards/iteration_lessons.md`](docs/standards/iteration_lessons.md) — 17 durable rules promoted from sprint retros.
+- [`docs/sync/`](docs/sync/) — `decisions-needed.md` (open: empty) + `ideas.md` (open: empty) + `mdata_chili_2026-05-08_delivery.md` (chili-sauce 0.8.1 wheel handoff, awaiting mdata sign-off; Sprint 5 delivery moved to history).
+- [`docs/decisions/`](docs/decisions/) — ADRs 0001-0004 (0003 RESOLVED Sprint 7); see `README.md` for convention.
 - [`docs/history/`](docs/history/) — frozen historical docs; never modify, only add.
 
 ## Rules map
@@ -116,12 +116,12 @@ Global:
 - Pivoted from `claude` to `claude-2` on 2026-05-07. claude-2 forked from main tip `f8b6360`. **Sprints 3-12 ratified — original 12-sprint roadmap closed.**
 - Pivot rationale: cherry-pick conflict accumulation on FFI-rewrite divergence surface — see `docs/standards/iteration_lessons.md` lesson 4 + `docs/history/sprints/sprint_2_dispatch_brief_2026-05-07.md`.
 - Date pin: 2026-05-08.
-- Versions on claude-2: chili-py at **0.8.1** (Sprint 7 Part A wheel); workspace at 0.8.0; Python polars pinned to `1.39.3`; Rust polars pinned to `pola-rs/polars` at **`py-1.39.3` tag** (local clone `/tmp/polars-py-1.39.3` — see ADR 0003 Sprint 8 P0 to migrate to GitHub-hosted git ref).
+- Versions on claude-2: chili-py at **0.8.1** (Sprint 7 Part A wheel; shipped as `chili-sauce` distribution, import `chili`); workspace at 0.8.0; Python polars pinned to `1.39.3`; Rust polars patched to `pola-rs/polars` at **`py-1.39.3` tag** + chili-side q-style fmt patch (currently a local clone at `/tmp/polars-py-1.39.3` — see user-driven backlog P0 below).
 - Python min: 3.10 (raised from 3.7 by pyo3 0.27 abi3-py310). See `docs/dev_setup.md` for env setup.
-- Test count on claude-2 (post-Sprint-7): **166 Rust** (`cargo test --workspace --exclude chili-py`) + **65 chili-py pytest passing + 0 xfailed** (`uv run pytest`).
-- Bench gate (golden rule 6): parse_cache hit **397 ns** on claude-2 (Sprint 8 P1 re-measure: 397.47 / 379.08 / 398.33 ns over 3 runs; Sprint 7's 410.58 was thermal noise). **Golden rule 6 holds.** Sprint 7 Part B's load_multitable_5x200p +22.8% regression deferred to Sprint 9 P2 (workspace `[profile.bench]` symbol-retention override + symbolized samply re-profile).
-- ADR 0002 (`engine.eval(lazy=True)`) shipped Sprint 4 commit `f23e40a`; **ADR 0003 RESOLVED Sprint 7 Part A** via option 3b (polars py-1.39.3 fork + q-style fmt patch) — lazy=True path now usable end-to-end with predicate pushdown across FFI. **ADR 0004 (Sprint 10):** pepper retains Polars-aligned primitive set; does NOT track k9 minimization (substrate divergence is intentional per shakti_analysis §4.3).
-- mdata delivery: **chili-sauce 0.8.1 wheel** at `dist/chili_sauce-0.8.1-cp310-abi3-macosx_11_0_arm64.whl` + handoff doc `docs/sync/mdata_chili_2026-05-08_delivery.md` (wheel-only install protocol; forbids editable installs).
-- Wheel cut workflow: `task release-py-sauce` produces `dist/<wheel>`. **NEVER** ship editable installs to mdata (lesson 14).
-- Next: Sprint 13+ are scoped on incoming work (mdata feedback, perf-prioritization, ADR triggers). User-driven backlog: P0 (GitHub-host polars fork; the load-bearing landmine for fresh chili clones), KDB-X CE comparison (when GA + interactive registration), mdata sign-off on 0.8.1 delivery, Sprint 13 P2 Box::new mitigation candidates documented in bench rebaseline doc.
+- Test count on claude-2 (post-Sprint-12, end-of-roadmap): **166 Rust** (`cargo test --workspace --exclude chili-py`) + **65 chili-py pytest passing + 0 xfailed** (`uv run pytest`).
+- Bench gate (golden rule 6): parse_cache hit **397 ns** on claude-2 (Sprint 8 P1 re-measure: 397.47 / 379.08 / 398.33 ns over 3 runs). **Golden rule 6 holds.** Sprint 12 P2 partial symbolization identified **17.7% Box::new** on the main thread as a Sprint 13 P2 mitigation candidate (batch schema reads, pre-allocate Box arenas — bench-gated; documented in `docs/bench/post_pivot_baseline_2026-05-07.md`).
+- ADRs: **0001** (pub/sub canonical, S5) + **0002** (`engine.eval(lazy=True)` Option b, S4 commit `f23e40a`) + **0003 RESOLVED S7 Part A** via option 3b (polars py-1.39.3 fork + q-style fmt patch) — lazy=True path usable end-to-end with predicate pushdown across FFI + **0004** (S10; pepper retains Polars-aligned primitive set, does NOT track k9 minimization).
+- mdata delivery: **chili-sauce 0.8.1 wheel** at `dist/chili_sauce-0.8.1-cp310-abi3-macosx_11_0_arm64.whl` + handoff doc `docs/sync/mdata_chili_2026-05-08_delivery.md` (wheel-only install protocol; forbids editable installs; `chili.__file__` verification mandatory).
+- Wheel-only install protocol: **NEVER** ship editable installs to mdata (lesson 14). The wheel byte-stream is fully self-contained; chili dev on this tree does not affect mdata's installed wheel.
+- Next: Sprint 13+ scoped on incoming work (mdata feedback, perf-prioritization, ADR triggers). **User-driven backlog**: (P0) GitHub-host the polars fork — replace `path = "/tmp/polars-py-1.39.3"` with `git = "..." + tag = "..."` in workspace + chili-py `[patch.crates-io]` blocks; without it, fresh clones of chili break at `cargo build`. (P1) KDB-X CE comparison once GA + interactive registration available. (P2) mdata sign-off on 0.8.1 delivery. (P3) Sprint 13 P2 Box::new mitigation if perf prioritized.
 - Open items: see `~/.claude/projects/-Users-oakadmin-code-chili/memory/MEMORY.md`.

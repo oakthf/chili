@@ -9,12 +9,15 @@ description = "Python bindings for the Chili engine (EngineState)"
 requires-python = ">=3.10"
 readme = "README.md"
 dependencies = [
-    # Pinned to 1.39.3 because chili's Rust polars-core uses the
-    # `hinmeru/polars-core-patch.git#v0.53.0` fork which embeds a DSL hash
-    # that differs from stock Python polars at any version. Lazy-frame
-    # transfer over the FFI is therefore broken regardless of Python
-    # polars version. See ADR 0003. Pin tracks the latest tested-stable
-    # Python polars; eager DataFrame transfer is unaffected.
+    # Pinned to 1.39.3 because chili's Rust side compiles polars-plan
+    # from `pola-rs/polars` at the `py-1.39.3` tag (with a chili-side
+    # q-style fmt patch on top) — the same source the Python polars
+    # 1.39.3 wheel is built from. The DSL_SCHEMA_HASH matches by
+    # construction → lazy-frame transfer over the FFI works end-to-end
+    # with predicate pushdown preserved. See ADR 0003 (RESOLVED Sprint 7
+    # Part A) and the `[patch.crates-io]` block in workspace + chili-py
+    # Cargo.toml. Pin must move in lockstep with any polars source-tree
+    # version bump.
     "polars==1.39.3",
 ]
 

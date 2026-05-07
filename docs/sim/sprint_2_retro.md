@@ -34,7 +34,7 @@ The retro covers both arcs together because they share the same sprint number an
 
 **Pre-pivot artifacts (commits on `claude` branch):**
 - New brief `docs/sim/sprint_2_dispatch_brief_2026-05-07.md` (`f5889f1`).
-- New roadmap `docs/sim/roadmap_2026-05-07.md` replacing the cherry-pick + Sprint-8-merge arc with a port arc; original Sprint 8 deleted (accomplished structurally) (`f5889f1`).
+- New roadmap `docs/sim/roadmap_2026-05-07.md` replacing the cherry-pick + Sprint-8-merge arc with a port arc; original Sprint 8 deleted (accomplished structurally) (`f5889f1`). _(Roadmap closed Sprint 12; moved to `docs/history/sim/roadmap_2026-05-07.md`.)_
 - ADR 0001 placeholder `docs/decisions/0001-pub-sub-canonical-model.md` — Option (a): adopt main's tick/sub canonical; retire claude's; A/B via parallel binaries; no in-tree shim. Drafted in `f5889f1`, ratified in `2d9f6fb` Part C.
 - Lifecycle: Sprint 1 brief moved to `docs/history/sprints/`; Sprint 2 v1 brief moved with SUPERSEDED banner.
 - Path fixes for moved roadmap (CLAUDE.md docs map, competitive_position, sprint_1_retro, lesson 2 reference).
@@ -138,7 +138,7 @@ The Part A overage (5pp vs 2-3pp predicted) is the **cherry-pick exploration tax
 - ADR 0001: `../decisions/0001-pub-sub-canonical-model.md`
 - Reverse-direction inventory: `../research/claude_only_features_inventory_2026-05-07.md`
 - mdata breakage report (held internal): `../sync/mdata_breakage_report_2026-05-07.md`
-- New roadmap: `roadmap_2026-05-07.md`
+- New roadmap: `roadmap_2026-05-07.md` _(closed Sprint 12; now at `docs/history/sim/roadmap_2026-05-07.md`)_
 - Cadence metrics row: `cadence_metrics.md`
 - Iteration lessons: `../standards/iteration_lessons.md` (lesson 4 promoted from this sprint's v1 halt; lesson 5 candidate from Part B subagent drift)
 - Pre-pivot bench baseline: `../history/bench_claude_baseline_2026-05-07/pre_pivot_state.md`

@@ -5,7 +5,7 @@
 **Actual:** ~3 pp
 **Variance:** −67% vs midpoint (9.0)
 **Owner:** coordinator-solo (main Claude); no code-reviewer dispatch (no chili-core code changes; research + partial profiling only).
-**Plan reference:** Roadmap [`roadmap_2026-05-07.md`](roadmap_2026-05-07.md) Sprint 12 row + Sprint 9 P2 carry-over + `docs/research/kdb_alternatives.md` §3.2.
+**Plan reference:** Roadmap [`roadmap_2026-05-07.md`](../history/sim/roadmap_2026-05-07.md) Sprint 12 row + Sprint 9 P2 carry-over + `docs/research/kdb_alternatives.md` §3.2.
 
 ---
 
@@ -117,7 +117,7 @@ The original roadmap (`roadmap_2026-05-07.md`, drafted Sprint 2 v2) projected 12
 - **Iceberg eval doc (Sprint 12 deliverable):** [`../research/iceberg_eval_2026-05-08.md`](../research/iceberg_eval_2026-05-08.md)
 - **Source research:** [`../research/kdb_alternatives.md`](../research/kdb_alternatives.md) §3.2
 - **Cadence metrics row 12:** [`cadence_metrics.md`](cadence_metrics.md)
-- **Roadmap (now closed):** [`roadmap_2026-05-07.md`](roadmap_2026-05-07.md)
+- **Roadmap (now closed):** [`roadmap_2026-05-07.md`](../history/sim/roadmap_2026-05-07.md)
 
 ---
 
