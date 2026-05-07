@@ -20,13 +20,23 @@
 //! | `polars.DataFrame`     | `DataFrame`       |
 //! | `polars.LazyFrame`     | `LazyFrame`       |
 //! | `None`                 | `Null`            |
+//!
+//! Uses mimalloc as the global allocator. Polars' allocation pattern fits
+//! mimalloc much better than the default system allocator on macOS in
+//! particular; mdata-scale workloads on the cdylib showed measurable
+//! steady-state RSS reduction under mimalloc on the parked-claude binary.
+
+use mimalloc::MiMalloc;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 use std::process;
 use std::sync::Arc;
 
 use chili_core::constant::{NS_IN_DAY, UNIX_EPOCH_DAY};
 use chili_core::{EngineState, SpicyObj, Stack};
-use chili_op::BUILT_IN_FN;
+use chili_op::{BUILT_IN_FN, LOG_FN};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Timelike, Utc};
 use indexmap::IndexMap;
 use polars::frame::DataFrame;
@@ -316,6 +326,7 @@ impl PyEngineState {
         if memory_limit > 0.0 {
             state.set_memory_limit(memory_limit);
         }
+        state.register_fn(&LOG_FN);
         state.register_fn(&BUILT_IN_FN);
         let arc = Arc::new(state);
         map_spicy_error(arc.set_arc_self(Arc::clone(&arc)))?;
@@ -499,6 +510,12 @@ impl PyEngineState {
         self.check_fork()?;
         map_spicy_error(self.inner.clear_par_df())?;
         Ok(())
+    }
+
+    /// Return the number of partitioned tables currently loaded.
+    fn table_count(&self) -> usize {
+        let _ = self.check_fork();
+        self.inner.par_df_count()
     }
 
     /// Start a TCP listener on the given port in a background thread.

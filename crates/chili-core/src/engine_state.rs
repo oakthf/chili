@@ -1461,6 +1461,10 @@ impl EngineState {
         Ok(())
     }
 
+    pub fn par_df_count(&self) -> usize {
+        self.par_df.read().len()
+    }
+
     pub fn load_par_df(&self, path: &str) -> SpicyResult<()> {
         // Two-phase load:
         //   1. (outside lock) recursively enumerate table entries; build each

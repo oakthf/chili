@@ -13,6 +13,7 @@ crate-type = ["cdylib"]
 chili-core = { path = "../chili-core" }
 chili-op = { path = "../chili-op" }
 indexmap = "2.12.0"
+mimalloc = { version = "0.1", default-features = false }
 polars = { version = "0.53.0" }
 pyo3 = { version = "0.27", features = ["abi3-py310", "chrono"] }
 pyo3-polars = { version = "0.26.0", features = ["lazy"] }

@@ -239,6 +239,10 @@ class ChiliEngine:
         """Remove all loaded partitioned DataFrames from memory."""
         return self.engine.clear_par_df()
 
+    def table_count(self) -> int:
+        """Return the number of partitioned tables currently loaded."""
+        return self.engine.table_count()
+
     def start_tcp_listener(
         self,
         port: int,

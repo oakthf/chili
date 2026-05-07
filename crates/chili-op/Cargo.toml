@@ -75,6 +75,7 @@ ndarray = "0.17"
 regex = "1.11"
 ndarray-linalg = { version = "0.18", optional = true }
 chili-core = { path = "../chili-core" }
+log = "0.4"
 num = "0.4"
 sysinfo = "0.38.2"
 

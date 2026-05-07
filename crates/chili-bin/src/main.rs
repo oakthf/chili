@@ -1,13 +1,16 @@
 mod completer;
-mod logger;
 mod pipe;
 mod validator;
 
-use crate::logger::LOG_FN;
+use mimalloc::MiMalloc;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 use crate::pipe::Pipe;
 use crate::validator::ChiliValidator;
 use chili_core::EngineState;
-use chili_op::BUILT_IN_FN;
+use chili_op::{BUILT_IN_FN, LOG_FN};
 use clap::Parser;
 use env_logger::Target;
 use home::home_dir;

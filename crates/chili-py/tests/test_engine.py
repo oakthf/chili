@@ -313,3 +313,24 @@ class TestTcpListener:
             result = s.connect_ex(("127.0.0.1", port))
             assert result == 0, f"Nothing listening on port {port}"
         e.shutdown()
+
+
+class TestLogBuiltins:
+    """`.log.{info,warn,debug,error}` are registered via chili_op::LOG_FN."""
+
+    def test_log_info_returns_null(self, engine: ChiliEngine):
+        assert engine.eval('.log.info("hello")') is None
+
+    def test_log_warn_returns_null(self, engine: ChiliEngine):
+        assert engine.eval('.log.warn("warn-msg")') is None
+
+    def test_log_debug_returns_null(self, engine: ChiliEngine):
+        assert engine.eval('.log.debug("debug-msg")') is None
+
+    def test_log_error_returns_null(self, engine: ChiliEngine):
+        assert engine.eval('.log.error("error-msg")') is None
+
+
+class TestTableCount:
+    def test_table_count_zero_on_fresh_engine(self, engine: ChiliEngine):
+        assert engine.table_count() == 0
