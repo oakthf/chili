@@ -1,0 +1,22 @@
+case_id,description,interface,target_ms,min_ms,median_ms,mean_ms,max_ms,stdev_ms,status,note
+Q1,"Single date, all symbols, ohlcv_1d",DuckDB,500.0,9.31,9.81,10.01,11.04,0.66,PASS,
+Q1,"Single date, all symbols, ohlcv_1d",Chili,50.0,6.71,7.02,7.1,7.71,0.37,PASS,
+Q2,"Single symbol, 1-year daily OHLCV",DuckDB,50.0,58.97,59.91,59.97,60.65,0.67,FAIL,
+Q2,"Single symbol, 1-year daily OHLCV",Chili,20.0,416.64,418.37,418.46,420.99,1.6,FAIL,
+Q3,"5 symbols, 1-year daily OHLCV",DuckDB,100.0,62.8,63.7,65.37,73.44,4.53,PASS,
+Q3,"5 symbols, 1-year daily OHLCV",Chili,50.0,424.52,425.99,426.78,429.62,2.21,FAIL,
+Q4,"Single symbol, 1-year daily OHLCV (Polars)",Polars,200.0,70.16,72.46,72.44,75.16,1.93,PASS,
+Q5,"Single symbol, last 30 days via REST",REST,500.0,0.0,0.0,0.0,0.0,0.0,SKIP,server not reachable
+Q6,"Single symbol, 1-year daily via Arrow Flight",Flight,500.0,0.0,0.0,0.0,0.0,0.0,SKIP,server not reachable
+Q7,"100 symbols, 1-year daily OHLCV",DuckDB,200.0,63.61,65.02,64.73,65.82,0.91,PASS,
+Q7,"100 symbols, 1-year daily OHLCV",Chili,200.0,426.32,429.94,429.35,431.07,1.88,FAIL,
+Q8,"All symbols, 1 week (5 days) ohlcv_1d",DuckDB,250.0,12.41,13.15,14.38,20.55,3.46,PASS,
+Q8,"All symbols, 1 week (5 days) ohlcv_1d",Chili,250.0,20.09,20.23,20.27,20.66,0.23,PASS,
+Q9,"SPY, 1-year ohlcv_1m (Polars)",Polars,2000.0,1515.58,1521.82,1522.86,1536.08,8.32,PASS,
+Q9,"SPY, 1-year ohlcv_1m (Chili)",Chili,500.0,3644.35,3665.02,3663.39,3688.25,19.13,FAIL,
+Q10,"5 symbols, 1-day ohlcv_1m (Polars)",Polars,500.0,22.03,22.88,23.21,24.96,1.12,PASS,
+Q10,"5 symbols, 1-day ohlcv_1m (Chili)",Chili,100.0,33.29,34.1,34.33,35.9,1.1,PASS,
+Q11,"SPY, 1-year ohlcv_1d (Polars explicit)",Polars,20000.0,72.53,73.68,73.24,73.71,0.63,PASS,
+Q11,"Pepper aggregation: last close by symbol, ohlcv_1d (Chili)",Chili,100.0,1845.73,1850.62,1850.3,1852.63,2.7,FAIL,
+Q12,"Single date, all symbols, ohlcv_1d (Polars)",Polars,1000.0,12.94,13.64,15.48,23.05,4.26,PASS,
+Q12,As-of join trades vs quotes (Chili),Chili,0.0,0.0,0.0,0.0,0.0,0.0,SKIP,Q12 requires trades+quotes data (Stocks Advanced tier)

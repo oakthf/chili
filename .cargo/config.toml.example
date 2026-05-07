@@ -1,0 +1,27 @@
+# Local cargo config — copy to `.cargo/config.toml` and fill in machine paths.
+# `.cargo/config.toml` itself is gitignored (machine-specific paths).
+#
+# Why this is needed:
+#   pyo3 0.27 abi3-py310 needs Python ≥ 3.10 at compile time AND link time AND test
+#   run time. Cargo doesn't know about Python by default; this config tells it.
+#
+#   PYO3_PYTHON           — pyo3 build script reads this to introspect Python at
+#                           compile time. Must point at a Python ≥ 3.10 binary.
+#   DYLD_FALLBACK_LIBRARY_PATH — macOS dyld searches here for libpython3.X.dylib at
+#                           test run time. Without this, cargo test SIGABRTs on
+#                           "_PyExc_BaseException not found in flat namespace."
+#                           (Linux uses LD_LIBRARY_PATH; on Linux substitute that.)
+#
+# See docs/dev_setup.md for how to find UV_PYTHON_PATH on your machine.
+# Setup:
+#   1. Install uv: https://docs.astral.sh/uv/getting-started/installation/
+#   2. uv python install 3.12
+#   3. UV_PYTHON_PATH=$(uv python find 3.12)  # absolute path to python3.12 binary
+#   4. Replace placeholders below.
+
+[env]
+PYO3_PYTHON = "<UV_PYTHON_PATH>"
+# Lib dir is the parent's parent of the python binary's lib subdir; e.g.
+# if python3.12 is /Users/.../cpython-3.12.13-macos-aarch64-none/bin/python3.12
+# then DYLD_FALLBACK_LIBRARY_PATH is /Users/.../cpython-3.12.13-macos-aarch64-none/lib
+DYLD_FALLBACK_LIBRARY_PATH = "<UV_PYTHON_LIB_DIR>"

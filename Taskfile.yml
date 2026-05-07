@@ -18,8 +18,11 @@ tasks:
     silent: true
 
   test:
+    # --workspace --exclude chili-py is load-bearing — see docs/dev_setup.md.
+    # chili-py's pyo3 extension-module feature unifies into pyo3 across the
+    # workspace, breaking link for chili-core/chili-op standalone test binaries.
     cmds:
-      - cargo test
+      - cargo test --workspace --exclude chili-py
 
   build:
     cmds:
