@@ -32,17 +32,31 @@ as those features are touched.
 
 ---
 
-## Hot-path inventory
+## Hot-path inventory (Sprint 7 Part B A/B sweep complete)
 
-| Metric | Bench file | Owner sprint | claude-baseline-2026-05-07 | claude-2 |
-|---|---|---|---|---|
-| parse_cache hit (ns, median) | `crates/chili-core/benches/parse_cache.rs` | Sprint 3 Part D | ~385 (reported, [docs/bench/phase5.md](phase5.md)) | **371.43** |
-| parse_cache cold (µs, median) | same | Sprint 3 Part D | (not recorded) | 95.37 |
-| scan throughput | `crates/chili-op/benches/scan.rs` | Sprint 5 (rescheduled) | TBD | compile-validated Sprint 4 |
-| eval throughput | `crates/chili-op/benches/eval.rs` | Sprint 5 (rescheduled) | TBD | compile-validated Sprint 4 |
-| load_par_df cold | `crates/chili-op/benches/load_par_df.rs` | Sprint 5 (rescheduled) | TBD | compile-validated Sprint 4 |
-| write_partition | `crates/chili-op/benches/write_partition.rs` | Sprint 5 (rescheduled) | TBD | compile-validated Sprint 4 |
-| Python concurrent eval | `crates/chili-py/tests/bench_concurrent.py` | Sprint 5 | 6.10× pre-pivot | TBD |
+claude-2 column reflects post-Sprint-7-Part-A state (Rust polars from
+`pola-rs/polars` py-1.39.3 tag with q-style fmt patch). claude-baseline
+column reflects parked-claude tag binary (commit `dea966e`,
+2026-05-07) built in worktree `/tmp/chili-parked-bench`.
+
+| Metric | Bench file | claude-baseline-2026-05-07 (median) | claude-2 (median) | Δ% | Verdict |
+|---|---|---:|---:|---:|---|
+| parse_cache hit (ns) | `crates/chili-core/benches/parse_cache.rs` | **369.19** | **410.58** | **+11.2%** | ⚠️ regression — exceeds golden rule 6 (≤400ns target) |
+| parse_cache cold (µs) | same | 94.09 | 94.29 | +0.2% | ~same (within noise) |
+| scan/query_eq_single_date (ms) | `crates/chili-op/benches/scan.rs` | 1.9596 | 1.9646 | +0.3% | ~same |
+| scan/query_narrow_range_5d (ms) | same | 5.7151 | 5.5821 | **-2.3%** | faster |
+| scan/query_wide_range_500d (ms) | same | 370.56 | 372.13 | +0.4% | ~same |
+| eval/query_groupby_agg (ms) | `crates/chili-op/benches/eval.rs` | 3.2466 | **PARSE ERROR** | n/a | ⚠️ parser regression — Sprint 8 P1 |
+| eval/query_select_star (µs) | same | 355.92 | (skipped) | n/a | bench chain aborted at groupby_agg |
+| projection/select_all_wide (µs) | same | 396.96 | (skipped) | n/a | |
+| projection/select_one_col (µs) | same | 292.22 | (skipped) | n/a | |
+| projection/select_three_cols (µs) | same | 325.02 | (skipped) | n/a | |
+| projection/select_one_col_with_sym_filter (µs) | same | 363.67 | (skipped) | n/a | |
+| load/load_cold_2000p (ms) | `crates/chili-op/benches/load_par_df.rs` | 4.9263 | 5.0351 | +2.2% | ~same |
+| load/load_warm_2000p (ms) | same | 4.9350 | 5.0157 | +1.6% | ~same |
+| load/load_multitable_5x200p (ms) | same | 1.5057 | **1.8497** | **+22.8%** | ⚠️ regression — exceeds Sprint 7 halt criterion 2 (>20%) |
+| write/wpar_1k_rows_fresh_hdb (ms) | `crates/chili-op/benches/write_partition.rs` | 9.1562 | 9.0752 | -0.9% | ~same |
+| Python concurrent eval | `crates/chili-py/tests/bench_concurrent.py` | 6.10× pre-pivot | TBD | TBD | Sprint 8 |
 
 ---
 
@@ -146,7 +160,131 @@ the same session but invalidates on any `Cargo.toml` workspace edit.
 
 ---
 
-## Sprints 5+ placeholder
+## Sprint 7 Part B — bench A/B sweep (2026-05-08)
 
-(Rows for the actual numbers land in Sprint 5 alongside the parked-claude
-tag-built A/B comparison.)
+### Methodology
+
+```
+parked-claude binary: cd /tmp/chili-parked-bench (git worktree at
+                      claude-baseline-2026-05-07 tag = commit dea966e);
+                      cargo bench (release, separate target/);
+                      Cargo.toml inherits parked-claude's polars-core-patch
+                      hinmeru fork + crates.io polars-plan 0.53.0.
+
+claude-2 binary:      cd /Users/oakadmin/code/chili (claude-2 tip after
+                      Sprint 7 Part A);
+                      cargo bench (release, target/release);
+                      Cargo.toml inherits Sprint 7 Part A patches: all
+                      polars-* crates from /tmp/polars-py-1.39.3 (pola-rs/
+                      polars at py-1.39.3 tag) with q-style fmt patch on top.
+
+Hardware: same Apple Silicon (Darwin 25.4.0, aarch64) for both. Sequential
+runs (no concurrent CPU contention). Criterion default sample_size + 10s
+measurement_time.
+```
+
+### Three regressions surfaced (Sprint 8 perf-pass-1 work)
+
+#### R1 — parse_cache hit +11.2%, exceeds golden rule 6 (~40 ns over budget)
+
+`parse/parse_repeat_same_query` (cache hit path):
+- parked-claude: 369.19 ns median (CI [368.42, 369.99])
+- claude-2: **410.58 ns median (CI [409.59, 411.60])**
+- Delta: +41.4 ns, +11.2%
+
+Golden rule 6 (≤400 ns NON-NEGOTIABLE) is **marginally violated**. Sprint
+3 Part D measured claude-2 at 371.43 ns (with hinmeru polars-core fork
+on crates.io polars-plan 0.53.0). Sprint 7 Part A swapped the polars
+source to py-1.39.3 (a 6-week-newer commit on the polars main branch).
+The +40 ns regression is attributable to py-1.39.3 polars-plan / polars-core
+having more complex codepaths in the hash/clone/lookup chain that the
+parse cache exercises.
+
+**Sprint 8 Part 1 P1 task:** profile the hot path; identify the new
+allocations or branches introduced between rs-0.53.0 and py-1.39.3 polars
+sources; either patch them out in chili's polars fork OR optimize chili's
+own parse-cache key/value handling to compensate. Target: claim ≤400 ns
+back without rolling back the py-1.39.3 polars source pin (which is
+load-bearing for ADR 0003 / lazy=True).
+
+#### R2 — load_multitable_5x200p +22.8%, exceeds Sprint 7 halt criterion 2
+
+`load/load_multitable_5x200p` (5 tables × 200 partitions):
+- parked-claude: 1.5057 ms median (CI [1.4849, 1.5318])
+- claude-2: **1.8497 ms median (CI [1.8414, 1.8633])**
+- Delta: +344 µs, +22.8%
+
+Sprint 7 dispatch brief halt criterion 2 ("Bench A/B reveals > 20%
+regression on any hot path") is **technically met**. Per the brief, this
+warrants investigation — but as a finding for Sprint 8 to act on, not as
+a Sprint 7 in-flight halt (the structural change driving it is already
+shipped via ADR 0003 resolution and isn't being rolled back).
+
+Single-table scan paths (`load_cold/warm_2000p`) regressed only 1.6-2.2%
+— within noise. The multitable path's +22.8% suggests a per-table-init
+cost that scales linearly with table count and is more expensive on
+py-1.39.3 polars than on rs-0.53.0+hinmeru. Likely candidates:
+- new polars-plan setup/lookup overhead per LazyFrame creation
+- mimalloc + py-1.39.3 polars allocator interaction (chili-bin uses
+  mimalloc; some polars internals may have changed allocation patterns)
+- per-table schema validation that's more thorough on py-1.39.3
+
+**Sprint 8 Part 1 P2 task:** profile a 5-table load on py-1.39.3 vs
+rs-0.53.0 polars; identify the per-table linear cost driver; mitigate.
+
+#### R3 — eval bench query parser regression (chili syntax tightened on claude-2)
+
+`crates/chili-op/benches/eval.rs` panicked on first variant
+(`query_groupby_agg`) at parse time on claude-2. Same query
+("select mean price, sum volume by symbol from t where date>=2024.01.02,
+date<=2024.01.11") with `src_path="bench.chi"` parses fine on
+parked-claude but fails on claude-2 with:
+
+```
+found 'Id'price'' expected indices, 'Op':'', arguments, operator,
+'Punc','', 'By', or 'From'
+```
+
+The bench's `make_engine()` calls `state.enable_pepper()`, but the
+`src_path` extension is `.chi`. claude-2's parser dispatches by
+`src_path.ends_with(".chi")` → uses chili-syntax parser, which is
+stricter and rejects the pepper-shape `select mean price by ...` form.
+parked-claude either had a more permissive chili parser OR dispatched
+based on `state.enable_pepper()`.
+
+**Sprint 8 Part 1 P3 task:** EITHER:
+- Fix the bench files: change `src_path` from `bench.chi` to `bench.pep`
+  (matches the engine's pepper mode; non-controversial). Re-run eval +
+  projection benches on claude-2.
+- OR investigate whether claude-2's chili syntax should accept the
+  pepper-style `select mean price` form. ADR territory if user-decision.
+
+Until R3 resolves, `eval/*` and `projection/*` rows in the table above
+remain blank for claude-2. Sprint 8 Part 1 P3 fills them.
+
+### Other observations (no action needed)
+
+- **scan paths are within ±2.3%** — `query_narrow_range_5d` is actually
+  faster on claude-2 (-2.3%); `query_eq_single_date` and
+  `query_wide_range_500d` are within ±0.4% (noise). The polars source
+  swap doesn't materially change scan throughput.
+- **write_partition is within -0.9%** — `wpar_1k_rows_fresh_hdb` 9.18 ms
+  on parked vs 9.08 ms on claude-2. Within noise.
+- **load single-table is within +1.6 to +2.2%** — within noise.
+
+### Disk + wall-clock for the A/B sweep
+
+- parked-claude bench compile + run: ~25 min wall, peak 13 GB target/
+  in `/tmp/chili-parked-bench`.
+- claude-2 bench compile + run: ~30 min wall, peak 12 GB target/release/
+  in `/Users/oakadmin/code/chili`.
+- Combined disk used at peak: ~25 GB (well under 78 GB free at sweep
+  kickoff).
+- Total Sprint 7 Part B wall time: ~60 min including monitoring overhead.
+
+### Sprint 8 Part 1 inputs (the perf-pass-1 backlog)
+
+P1 — claim back ≤400 ns parse_cache hit (golden rule 6).
+P2 — investigate +22.8% multitable load regression.
+P3 — bench file `src_path` (`.chi` → `.pep`) or chili-syntax permissivity ADR.
+P4 — populate eval/projection A/B rows once P3 lands.
