@@ -14,7 +14,8 @@ existing locations and is not retro-fitted into this table.
 |---|---|---|---|---|---|
 | 1 | Strategic research + main↔claude inventory | Ratified 2026-05-07 | [`../history/sprints/sprint_1_dispatch_brief_2026-05-06.md`](../history/sprints/sprint_1_dispatch_brief_2026-05-06.md) | [`sprint_1_retro.md`](sprint_1_retro.md) | 2 (API divergence + post-error disk-check) |
 | 2 (v1) | mdata-foundation cherry-picks (TCP listener + serde9 fix + stats) | **Superseded 2026-05-07** — halted at Part A on the b20177c cherry-pick (FFI-rewrite divergence in chili-py/src/lib.rs); pivoted to claude-2 plan | [`../history/sprints/sprint_2_dispatch_brief_2026-05-07_superseded.md`](../history/sprints/sprint_2_dispatch_brief_2026-05-07_superseded.md) | — | 1 (cherry-pick conflict accumulation — invert the merge direction) |
-| 2 (v2) | claude-2 baseline + features inventory (PIVOT) | Wrapped 2026-05-07; awaiting ratification | [`sprint_2_dispatch_brief_2026-05-07.md`](sprint_2_dispatch_brief_2026-05-07.md) | [`sprint_2_retro.md`](sprint_2_retro.md) | 1 promoted (cherry-pick conflict accumulation, in `f5889f1` mid-sprint) + 1 candidate (subagent context drift on superseded docs; not promoted yet) |
+| 2 (v2) | claude-2 baseline + features inventory (PIVOT) | Ratified 2026-05-07 | [`../history/sprints/sprint_2_dispatch_brief_2026-05-07.md`](../history/sprints/sprint_2_dispatch_brief_2026-05-07.md) | [`sprint_2_retro.md`](sprint_2_retro.md) | 1 promoted (cherry-pick conflict accumulation, in `f5889f1` mid-sprint) + 1 candidate (subagent context drift on superseded docs; not promoted yet) |
+| 3 | additive feature port wave 1 (clippy unblock + 8 features + parse_cache bench gate) | Drafted 2026-05-07; awaiting kickoff (gate: mdata sign-off on breakage report) | [`sprint_3_dispatch_brief_2026-05-07.md`](sprint_3_dispatch_brief_2026-05-07.md) | — | — |
 
 ---
 
