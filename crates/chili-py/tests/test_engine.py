@@ -108,7 +108,7 @@ class TestEvalLazy:
         assert isinstance(out, pl.DataFrame)
 
     @pytest.mark.xfail(
-        reason="polars Python/Rust DSL schema skew; tracked for Sprint 5 pin",
+        reason="ADR 0003: polars-core-patch fork DSL hash differs from stock Python polars; structural blocker, see docs/decisions/0003-pylazyframe-dsl-incompat.md",
         strict=False,
         raises=Exception,
     )
@@ -117,7 +117,7 @@ class TestEvalLazy:
         assert isinstance(out, pl.LazyFrame)
 
     @pytest.mark.xfail(
-        reason="polars Python/Rust DSL schema skew; tracked for Sprint 5 pin",
+        reason="ADR 0003: polars-core-patch fork DSL hash differs from stock Python polars; structural blocker, see docs/decisions/0003-pylazyframe-dsl-incompat.md",
         strict=False,
         raises=Exception,
     )
@@ -132,7 +132,7 @@ class TestEvalLazy:
         assert collected["y"].to_list() == eager["y"].to_list()
 
     @pytest.mark.xfail(
-        reason="polars Python/Rust DSL schema skew; tracked for Sprint 5 pin",
+        reason="ADR 0003: polars-core-patch fork DSL hash differs from stock Python polars; structural blocker, see docs/decisions/0003-pylazyframe-dsl-incompat.md",
         strict=False,
         raises=Exception,
     )
@@ -146,7 +146,7 @@ class TestEvalLazy:
         assert out["x"].to_list() == [3, 4, 5]
 
     @pytest.mark.xfail(
-        reason="polars Python/Rust DSL schema skew; tracked for Sprint 5 pin",
+        reason="ADR 0003: polars-core-patch fork DSL hash differs from stock Python polars; structural blocker, see docs/decisions/0003-pylazyframe-dsl-incompat.md",
         strict=False,
         raises=Exception,
     )

@@ -8,6 +8,21 @@ version = "0.8.0"
 description = "Python bindings for the Chili engine (EngineState)"
 requires-python = ">=3.10"
 readme = "README.md"
+dependencies = [
+    # Pinned to 1.39.3 because chili's Rust polars-core uses the
+    # `hinmeru/polars-core-patch.git#v0.53.0` fork which embeds a DSL hash
+    # that differs from stock Python polars at any version. Lazy-frame
+    # transfer over the FFI is therefore broken regardless of Python
+    # polars version. See ADR 0003. Pin tracks the latest tested-stable
+    # Python polars; eager DataFrame transfer is unaffected.
+    "polars==1.39.3",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0",
+    "pluggy>=1.5",
+]
 
 [tool.maturin]
 module-name = "chili.engine_state"
