@@ -598,3 +598,77 @@ editable-install-induced consumer outages + ~1pp per outage on debugging
 which version mdata was actually running. Recurs every wheel cut +
 downstream-install pair. Saves consumer-trust cost too (mdata stops
 fearing chili's compile cycles).
+
+### Re-measure bench numbers within ±10% of a hard target before triggering mitigation work
+
+**Rule.** When a bench result lands within ±10% of a golden-rule target
+(or any known threshold that triggers escalation), the FIRST move is
+re-measurement, NOT investigation / profiling / mitigation. Apple
+Silicon thermal/memory variance can account for 20-40 ns on
+sub-microsecond benches and similar relative variance on µs/ms benches.
+Two or three additional runs cost ~30s wall each and produce a
+confidence interval. If all extras land safely in-target, the original
+was an outlier and no work is needed. If extras confirm out-of-target,
+escalate to investigation. Skipping the re-measure and going directly
+to investigation wastes pp on diagnosing noise.
+
+**Why.** Sprint 7 Part B measured parse_cache hit at 410.58 ns; golden
+rule 6 target is ≤400 ns. The +2.6% over target prompted "Sprint 8 P1 =
+profile + reclaim ≤400 ns or ADR amend" in the Sprint 7 retro. Sprint 8
+P1's first move was the re-measurement: 397.47 / 379.08 / 398.33 ns
+across 3 runs — comfortably under target. The 410.58 ns was thermal
+noise. A naive Sprint 8 that skipped re-measure and jumped straight to
+"profile parse_cache hot path with samply" would have spent ~2-3pp
+investigating a non-issue. Re-measure cost: ~0.5pp. Saving: 1.5-2.5pp +
+the cognitive overhead of an unnecessary "is golden rule 6 broken?"
+investigation.
+
+**Apply where.** Any bench-pass sprint that surfaces a marginal
+regression (within ±10% of a target). Specifically: parse_cache hit
+(golden rule 6 ≤400 ns); future Python concurrent eval (golden rule 5
+6.10× throughput); any new golden rule that pegs to a numerical
+threshold. Generalizes to any benchmark-driven decision point —
+re-measure before treating a result as load-bearing.
+
+**Cost saved.** ~1.5-2.5pp per sprint that would otherwise pursue
+noise. Recurs every bench-pass sprint where natural variance straddles
+a target threshold.
+
+### macOS bench profiling needs `[profile.bench]` symbol-retention override pre-staged
+
+**Rule.** When a chili sprint plans to run `samply record` /
+`cargo flamegraph` / any sampling profiler on a bench binary, FIRST
+verify (and if needed, pre-add) a workspace `[profile.bench]` override
+that retains debug symbols. Workspace currently has
+`[profile.release] strip = true` for production binary leanness; this
+strips bench binary symbols too (cargo `bench` profile inherits from
+`release`). Profiling without symbols produces unsymbolized
+hex-address stacks — the profile data is captured but functions can't
+be named, so root-cause analysis is impossible. Pre-staging the
+override at sprint kickoff costs ~10-15 min wall on the initial cold
+release-with-debug build (lesson 11 rebuild territory); discovering
+mid-sprint and adding the override costs the same plus pp on the
+failed profile attempt + decision-pivot.
+
+**Why.** Sprint 8 Part C, 2026-05-08. samply captured 17,216
+main-thread samples on `load_multitable_5x200p` cleanly. All stack
+frames resolved to bare hex addresses (e.g., `0x450c 42.5%`). Without
+function names, no way to identify the per-table linear cost driver
+that Sprint 7 R2 wanted profiled. P2 deferred to Sprint 9 with the
+override + symbolized re-profile as Sprint 9 P2's entry plan. Cost on
+Sprint 8: ~0.5pp on the failed profiling attempt. Cost saved on
+Sprint 9 by capturing the lesson: ~0.5pp on the same mid-sprint
+discovery if it recurred. `cargo flamegraph` on macOS additionally
+requires Xcode (only CLI tools installed on autonomous-run machines)
+for `xctrace`; samply is the autonomous-run-compatible alternative
+IF the binary has symbols.
+
+**Apply where.** Sprint 9 P2 (deferred from Sprint 8). Future
+perf-pass sprints (Sprint 12 perf-pass-3). Generalizes to any project
+where production-build size optimizations strip symbols. Inverse case
+(profiling-free sprint, e.g., docs-only or feature-add-only) doesn't
+need the override.
+
+**Cost saved.** ~0.5pp per perf-pass sprint that would otherwise
+mid-sprint discover the symbol issue. Plus ~10-15 min wall on the
+unnecessary profile run that produces hex-only data.
