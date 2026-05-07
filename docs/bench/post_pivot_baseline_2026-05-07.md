@@ -516,6 +516,66 @@ GUI / Xcode / addr2line is available).
 
 ---
 
+## Sprint 12 P2 partial symbolization (2026-05-08)
+
+`cargo install addr2line --features bin` resolved chili-side addresses;
+polars-internal kernels remain unresolved (chili builds polars from
+`/tmp/polars-py-1.39.3` whose `[profile.release]` strips debug; chili
+workspace `[profile.bench]` override only affects chili-* crates).
+
+### Resolved hot-path entries (Mach-O text base 0x100000000)
+
+| Address | Self-time (main) | Resolved frame |
+|---|---:|---|
+| `0x29c4` | 16.5% | `alloc::boxed::Box<T>::new` (Rust heap allocation) |
+| `0x1948` | 2.9% | `criterion::routine::Function::bench` (harness; not chili) |
+| `0x1694` | 1.2% | `alloc::boxed::Box<T>::new` (different inline site) |
+| `0x3474` | 0.8% | `crossbeam_deque::deque::Stealer::steal` (rayon work-stealing) |
+| `0xaaf4` | 0.6% | `criterion::html::Html::summarize` (HTML report; outside measurement) |
+
+**Resolved insight: 17.7% of main-thread time is in `Box::new`** across
+two inlining sites. On a per-table-init pattern, this scales linearly
+with table count → matches the +22.8% multitable regression behavior.
+Likely site: chili-core's `load_par_df` calls into polars
+`LazyFrame::scan_parquet` / schema setup which boxes per-column-per-
+table. `engine_state.rs:1194` (`ArrowDataType::List(Box::new(...))`)
+is one identifiable candidate.
+
+### Unresolved (polars-internal)
+
+| Address | Self-time | Notes |
+|---|---:|---|
+| `0x450c` | 38.6% main / **93.1% workers** | Polars-internal hot kernel; needs polars-source debug build to resolve |
+| `0x4834` | 26.7% main | Polars-internal; same constraint |
+
+To resolve these, edit `/tmp/polars-py-1.39.3/Cargo.toml`'s
+`[profile.release]` to add `debug = true; strip = false`, then cold
+rebuild the bench binary (~30+ min wall, +15 GB target/ disk). Sprint
+12 didn't budget that; documented as Sprint 13 P2 mitigation if/when
+user wants full symbolization.
+
+### Pragmatic Sprint 13 P2 mitigation candidates (without resolving polars symbols)
+
+The 93% concentration in ONE polars kernel suggests **chili-side
+mitigation by reducing call frequency** is viable without symbolizing
+the kernel:
+
+- **Batch schema reads**: chili-core's `load_par_df` could read all
+  table schemas in one `par_iter` pass (currently per-table sequential
+  schema lookup) to reduce polars LazyFrame setups by ~5x on the
+  multitable path.
+- **Pre-allocate Box arenas**: warm mimalloc arena before parallel
+  build phase to reduce per-table allocation pressure.
+- **Coalesce qualified-name string interning**: pre-compute table-name
+  strings outside the polars setup hot path.
+
+Sprint 13 P2 should profile each chili-side candidate against the
+same `load_multitable_5x200p` bench. Target: claim back at least half
+of the +22.8% regression (i.e., land within +10% of parked-claude
+single-table-equivalent) WITHOUT requiring polars-source debug build.
+
+---
+
 ## Sprint 8 Part A (P1) — parse_cache re-measure (2026-05-08)
 
 Re-measurement per reviewer C1 (Sprint 7 Part D.1) — Apple Silicon
