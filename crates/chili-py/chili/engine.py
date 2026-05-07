@@ -39,7 +39,12 @@ class ChiliEngine:
         self._hdb_path: Optional[str] = None
         self._column_scales: Dict[str, Dict[str, int]] = {}
 
-    def eval(self, source: str, src_path: Optional[str] = None) -> Any:
+    def eval(
+        self,
+        source: str,
+        src_path: Optional[str] = None,
+        lazy: bool = False,
+    ) -> Any:
         """Evaluate a Chili or Pepper expression string.
 
         Args:
@@ -47,15 +52,22 @@ class ChiliEngine:
             src_path: Optional logical source path for error messages.
                       Defaults to ``"repl.pep"`` or ``"repl.chi"``
                       depending on the engine's syntax mode.
+            lazy: ADR 0002 — when False (default), DataFrame-shaped
+                  results are returned eagerly as ``polars.DataFrame``;
+                  when True, results are returned as ``polars.LazyFrame``
+                  for further chained ops + ``.collect()``. Both paths
+                  release the GIL around the heavy work (golden rule 5).
 
         Returns:
             The result of the evaluation, converted to a Python type.
             DataFrames are auto-dequantized via registered column scales
-            (see :meth:`set_column_scale`).
+            (see :meth:`set_column_scale`); LazyFrames are returned
+            unmodified — call ``.collect()`` then apply scales manually
+            via :meth:`_apply_column_scales` if needed.
         """
         if src_path is None:
             src_path = "repl.chi" if self.is_repl_use_chili_syntax() else "repl.pep"
-        result = self.engine.eval(source, src_path)
+        result = self.engine.eval(source, src_path, lazy)
         if isinstance(result, pl.DataFrame):
             return self._apply_column_scales(result, source)
         return result

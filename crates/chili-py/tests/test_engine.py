@@ -83,6 +83,83 @@ class TestEval:
             engine.eval("undefined_var_xyz")
 
 
+class TestEvalLazy:
+    """ADR 0002 — opt-in lazy parameter on engine.eval.
+
+    Default `lazy=False` returns DataFrame; `lazy=True` returns LazyFrame.
+    Both paths preserve golden rule 5 (GIL release).
+
+    Caveat (Sprint 4 Part B finding): the Python polars (1.39.3) shipped via
+    `uv` and the Rust polars (0.53.0) pinned in workspace Cargo.toml have
+    incompatible LazyFrame DSL schema hashes. PyLazyFrame transfer over the
+    FFI fails with `polars.exceptions.ComputeError: deserialization failed`
+    until the version skew is resolved (pin Python polars to the matching
+    DSL version, planned for Sprint 5). The lazy-return tests below are
+    marked xfail with `strict=False` so they pass once the pin lands.
+    """
+
+    def test_default_eval_returns_dataframe(self, pepper_engine: ChiliEngine):
+        out = pepper_engine.eval("([] x:1 2 3; y:4 5 6)")
+        assert isinstance(out, pl.DataFrame)
+        assert out.shape == (3, 2)
+
+    def test_eval_lazy_false_returns_dataframe(self, pepper_engine: ChiliEngine):
+        out = pepper_engine.eval("([] x:1 2 3; y:4 5 6)", lazy=False)
+        assert isinstance(out, pl.DataFrame)
+
+    @pytest.mark.xfail(
+        reason="polars Python/Rust DSL schema skew; tracked for Sprint 5 pin",
+        strict=False,
+        raises=Exception,
+    )
+    def test_eval_lazy_true_returns_lazyframe(self, pepper_engine: ChiliEngine):
+        out = pepper_engine.eval("([] x:1 2 3; y:4 5 6)", lazy=True)
+        assert isinstance(out, pl.LazyFrame)
+
+    @pytest.mark.xfail(
+        reason="polars Python/Rust DSL schema skew; tracked for Sprint 5 pin",
+        strict=False,
+        raises=Exception,
+    )
+    def test_eval_lazy_true_collect_round_trips_data(
+        self, pepper_engine: ChiliEngine
+    ):
+        eager = pepper_engine.eval("([] x:1 2 3; y:4 5 6)")
+        lazy = pepper_engine.eval("([] x:1 2 3; y:4 5 6)", lazy=True)
+        collected = lazy.collect()
+        assert collected.shape == eager.shape
+        assert collected["x"].to_list() == eager["x"].to_list()
+        assert collected["y"].to_list() == eager["y"].to_list()
+
+    @pytest.mark.xfail(
+        reason="polars Python/Rust DSL schema skew; tracked for Sprint 5 pin",
+        strict=False,
+        raises=Exception,
+    )
+    def test_eval_lazy_true_chains_filter(self, pepper_engine: ChiliEngine):
+        # Verify a chained lazy op + collect executes without error.
+        out = (
+            pepper_engine.eval("([] x:1 2 3 4 5)", lazy=True)
+            .filter(pl.col("x") > 2)
+            .collect()
+        )
+        assert out["x"].to_list() == [3, 4, 5]
+
+    @pytest.mark.xfail(
+        reason="polars Python/Rust DSL schema skew; tracked for Sprint 5 pin",
+        strict=False,
+        raises=Exception,
+    )
+    def test_eval_lazy_default_on_lazy_engine_still_lazy(self, lazy_engine: ChiliEngine):
+        # When the engine is constructed lazy=True, default eval (lazy=False
+        # at the FFI boundary) collects the engine-internal LazyFrame to a
+        # DataFrame before returning. Explicit lazy=True keeps it lazy.
+        assert isinstance(lazy_engine.eval("([] x:1 2 3)"), pl.DataFrame)
+        assert isinstance(
+            lazy_engine.eval("([] x:1 2 3)", lazy=True), pl.LazyFrame
+        )
+
+
 # ---------------------------------------------------------------------------
 # Variable management
 # ---------------------------------------------------------------------------

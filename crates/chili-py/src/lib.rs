@@ -40,6 +40,7 @@ use chili_op::{BUILT_IN_FN, LOG_FN};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Timelike, Utc};
 use indexmap::IndexMap;
 use polars::frame::DataFrame;
+use polars::prelude::IntoLazy;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{
@@ -339,14 +340,45 @@ impl PyEngineState {
     }
 
     /// Evaluate a Chili or Pepper expression string (same as the REPL).
-    fn eval(&self, py: Python<'_>, source: &str, src_path: &str) -> PyResult<Py<PyAny>> {
+    ///
+    /// If `lazy=False` (default, ADR 0002 Option b), the result is eagerly
+    /// materialized: a `LazyFrame` produced by an internally-lazy engine is
+    /// collected to a `DataFrame` before returning. Both branches release the
+    /// GIL around the heavy work (`py.detach`) — golden rule 5 preserved.
+    ///
+    /// If `lazy=True`, the result is returned as a `polars.LazyFrame` so the
+    /// caller can chain further ops + `.collect()` lazily. When the engine
+    /// is in eager mode (the default), the returned LazyFrame is a
+    /// post-collect `df.lazy()` wrapper — chain-compatible but without
+    /// predicate / projection pushdown across the eval boundary. For true
+    /// end-to-end lazy semantics, construct `ChiliEngine(lazy=True)`.
+    #[pyo3(signature = (source, src_path, lazy=false))]
+    fn eval(
+        &self,
+        py: Python<'_>,
+        source: &str,
+        src_path: &str,
+        lazy: bool,
+    ) -> PyResult<Py<PyAny>> {
         self.check_fork()?;
-        let obj = py.detach(move || {
+        let obj = py.detach(move || -> Result<SpicyObj, chili_core::SpicyError> {
             let mut stack = Stack::new(None, 0, 0, "");
             let args = SpicyObj::String(source.to_string());
-            map_spicy_error(self.inner.eval(&mut stack, &args, src_path))
+            let raw = self.inner.eval(&mut stack, &args, src_path)?;
+            // ADR 0002 Option b — lazy/eager normalization happens here so
+            // the caller-visible shape matches the `lazy` flag regardless
+            // of the engine's persistent lazy_mode.
+            let raw = unwrap_return(raw);
+            match (lazy, raw) {
+                (false, SpicyObj::LazyFrame(lf)) => lf
+                    .collect()
+                    .map(SpicyObj::DataFrame)
+                    .map_err(|e| chili_core::SpicyError::EvalErr(e.to_string())),
+                (true, SpicyObj::DataFrame(df)) => Ok(SpicyObj::LazyFrame(df.lazy())),
+                (_, other) => Ok(other),
+            }
         });
-        spicy_to_py(py, obj?)
+        spicy_to_py(py, map_spicy_error(obj)?)
     }
 
     /// Retrieve a variable by name, converted to a Python object.
