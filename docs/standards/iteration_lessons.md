@@ -672,3 +672,52 @@ need the override.
 **Cost saved.** ~0.5pp per perf-pass sprint that would otherwise
 mid-sprint discover the symbol issue. Plus ~10-15 min wall on the
 unnecessary profile run that produces hex-only data.
+
+### macOS `samply` autonomous-run profiling produces unsymbolicated profiles even with debug-info-embedded binaries
+
+**Rule.** When using `samply record --save-only` on macOS in an
+autonomous-run / headless environment, expect the saved JSON to contain
+hex-address stack frames, NOT symbolized function names, even when the
+bench binary has `[profile.bench] debug = true; strip = false`. samply's
+symbolization happens at *display time* (`samply load <json>` opens a
+browser that fetches symbols from the binary at runtime). Without GUI,
+three resolution paths exist, all with autonomous-run friction:
+
+1. Upload JSON to `https://profiler.firefox.com/` — user action.
+2. Use `atos` with a `dsymutil`-generated dSYM bundle — extra build
+   step; on macOS often needs full Xcode (not just CLI tools).
+3. Install `llvm-addr2line` / `addr2line` (~50 MB) and write a custom
+   resolver script — feasible autonomously, ~2pp setup + use.
+
+**For autonomous-run, the practical pattern is: capture the profile +
+the symbolized bench binary as sprint artifacts; defer symbolization +
+mitigation to a future sprint that has Path 3 pre-installed (or a
+user-driven mini-sprint with GUI).**
+
+**Why.** Sprint 9 P2, 2026-05-08. 31m 39s rebuild + 10s samply record
+produced a profile that pinpointed the dominant kernel by offset
+(`0x450c` = 93% of polars worker time on `load_multitable_5x200p`) but
+without function names, no actionable mitigation possible autonomously.
+Sprint pp spent on P2: ~1.5pp; sprint value captured: hot-kernel offset
+isolated + bench binary preserved with debug info. Decision-pivot:
+defer symbolization + fix to Sprint 12 perf-pass-3. Net pp on Sprint 9
+P2: ~1.5pp; deferred-fix pp on Sprint 12 P2: ~3-4pp (cost-stable
+shift; the symbolization step adds ~2pp infrastructure setup but saves
+the rebuild cost since the bench binary is preserved).
+
+**Apply where.** Any chili sprint planning samply-driven optimization
+on macOS without GUI access. Specifically: Sprint 12 perf-pass-3,
+future bench-pass sprints, any future "we need to know what function
+is hot" investigation. Generalizes to any Rust + macOS
+performance-sensitive project where the autonomous-run environment
+lacks GUI / Xcode / pre-installed perf tools. Inverse case (Linux
+autonomous run) likely has better ergonomics — `perf` symbolizes at
+record time on Linux. Pre-flight: any sprint that lists "samply
+profile" as a deliverable should include "+1-2pp for addr2line install
+or dSYM generation" in the prediction band.
+
+**Cost saved.** ~0.5-1pp per future bench-pass sprint that would
+otherwise re-discover this; ~2pp on the symbolization-infra setup
+spread across multiple sprints if the install is shared. Plus
+risk-reduction on the "I have a profile but can't act on it" anti-
+pattern in autonomous run.
