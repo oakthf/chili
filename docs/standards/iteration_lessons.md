@@ -229,3 +229,86 @@ forced verification). Future-occurrence estimate: 5-15pp per avoided sprint
 that would have been scoped around a false GIL constraint, plus risk reduction
 on shipping API surfaces unnecessarily limited by misunderstood framework
 behavior.
+
+### Re-verify inventory claims against destination code before locking sprint scope
+
+**Rule.** When a sprint will consume a feature inventory, audit doc, or
+cross-branch comparison authored more than ~24 hours before sprint kickoff,
+re-grep the destination codebase for each claimed-missing surface BEFORE
+accepting the inventory's classification. Inventories drift the moment the
+destination branch moves; rebases especially absorb upstream-shipped features
+that look "claude-only" relative to a stale fork point. A 5-minute grep pass
+at sprint kickoff regularly avoids ~1pp of doomed implementation work and
+the harder-to-debug case of duplicated definitions that collide at link time.
+
+**Why.** Sprint 3 Part B kickoff, 2026-05-07. The brief sourced its 4
+SMALL/TRIVIAL features from `claude_only_features_inventory_2026-05-07.md`
+Class 3, authored that same morning. By Sprint 3 kickoff that afternoon, the
+inventory had already drifted on B.1 — `ChiliError` + 6 subclasses +
+`spicy_error_to_pyerr` were already on main (chili-py/src/lib.rs:42-70)
+inherited verbatim by claude-2's tip via the FFI rewrite. Inventory also
+listed B.3 lifecycle as 5 methods; parked-claude only ever had 2. Pre-kickoff
+greps for each named identifier (`ChiliError`, `set_column_scale`, `LOG_FN`,
+`MiMalloc`, `is_loaded`, `table_count`, `unload`, `reload`, `close`)
+classified each surface as already-present / partially-present / missing in
+~5 minutes, and revealed two over-spec'd inventory items before any
+implementation work started. Pattern: rebases compress inventory-drift
+latency from days to hours; the audit ages hourly.
+
+**Apply where.** Every sprint that consumes an inventory, audit doc, or
+cross-branch comparison, especially across rebases or main-side merges.
+Specifically: every chili port-wave sprint (Sprints 3, 4, 5 currently;
+future port sprints if they emerge). Generalizes to nxcar / mdata /
+cross-project audits where the destination project has uncommitted upstream
+churn between audit-write time and port-execution time. Doesn't apply to
+inventories that are explicitly marked "frozen at <ref>" and consumed as
+historical record (e.g., `docs/history/` provenance docs).
+
+**Cost saved.** ~1-2pp per sprint that would have implemented a feature
+already on the destination + risk avoidance on duplicate-definition link
+errors. Sprint 3 alone: ~1pp on B.1 (skipped exception hierarchy port) +
+~0.5pp on B.3 (3 fewer lifecycle methods than spec'd). Recurs every port
+sprint until the inventory drift discipline is internalized.
+
+### Run code-reviewer subagent before retro commit, fix in-sprint as Part E.1
+
+**Rule.** Schedule the `code-reviewer` subagent dispatch as the LAST work
+item of sprint Part E (immediately before retro authoring), not after.
+Reviewer findings often surface fixable correctness issues — substring-match
+fragility, single-table loop limits, docstring over-promises, off-by-one
+edge cases — that should land as a focused E.1 commit on the same sprint.
+Pushing them to the next sprint either bleeds them into unrelated work or
+causes a "we already retro'd" hesitation. The cost of in-sprint absorption
+is sub-1pp; the cost of cross-sprint deferral compounds every retro that
+references "fix this next sprint" without strict tracking.
+
+**Why.** Sprint 3 Part E wrap, 2026-05-07. The code-reviewer dispatch (49k
+tokens, ~3 minutes wall) flagged 3 must-fix items in the column-scale port:
+C1 substring-fragile match (`f"from {table}" not in query` would false-match
+`from trades` against `from all_trades`, risking golden rule 4 violations
+on multi-table queries against mdata's schema); W3 silent single-table loop
+break (multi-table joins only dequantized the first registered table); W2
+`query_plan` docstring over-promised chili-syntax support (the internal
+eval is pepper-only). All three were sub-1pp fixes. Landing them as Sprint 3
+Part E.1 (commit `b269ec0`) preserves the audit trail: "Sprint 3 shipped
+this and code-reviewer agreed it was correct after these specific fixes."
+Pushing to Sprint 4 would have been remembered only via the retro's
+"future-sprint" notes — which historically slip when the next sprint has
+its own scope pressure.
+
+**Apply where.** Every sprint that ports non-trivial logic across branches,
+adds new public API surface, or touches load-bearing invariants (golden
+rules 4-6). Build the cadence as: implement → reviewer → fix → retro,
+in that order, in one continuous session. Reviewer at wrap is mandatory
+for any sprint that touches: chili-py FFI surface, parse-cache code,
+pub/sub code, partition I/O, anything in `crates/chili-core/src/engine_state.rs`.
+Doesn't apply to pure-docs sprints, retro-only sprints, or chore-only
+clippy/fmt fix sprints (those don't need a separate review pass).
+
+**Cost saved.** ~1pp deferred-fix overhead per sprint where the reviewer's
+finding actually lands in the next sprint vs in-sprint absorption. Plus
+the latent-bug-in-production risk reduction on findings that could have
+shipped to mdata: Sprint 3's C1 alone could have caused silent
+miss-rescaling on production queries. Reviewer-at-wrap converts those from
+"shipped bug, debug under pressure later" to "blocked at sprint wrap, fix
+in 0.6pp." Recurs every implementation sprint.

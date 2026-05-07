@@ -77,6 +77,7 @@ Start here: [`README.md`](README.md) — performance summary + Document Index of
 - [`docs/bench/summary.md`](docs/bench/summary.md) — final post-sweep benchmark summary (2026-04-12).
 - [`docs/bench/baseline.md`](docs/bench/baseline.md) — pre-sweep baseline (2026-04-11).
 - [`docs/bench/phase{1..7,9}.md`](docs/bench/) — per-phase benchmark snapshots.
+- [`docs/bench/post_pivot_baseline_2026-05-07.md`](docs/bench/post_pivot_baseline_2026-05-07.md) — claude-2 post-pivot rebaseline (Sprint 3+ rolling).
 - [`docs/bench/mdata-collab/`](docs/bench/mdata-collab/) — mdata↔chili collaboration: schema, parity, comparison.
 - [`docs/research/`](docs/research/) — strategic research (kdb+ landscape, alternatives, Shakti, main↔claude inventory, competitive position synthesis); start at `competitive_position_2026-05-06.md`.
 - [`docs/sim/`](docs/sim/) — sprint cadence (briefs/retros + `cadence_metrics.md` + `roadmap_2026-05-07.md` post-pivot); templates are `_*_template.md`. Pre-pivot `roadmap_2026-05-06.md` is at `docs/history/sim/`.
@@ -114,10 +115,11 @@ Global:
 
 - Branch: `claude-2` (working, post-pivot) / `main` (read-only upstream mirror, user-managed) / `claude` (parked-historical, tagged `claude-baseline-2026-05-07`).
 - Remote: none. Do not re-add.
-- Pivoted from `claude` to `claude-2` on 2026-05-07. claude-2 forked from main tip `f8b6360`. Sprint 2 v2 Part A in progress; full project state refresh (test count, versions, exact main-tip merge inventory) lands in Part E.
-- Pivot rationale: cherry-pick conflict accumulation on FFI-rewrite divergence surface — see `docs/standards/iteration_lessons.md` lesson 4 + `docs/sim/sprint_2_dispatch_brief_2026-05-07.md`.
+- Pivoted from `claude` to `claude-2` on 2026-05-07. claude-2 forked from main tip `f8b6360`. Sprint 3 ratified 2026-05-07 (autonomous run; user pre-ratification).
+- Pivot rationale: cherry-pick conflict accumulation on FFI-rewrite divergence surface — see `docs/standards/iteration_lessons.md` lesson 4 + `docs/history/sprints/sprint_2_dispatch_brief_2026-05-07.md`.
 - Date pin: 2026-05-07.
-- Versions on claude-2: inherited from main tip `f8b6360`. Workspace + chili-py versions verified in Part E retro.
+- Versions on claude-2: workspace + chili-py at 0.8.0 (inherited from main tip `f8b6360`).
 - Python min: 3.10 (raised from 3.7 by pyo3 0.27 abi3-py310). See `docs/dev_setup.md` for env setup.
-- Test count on claude-2: ~162 Rust verified during Part A; chili-py pytest run in Part A wrap. Full count in Part E.
+- Test count on claude-2 (post-Sprint-3): **166 Rust** (`cargo test --workspace --exclude chili-py`) + **58 chili-py pytest** (`uv run pytest`).
+- Bench gate (golden rule 6): parse_cache hit **371.43 ns** on claude-2 (PASS, < 400 ns target; outperforms parked-claude's reported ~385 ns).
 - Open items: see `~/.claude/projects/-Users-oakadmin-code-chili/memory/MEMORY.md`.
