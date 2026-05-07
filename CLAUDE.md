@@ -113,15 +113,15 @@ Global:
 
 - Branch: `claude-2` (working, post-pivot) / `main` (read-only upstream mirror, user-managed) / `claude` (parked-historical, tagged `claude-baseline-2026-05-07`).
 - Remote: none. Do not re-add.
-- Pivoted from `claude` to `claude-2` on 2026-05-07. claude-2 forked from main tip `f8b6360`. Sprints 3-8 ratified (autonomous run; user pre-ratification).
+- Pivoted from `claude` to `claude-2` on 2026-05-07. claude-2 forked from main tip `f8b6360`. Sprints 3-11 ratified (autonomous run; user pre-ratification).
 - Pivot rationale: cherry-pick conflict accumulation on FFI-rewrite divergence surface — see `docs/standards/iteration_lessons.md` lesson 4 + `docs/history/sprints/sprint_2_dispatch_brief_2026-05-07.md`.
 - Date pin: 2026-05-08.
 - Versions on claude-2: chili-py at **0.8.1** (Sprint 7 Part A wheel); workspace at 0.8.0; Python polars pinned to `1.39.3`; Rust polars pinned to `pola-rs/polars` at **`py-1.39.3` tag** (local clone `/tmp/polars-py-1.39.3` — see ADR 0003 Sprint 8 P0 to migrate to GitHub-hosted git ref).
 - Python min: 3.10 (raised from 3.7 by pyo3 0.27 abi3-py310). See `docs/dev_setup.md` for env setup.
 - Test count on claude-2 (post-Sprint-7): **166 Rust** (`cargo test --workspace --exclude chili-py`) + **65 chili-py pytest passing + 0 xfailed** (`uv run pytest`).
 - Bench gate (golden rule 6): parse_cache hit **397 ns** on claude-2 (Sprint 8 P1 re-measure: 397.47 / 379.08 / 398.33 ns over 3 runs; Sprint 7's 410.58 was thermal noise). **Golden rule 6 holds.** Sprint 7 Part B's load_multitable_5x200p +22.8% regression deferred to Sprint 9 P2 (workspace `[profile.bench]` symbol-retention override + symbolized samply re-profile).
-- ADR 0002 (`engine.eval(lazy=True)`) shipped Sprint 4 commit `f23e40a`; **ADR 0003 RESOLVED Sprint 7 Part A** via option 3b (polars py-1.39.3 fork + q-style fmt patch) — lazy=True path now usable end-to-end with predicate pushdown across FFI.
+- ADR 0002 (`engine.eval(lazy=True)`) shipped Sprint 4 commit `f23e40a`; **ADR 0003 RESOLVED Sprint 7 Part A** via option 3b (polars py-1.39.3 fork + q-style fmt patch) — lazy=True path now usable end-to-end with predicate pushdown across FFI. **ADR 0004 (Sprint 10):** pepper retains Polars-aligned primitive set; does NOT track k9 minimization (substrate divergence is intentional per shakti_analysis §4.3).
 - mdata delivery: **chili-sauce 0.8.1 wheel** at `dist/chili_sauce-0.8.1-cp310-abi3-macosx_11_0_arm64.whl` + handoff doc `docs/sync/mdata_chili_2026-05-08_delivery.md` (wheel-only install protocol; forbids editable installs).
 - Wheel cut workflow: `task release-py-sauce` produces `dist/<wheel>`. **NEVER** ship editable installs to mdata (lesson 14).
-- Next: Sprint 9 = perf-pass-2 + KDB-X CE comparison + Sprint 8 P2 carry-over (load_multitable +22.8% symbolized profile + fix). Sprint 7/8 P0 (GitHub-host the polars fork) is **user-driven** (requires GitHub auth) — flagged for follow-up; not autonomous-doable.
+- Next: Sprint 12 = perf-pass-3 + Iceberg eval + Sprint 9 carry-over (P2 load_multitable mitigation; 93% of polars worker time on offset 0x450c per Sprint 9 capture; needs symbolic resolution infra). User-driven backlog: P0 (GitHub-host polars fork), P6 (KDB-X CE GA test), addr2line/dSYM setup for autonomous symbolication.
 - Open items: see `~/.claude/projects/-Users-oakadmin-code-chili/memory/MEMORY.md`.

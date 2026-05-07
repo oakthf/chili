@@ -26,6 +26,7 @@ existing locations and is not retro-fitted into this table.
 | 8 | perf-pass-1 — Sprint 7 R1/R2/R3 fixes (P1 parse_cache re-measure resolved as noise; P3+P4 eval bench parser fix + A/B fill; P2 load_multitable profile deferred to Sprint 9) | 6–12 (mid 9.0) | ~4 | −56% vs midpoint | 1 (P2 deferred mid-sprint due to macOS profiling infrastructure friction — no Xcode + release-profile symbol-strip) | 0 (autonomous run; user observation only) | 0 (gates green throughout; bench-files+docs-only sprint) | 0 (no test-count changes; bench file change + bench reruns) | 2026-05-08 (Sprint 8 wrap commit) |
 | 9 | perf-pass-2 — P7 [profile.bench] override + P2 symbolized rebuild + samply profile captured (93% of polars worker time on offset 0x450c); P5 / P6 / P2-mitigation deferred to Sprint 12 due to autonomous-run infrastructure friction (no GUI for samply load, no addr2line installed) | 5–10 (mid 7.5) | ~2 | −73% vs midpoint | 0 (clean scope shrinkage from skipped P5/P6 + P2 partial verdict) | 0 (autonomous run; user observation only) | 0 (gates green throughout; profile-config + bench-record only sprint) | 0 (no test-count changes) | 2026-05-08 (Sprint 9 wrap commit) |
 | 10 | Pepper conformance to k9 design — ADR 0004 ratifies shakti_analysis §4.3 conclusion (pepper retains Polars-aligned primitives; does NOT track k9 minimal-primitive axiom) | 5–10 (mid 7.5) | ~1.5 | −80% vs midpoint | 0 (source research already concluded the answer; sprint is ratification only) | 0 (autonomous run; user pre-ratification) | 0 (no code touched; gates not re-run) | 0 (ADR-only sprint) | 2026-05-08 (Sprint 10 wrap commit) |
+| 11 | deep housekeeping #2 (every-5-sprint sweep; 2 proposals demoted; CLAUDE.md state refresh; 10-row pattern deltas in cadence_metrics) | 3–5 (mid 4.0) | ~1.5 | −63% vs midpoint | 0 (clean scope; doc tree already in good shape) | 0 (autonomous run) | 0 (no code touched) | 0 (housekeeping; no tests added) | 2026-05-08 (Sprint 11 wrap commit) |
 
 ---
 
@@ -130,3 +131,40 @@ parts.**
 
 _Re-evaluate patterns at next sweep (Sprint 11 housekeeping or earlier if
 calibration drift becomes apparent)._
+
+---
+
+### 10-row deltas (Sprint 11 housekeeping update — 2026-05-08)
+
+Five additional sprints (6, 7, 8, 9, 10) since the initial 5-row pass. New patterns:
+
+### 6. Autonomous-run macOS perf-pass + research-synthesis sprints have a structural pp ceiling
+
+Sprints 6-10 actuals: 3, 12, 4, 2, 1.5 (median 3pp). Predicted bands were 3-5, 8-15, 6-12, 5-10, 5-10 (median midpoint 9.0pp). Actual / predicted ratio: 33%, 80%, 33%, 27%, 17%. **Pattern: every autonomous-run sprint after Sprint 7 came in below 50% of predicted band**, driven by:
+- Sprint 6 (housekeeping): scope shrinkage on already-clean docs tree.
+- Sprint 8 (perf-pass-1): P1 was thermal noise (lesson 15); P3+P4 trivial bench fix; P2 deferred.
+- Sprint 9 (perf-pass-2): symbolization infrastructure-blocked (lesson 17); P5/P6 deferred.
+- Sprint 10 (ADR sprint): research already concluded; ADR is documentation.
+
+**Implication for Sprint 12+ predictions:** roadmap-default 5-10pp bands for perf-pass / research-synthesis sprints overshoot consistently. Recalibrate to 2-5pp range for autonomous-run on this sprint shape. Implementation sprints (Sprints 3, 4, 5, 7) calibrate at the predicted band.
+
+### 7. Mid-sprint pivot count remains stable across all 10 sprints
+
+Total mid-sprint pivots: 5 (Sprint 2 v1→v2, Sprint 4 Part C downgrade, Sprint 5 Part B downgrade, Sprint 7 Part A disk crisis, Sprint 8 P2 deferral). All five were scope-downgrades under structural cost discovery — pattern 2 from the original 5-row analysis still holds at 10 rows.
+
+### 8. Lesson promotion rate: 17 lessons across 10 sprints
+
+Lessons 1-2 from Sprint 1; lessons 3 from Sprint 1 onboarding incident; lesson 4 from Sprint 2 pivot; lesson 5 from Sprint 2 v2 wrap conversation; lessons 6-7 from Sprint 3; lessons 8-9 from Sprint 4; lessons 10-11 from Sprint 5; (no lessons Sprint 6 housekeeping); lessons 12-14 from Sprint 7; lessons 15-16 from Sprint 8; lesson 17 from Sprint 9; (no lessons Sprint 10). Average ~1.5 lessons per sprint; implementation sprints typically promote 2-3 lessons; housekeeping/research-synthesis typically 0-1.
+
+### 9. Test count delta calibration update
+
+Cumulative chili-py pytest: 0 (pre-Sprint-3) → 65 passing + 0 xfailed (post-Sprint-9). Net +65 over 7 sprints touching chili-py = 9.3 tests per port-or-feature sprint average. Implementation sprints add 5-15 tests; bench-or-docs-only sprints add 0-2.
+
+### 10. The "user-driven step" backlog has accumulated
+
+Items from Sprint 7+ that the autonomous run cannot complete:
+- Sprint 7+ P0: GitHub-host the chili polars fork (replace `path = "/tmp/..."` with `git = "..." + tag = "..."` in both Cargo.toml patch blocks).
+- Sprint 9 P6: KDB-X CE comparison (requires interactive registration / EULA).
+- Sprint 9 lesson 17 follow-up: `cargo install addr2line` OR `dsymutil` setup for symbolic resolution; OR `xcode-select --install` for `cargo flamegraph`.
+
+These compound: until the GitHub-host migration (P0) lands, every fresh chili clone breaks at `cargo build` because `/tmp/polars-py-1.39.3` doesn't survive reboot. Sprint 12 should NOT proceed without P0 resolution OR the chili-py wheel is the only build-able artifact (which is fine for mdata but not for any future chili contributor).
