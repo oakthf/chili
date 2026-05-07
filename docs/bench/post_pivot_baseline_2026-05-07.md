@@ -112,12 +112,19 @@ each take ~1–2 min at `-C opt-level=3 -C linker-plugin-lto -C codegen-units=1`
 Compounded over four bench files, the wall-clock cost exceeded Sprint 4's
 ~2-3pp Part C budget allocation.
 
-**Sprint 4 verdict:** verified the bench harnesses **compile** cleanly via
-`cargo bench -p chili-op --no-run` (no signal that the polars-version
-upgrade or Sprint 3's clippy hand-port broke the bench code). Defer the
-actual A/B measurement to Sprint 5, where it consolidates with the
-parked-claude tag-built binary measurement and lands as a single comparison
-sweep.
+**Sprint 4 verdict:** verified the bench harnesses **type-check** cleanly
+via `cargo check --benches -p chili-op` (30s; **dev profile**, NOT the
+release profile that `cargo bench --no-run` uses; release-profile compile
+is the expensive part and is deferred to Sprint 5 along with the
+measurement). The dev-profile check confirms no signal that the polars-version
+upgrade or Sprint 3's clippy hand-port broke the bench code at type level.
+Defer the actual A/B measurement to Sprint 5, where it consolidates with
+the parked-claude tag-built binary measurement and lands as a single
+comparison sweep.
+
+**What this means for Sprint 5:** the release-profile artifact cache is NOT
+warm after Sprint 4. Sprint 5's first `cargo bench` invocation will pay
+the full ~5-10 min release-profile compile cost.
 
 ### Result
 
