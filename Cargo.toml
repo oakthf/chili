@@ -46,6 +46,15 @@ lto = "fat"   # cross-crate inlining across polars boundary
 codegen-units = 1
 # panic = "abort"
 
+# Sprint 9 P7 — bench profile override per iteration_lessons.md lesson 16.
+# Inherits from `release` (opt-level 3, lto fat, codegen-units 1) but
+# retains debug symbols so `samply record` / `cargo flamegraph` can
+# resolve stack frames to function names. Cost: bench binaries ~2x larger
+# on disk; symbol-retention adds maybe 1-2% to compile wall.
+[profile.bench]
+strip = false
+debug = true
+
 # Sprint 7 Part A — option 3b per ADR 0003 amendment.
 # All polars-* crates pinned to a local clone of pola-rs/polars at the
 # `py-1.39.3` tag, with a thin chili-side q-style fmt patch on top
