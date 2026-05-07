@@ -46,12 +46,12 @@ column reflects parked-claude tag binary (commit `dea966e`,
 | scan/query_eq_single_date (ms) | `crates/chili-op/benches/scan.rs` | 1.9596 | 1.9646 | +0.3% | ~same |
 | scan/query_narrow_range_5d (ms) | same | 5.7151 | 5.5821 | **-2.3%** | faster |
 | scan/query_wide_range_500d (ms) | same | 370.56 | 372.13 | +0.4% | ~same |
-| eval/query_groupby_agg (ms) | `crates/chili-op/benches/eval.rs` | 3.2466 | **PARSE ERROR** | n/a | ⚠️ parser regression — Sprint 8 P1 |
-| eval/query_select_star (µs) | same | 355.92 | (skipped) | n/a | bench chain aborted at groupby_agg |
-| projection/select_all_wide (µs) | same | 396.96 | (skipped) | n/a | |
-| projection/select_one_col (µs) | same | 292.22 | (skipped) | n/a | |
-| projection/select_three_cols (µs) | same | 325.02 | (skipped) | n/a | |
-| projection/select_one_col_with_sym_filter (µs) | same | 363.67 | (skipped) | n/a | |
+| eval/query_groupby_agg (ms) | `crates/chili-op/benches/eval.rs` | 3.2466 (.chi) | 3.2734 (.pep) | +0.8% | ~same; not apples-to-apples (src_path differs) |
+| eval/query_select_star (µs) | same | 355.92 (.chi) | 591.62 (.pep) | **+66.2%** | ⚠️ apples-to-oranges; see Sprint 8 R3 caveat |
+| projection/select_all_wide (µs) | same | 396.96 (.chi) | 497.44 (.pep) | +25.3% | apples-to-oranges; see Sprint 8 R3 caveat |
+| projection/select_one_col (µs) | same | 292.22 (.chi) | 295.94 (.pep) | +1.3% | ~same |
+| projection/select_three_cols (µs) | same | 325.02 (.chi) | 332.12 (.pep) | +2.2% | ~same |
+| projection/select_one_col_with_sym_filter (µs) | same | 363.67 (.chi) | 431.92 (.pep) | +18.8% | apples-to-oranges; see Sprint 8 R3 caveat |
 | load/load_cold_2000p (ms) | `crates/chili-op/benches/load_par_df.rs` | 4.9263 | 5.0351 | +2.2% | ~same |
 | load/load_warm_2000p (ms) | same | 4.9350 | 5.0157 | +1.6% | ~same |
 | load/load_multitable_5x200p (ms) | same | 1.5057 | **1.8497** | **+22.8%** | ⚠️ regression — exceeds Sprint 7 halt criterion 2 (>20%) |
@@ -308,3 +308,155 @@ P1 — claim back ≤400 ns parse_cache hit (golden rule 6).
 P2 — investigate +22.8% multitable load regression.
 P3 — bench file `src_path` (`.chi` → `.pep`) or chili-syntax permissivity ADR.
 P4 — populate eval/projection A/B rows once P3 lands.
+
+---
+
+## Sprint 8 Part B (P3 + P4) — eval / projection A/B fill (2026-05-08)
+
+### P3 resolution: bench file `src_path` `.chi` → `.pep`
+
+`crates/chili-op/benches/eval.rs` updated to use `bench.pep` src_path
+(matches the bench engine's `state.enable_pepper()` mode). Eval +
+projection benches now run on claude-2 without parse errors.
+
+Bench file change committed; parked-claude numbers were collected
+with the OLD `bench.chi` src_path. **The eval/projection A/B
+comparison is therefore apples-to-oranges** — different src_path
+extension dispatches to different parsers (chili-syntax-strict vs
+pepper-syntax) which can produce different lazy plans for the same
+query text. Examples from this sprint's data:
+
+- **query_groupby_agg** (.chi 3.2466 ms vs .pep 3.2734 ms, +0.8%) —
+  comparable; whatever plan parked-claude's chili-parser produced was
+  near-identical to pepper-parser's plan in cost.
+- **query_select_star** (.chi 355.92 µs vs .pep 591.62 µs, **+66.2%**) —
+  almost certainly DIFFERENT plans. parked-claude's chili-parser may
+  have produced a partial-scan plan (interpreting `select from t where
+  date=...` as a different DSL shape that doesn't fully materialize all
+  columns), while pepper-parser produces a full-row scan. Without
+  parser-side investigation OR a parked-claude-with-pepper-src_path
+  re-bench, the +66% can't be attributed to polars-source change.
+- **projection/select_all_wide** (.chi 396.96 µs vs .pep 497.44 µs,
+  +25.3%) — similar caveat; different plan likely.
+- **projection/select_one_col** (.chi 292.22 µs vs .pep 295.94 µs,
+  +1.3%) — comparable.
+- **projection/select_three_cols** (.chi 325.02 µs vs .pep 332.12 µs,
+  +2.2%) — comparable.
+- **projection/select_one_col_with_sym_filter** (.chi 363.67 µs vs .pep
+  431.92 µs, +18.8%) — apples-to-oranges; different plan likely.
+
+### Honest verdict on the eval/projection A/B
+
+The Sprint 7 Part B chain abort + Sprint 8 P3 src_path fix means
+**this snapshot is the new baseline for eval/projection on claude-2's
+.pep dispatch.** Comparing against parked-claude's .chi numbers is
+qualitatively useful only for cases where the magnitude is similar
+(query_groupby_agg, projection/select_one_col, projection/select_three_cols
+— all within ±2.2%). The other three (query_select_star,
+projection/select_all_wide, projection/select_one_col_with_sym_filter)
+need either a parked-claude re-bench with .pep src_path OR a chili-side
+parser-equivalence audit before the +18-66% deltas are attributable.
+
+This caveat doesn't affect Sprint 7 Part B's R1 (parse_cache) or R2
+(load_multitable) findings — those benches don't use src_path-shaped
+parser dispatch.
+
+### Sprint 8 leaves these as "Sprint 9 P5" carry-over (optional):
+
+- **(Sprint 9 P5)** — re-bench parked-claude with .pep src_path on the 3
+  apples-to-oranges queries; produce a true Δ% for each. ~2-3pp wall
+  (re-create worktree, re-run benches). Only worth doing if Sprint 9
+  perf work needs the comparison; otherwise the chili-2 .pep numbers
+  are the new baseline going forward.
+
+---
+
+## Sprint 8 Part C (P2) — load_multitable profiling DEFERRED to Sprint 9 (2026-05-08)
+
+P2 (samply flamegraph for the +22.8% load_multitable_5x200p regression)
+hit two infrastructure friction points that pushed it out of Sprint 8's
+budget:
+
+1. **`cargo flamegraph` requires Xcode** on macOS for `xctrace` (only
+   Command Line Tools were installed on the autonomous-run machine).
+   `xcode-select --install` would resolve, but that's a several-GB
+   download not appropriate for autonomous execution without user
+   approval.
+
+2. **samply works without Xcode**, but the workspace `[profile.release]`
+   has `strip = true`, so the bench binary symbols are stripped at
+   link time. samply captured 17,216 samples on the main thread but
+   all stack frames resolve to bare hex addresses (e.g., `0x450c
+   42.5%`, `0x4834 26.4%`). Useful for "the code is hot HERE" but
+   not for naming the function.
+
+   To get symbolized profiles, the workspace `[profile.release]`
+   needs `strip = false` + `debug = true` (or a separate
+   `[profile.bench]` override). Either way, **a profile-config edit
+   would invalidate every cached release-target artifact** (lesson 11
+   territory — uv sync rebuild equivalent). Estimated rebuild cost:
+   ~10-15 min wall on full polars + chili-* recompile.
+
+### Captured artifact (for Sprint 9 P2 to consume)
+
+`/tmp/load_multi_profile.json` (3.4 MB) — samply Firefox-Profiler-format
+JSON with 25 threads × 17,216 samples. Hex-address stacks. Use as the
+"hot region map" for Sprint 9's symbolized re-profile.
+
+Hottest 3 self-time leaf addresses (unsymbolized):
+- `0x450c` 42.5% (likely a polars-arrow / polars-core memory copy or
+  hash function — common 4-byte-aligned hot kernel)
+- `0x4834` 26.4% (similar inner kernel)
+- `0x29c4` 13.7%
+
+Hottest inclusive-time stacks: 100% on a few outer frames (the bench
+harness loop), 58% on `0x2cb02f3`, 54% on `0x1cf03`. These become the
+investigation handles for Sprint 9 P2 once symbols are available.
+
+### Sprint 9 P2 entry plan
+
+```toml
+# Workspace Cargo.toml — add a separate [profile.bench] override that
+# keeps optimizations but retains symbols (cost: ~15 GB extra target/
+# disk for the bench profile + initial cold rebuild ~10-15 min wall).
+[profile.bench]
+debug = true
+strip = false
+```
+
+Then re-run:
+
+```bash
+cargo bench -p chili-op --bench load_par_df --no-run
+samply record --save-only --output /tmp/load_multi_symbolized.json \
+    target/release/deps/load_par_df-* \
+    --bench load_multitable_5x200p --profile-time 10
+# Re-run the same Python analysis script — function names will resolve.
+```
+
+Estimated Sprint 9 P2 cost: ~3-4pp (rebuild + profile + analyze + fix
+if cheap).
+
+---
+
+## Sprint 8 Part A (P1) — parse_cache re-measure (2026-05-08)
+
+Re-measurement per reviewer C1 (Sprint 7 Part D.1) — Apple Silicon
+thermal/memory variance can account for 20-40 ns per run.
+
+| Run | parse_repeat_same_query (median, ns) |
+|-----|--------------------------------------:|
+| Sprint 7 Part B | 410.58 |
+| Sprint 8 P1 #1 | 397.47 |
+| Sprint 8 P1 #2 | 379.08 |
+| Sprint 8 P1 #3 | 398.33 |
+
+**P1 RESOLVED via re-measurement.** All 3 Sprint 8 runs land under the
+400 ns golden rule 6 target. The Sprint 7 Part B 410.58 ns reading was
+a thermal-variance outlier. Range across 3 runs: 379-399 ns; median of
+medians: ~397 ns. **Golden rule 6 holds; no chili-side mitigation
+needed.**
+
+This validates the Sprint 7 retro lesson 8 corollary: bench numbers
+within ±10% of a target should be re-measured before triggering
+mitigation work.

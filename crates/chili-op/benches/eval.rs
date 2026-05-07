@@ -19,7 +19,7 @@ use common::{TempHdb, build_hdb, build_wide_hdb, make_engine};
 fn eval(engine: &EngineState, query: &str) {
     let mut stack = Stack::new(None, 0, 0, "");
     let obj = engine
-        .eval(&mut stack, &SpicyObj::String(query.to_owned()), "bench.chi")
+        .eval(&mut stack, &SpicyObj::String(query.to_owned()), "bench.pep")
         .unwrap();
     black_box(obj);
 }
