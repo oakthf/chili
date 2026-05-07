@@ -74,17 +74,14 @@ Start here: [`README.md`](README.md) — performance summary + Document Index of
 
 - [`CHANGELOG.md`](CHANGELOG.md) — release notes, all shipped phases.
 - [`crates/chili-py/README.md`](crates/chili-py/README.md) — Python API surface.
-- [`docs/bench/summary.md`](docs/bench/summary.md) — final post-sweep benchmark summary (2026-04-12).
-- [`docs/bench/baseline.md`](docs/bench/baseline.md) — pre-sweep baseline (2026-04-11).
-- [`docs/bench/phase{1..7,9}.md`](docs/bench/) — per-phase benchmark snapshots.
-- [`docs/bench/post_pivot_baseline_2026-05-07.md`](docs/bench/post_pivot_baseline_2026-05-07.md) — claude-2 post-pivot rebaseline (Sprint 3+ rolling).
+- [`docs/bench/post_pivot_baseline_2026-05-07.md`](docs/bench/post_pivot_baseline_2026-05-07.md) — claude-2 post-pivot rebaseline (Sprint 3+ rolling; Sprint 7 absorbs A/B sweep).
 - [`docs/bench/mdata-collab/`](docs/bench/mdata-collab/) — mdata↔chili collaboration: schema, parity, comparison.
-- [`docs/research/`](docs/research/) — strategic research (kdb+ landscape, alternatives, Shakti, main↔claude inventory, competitive position synthesis); start at `competitive_position_2026-05-06.md`.
+- (pre-pivot bench artifacts — phase1-7,9 + baseline + summary — moved to `docs/history/bench/` Sprint 6 housekeeping.)
+- [`docs/research/`](docs/research/) — strategic research (kdb+ landscape, alternatives, Shakti, competitive position synthesis, claude-only-features inventory); start at `competitive_position_2026-05-06.md`. (Pre-pivot `main_vs_claude_inventory_2026-05-06.md` superseded by reverse inventory; moved to `docs/history/research/`.)
 - [`docs/sim/`](docs/sim/) — sprint cadence (briefs/retros + `cadence_metrics.md` + `roadmap_2026-05-07.md` post-pivot); templates are `_*_template.md`. Pre-pivot `roadmap_2026-05-06.md` is at `docs/history/sim/`.
 - [`docs/standards/iteration_lessons.md`](docs/standards/iteration_lessons.md) — durable rules promoted from sprint retros.
-- [`docs/sync/`](docs/sync/) — `decisions-needed.md` (irreversible decisions) + `ideas.md` (tagged backlog).
+- [`docs/sync/`](docs/sync/) — `decisions-needed.md` (irreversible decisions) + `ideas.md` (tagged backlog) + `mdata_chili_2026-05-07_delivery.md` (Sprint 5 wheel delivery handoff for mdata, held until sign-off). (Sprint 5 `mdata_breakage_report` superseded by delivery doc; moved to `docs/history/sync/`.)
 - [`docs/decisions/`](docs/decisions/) — ADRs (reversible decisions; see `README.md` for convention).
-- [`docs/sync/mdata_chili_2026-05-07_delivery.md`](docs/sync/mdata_chili_2026-05-07_delivery.md) — Sprint 5 wheel delivery handoff for mdata (held until sign-off).
 - [`docs/history/`](docs/history/) — frozen historical docs; never modify, only add.
 
 ## Rules map
