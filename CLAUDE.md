@@ -90,6 +90,7 @@ Project-local rules live in `.claude/rules/*.md`; global rules in `~/.claude/rul
 
 Project-local:
 - `.claude/rules/sprint-cadence.md` — sprint protocol (briefs, retros, `cadence_metrics.md` row, every-5-sprints housekeeping).
+- `.claude/rules/self-audit-on-plans.md` — for any plan/proposal with ≥ 3 work items or ≥ 5pp total, dispatch parallel Explore + code-reviewer + planner agents before delivering to user.
 
 Global:
 - `git-commit-hygiene.md` — pre-commit audit, never commit secrets / large / regenerable files.
@@ -97,6 +98,7 @@ Global:
 - `claude-md-housekeeping.md` — this file ≤ 200 lines.
 - `runtime-estimation.md` — estimate + monitor any task > 30s.
 - `shutdown-protocol.md` — on `SHUTDOWN_SIGNAL`, halt + WIP note + CronCreate resume.
+- `verify-before-claim.md` — verify load-bearing claims about current state / cause / sequencing / historical fact when verification is < 5 min cost; otherwise mark "unverified, my best inference."
 
 ## Agents
 
