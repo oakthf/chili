@@ -244,6 +244,64 @@ print('chili-sauce 0.8.1 wheel works: eager + lazy paths OK')
 If any assertion fails, ping the chili side. The wheel is identified by
 its build SHA in `git log -1` of chili's `claude-2` branch.
 
+### 4.5 Independence statement (the reassurance)
+
+Once §4.1–§4.4 succeed, the installed wheel is **fully self-contained**:
+
+- The `chili.engine_state.abi3.so` in mdata's site-packages statically
+  embeds all chili-* Rust crates AND the `pola-rs/polars@py-1.39.3` +
+  q-style fmt patch source compiled in. The compiled artifact is a
+  frozen byte-stream snapshot.
+- **Future chili commits — on `claude-2` or any branch — do not affect
+  the installed wheel.** `cargo clean` of the chili repo,
+  `rm -rf /tmp/polars-py-1.39.3`, even `rm -rf /Users/oakadmin/code/chili/`
+  — none of it changes mdata's runtime behavior.
+- The only runtime crossing into "outside the wheel" is to
+  `polars==1.39.3` from PyPI for FFI types (`PyDataFrame`,
+  `PyLazyFrame`, `PySeries`). Any other polars version breaks
+  `engine.eval(lazy=True)` with a `DSL_SCHEMA_HASH` mismatch
+  (see ADR 0003).
+
+This is why §4.2 separates `uv pip install <wheel>` from
+`uv pip install 'polars==1.39.3'`. The wheel ships its own polars Rust
+source compiled in; the Python `polars==1.39.3` package is only there
+to provide the matching FFI wrapper types.
+
+### 4.6 Forbidden actions (do not do)
+
+- ❌ `uv pip install -e /Users/oakadmin/code/chili/crates/chili-py` —
+  the editable-install path that caused the Sprint 4–7 outages on
+  mdata's side.
+- ❌ `sys.path` manipulation pointing at chili's source tree.
+- ❌ `.pth` files in mdata's venv referencing the chili repo. Audit
+  with:
+  ```bash
+  find $(python -c 'import site; print(site.getsitepackages()[0])') \
+      -name '*.pth' -exec cat {} +
+  ```
+- ❌ "Upgrading" by running `git pull` in `/Users/oakadmin/code/chili/`
+  and rebuilding. That is the editable-install path again. Always
+  upgrade by accepting a new `.whl` artifact — see §4.7 below.
+
+### 4.7 Upgrade path (for future wheel deliveries)
+
+For each new chili-sauce wheel (0.8.2 / 0.9.0 / etc.):
+
+1. chili author hands over a new `.whl` (or you copy from chili's
+   `dist/` directory).
+2. From mdata venv:
+   ```bash
+   uv pip install --force-reinstall /path/to/<new-wheel>.whl
+   ```
+3. Re-run §4.3 verification + §4.4 smoke test.
+4. If the new wheel's `CHANGELOG.md` (or a chili-side note) announces a
+   polars-pin bump (e.g. `polars==1.40.x`), run
+   `uv pip install 'polars==X.Y.Z'` to match before or with step 2.
+
+Never upgrade by `git pull`-ing chili and rebuilding — that's the
+editable path. The `.whl` byte-stream is the only supported delivery
+boundary.
+
 ---
 
 ## 5. Pub/Sub status
