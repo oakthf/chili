@@ -21,15 +21,13 @@
 //! | `polars.LazyFrame`     | `LazyFrame`       |
 //! | `None`                 | `Null`            |
 //!
-//! Uses mimalloc as the global allocator. Polars' allocation pattern fits
-//! mimalloc much better than the default system allocator on macOS in
-//! particular; mdata-scale workloads on the cdylib showed measurable
-//! steady-state RSS reduction under mimalloc on the parked-claude binary.
-
-use mimalloc::MiMalloc;
-
-#[global_allocator]
-static GLOBAL: MiMalloc = MiMalloc;
+//! Allocator: system default (libsystem malloc on macOS). The Sprint 3
+//! mimalloc `#[global_allocator]` override was removed in 0.8.2 because
+//! it caused a process-level segfault when chili-sauce co-loaded with
+//! pyarrow (and likely with any other native C extension that brings
+//! its own allocator infrastructure). The mimalloc-on-cdylib RSS
+//! reduction was not worth process-level interop breakage. See
+//! `docs/sync/mdata_chili_2026-05-08_pyarrow_response.md`.
 
 use std::process;
 use std::sync::Arc;

@@ -1,6 +1,6 @@
 [package]
 name = "chili-py"
-version = "0.8.1"
+version = "0.8.2"
 edition = "2024"
 authors = ["The Chili Authors <purple-chili@hotmail.com>"]
 description = "Python bindings for chili-core EngineState"
@@ -13,7 +13,12 @@ crate-type = ["cdylib"]
 chili-core = { path = "../chili-core" }
 chili-op = { path = "../chili-op" }
 indexmap = "2.12.0"
-mimalloc = { version = "0.1", default-features = false }
+# mimalloc removed in 0.8.2 — caused process-level segfault when chili-sauce
+# co-loaded with pyarrow (and likely other native C extensions that bring
+# their own allocator infrastructure). See docs/sync/mdata_chili_2026-05-08_pyarrow_response.md
+# for the investigation. The mimalloc-on-cdylib steady-state RSS reduction
+# documented in Sprint 3 was not worth process-level interop breakage.
+# mimalloc = { version = "0.1", default-features = false }
 polars = { version = "0.53.0" }
 pyo3 = { version = "0.27", features = ["abi3-py310", "chrono"] }
 # pyo3-polars version specifier below is overridden by [patch.crates-io].pyo3-polars

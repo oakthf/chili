@@ -1,10 +1,22 @@
 # chili → mdata wheel delivery, 2026-05-08 (Sprint 7 Part A)
 
-**Wheel artifact:** `dist/chili_sauce-0.8.1-cp310-abi3-macosx_11_0_arm64.whl`
+> ⚠️ **0.8.1 is BROKEN — superseded by 0.8.2 (2026-05-08, same day).**
+> Process-level segfault when chili-sauce 0.8.1 co-loads with pyarrow.
+> Root cause: `#[global_allocator] MiMalloc` in chili-py. Fixed in
+> `dist/chili_sauce-0.8.2-cp310-abi3-macosx_11_0_arm64.whl`. See
+> [`mdata_chili_2026-05-08_pyarrow_response.md`](mdata_chili_2026-05-08_pyarrow_response.md)
+> for the investigation, fix, and 0.8.2 install instructions.
+>
+> The install protocol (§4.1–§4.7), wheel-only invariant, ABI/feature
+> deltas (§2), lazy-frame fix narrative (§3), pub/sub status (§5), and
+> upgrade path (§4.7) below all still apply — just substitute the
+> `0.8.2` wheel filename wherever this doc says `0.8.1`.
+
+**Wheel artifact:** ~~`dist/chili_sauce-0.8.1-...whl`~~ → **`dist/chili_sauce-0.8.2-cp310-abi3-macosx_11_0_arm64.whl`**
 **Branch:** `claude-2` tip
 **Predecessor wheel:** `chili_sauce-0.8.0-cp310-abi3-macosx_11_0_arm64.whl`
-(Sprint 5 delivery, 2026-05-07; superseded by this release).
-**Status:** Internal — held until mdata sign-off on §4 install protocol.
+(Sprint 5 delivery, 2026-05-07; superseded by 0.8.1 → now 0.8.2).
+**Status:** 0.8.2 ready for install. 0.8.1 must NOT be installed (segfaults).
 
 ---
 
