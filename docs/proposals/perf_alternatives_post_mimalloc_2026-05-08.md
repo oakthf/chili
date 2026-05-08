@@ -386,3 +386,177 @@ mimalloc claim).
 - `docs/sim/sprint_3_retro.md` — Sprint 3 port wave (where
   mimalloc was ported without measurement).
 - `docs/standards/iteration_lessons.md` — durable rules.
+
+---
+
+## Appendix — Independent audit (2026-05-08)
+
+Three parallel audits (codebase scan, adversarial review, sequencing
+audit) flagged material issues with the original §1–§5 above. The
+following sections are corrections, additions, and a revised
+sequencing. The original §1–§5 is preserved unchanged for audit
+trail.
+
+### A.1 Material corrections to original proposals
+
+- **P3.2 must be split.** `write_partitioned_df` is **already
+  GIL-released** today: `chili-py/src/lib.rs:527` (`fn_call`) calls
+  `py.detach()` and `write_partitioned_df` flows through `fn_call`.
+  Only `load_par_df` (`lib.rs:532-535`) holds the GIL. Re-scope:
+  - **P3.2a (write):** no work — close out.
+  - **P3.2b (load_par_df):** ~5-8pp standalone, requires audit of
+    chili-side `Arc<RwLock<...>>` state held across load
+    (`engine_state.rs::par_df`).
+- **P1.1 gain claim is unsupported.** The +22.8%
+  `load_multitable_5x200p` regression is dominated by polars-internal
+  worker kernels at `0x450c` (93.1% of worker time, unresolved).
+  The 17.7% main-thread `Box::new` cost that P1.1 / P1.2 / P1.3
+  target is **not the dominant driver** of that regression.
+  Revised claim: "may reduce per-table setup overhead;
+  multi-table regression impact pending re-profile after the
+  change." See `docs/bench/post_pivot_baseline_2026-05-07.md`
+  §"Sprint 12 P2 partial symbolization" for the actual breakdown.
+- **P2.1 type-name correction.** The parse cache holds
+  `Arc<Vec<AstNode>>` (`crates/chili-core/src/engine_state.rs:104`),
+  not `Arc<Ast>`. Conflict with bumpalo arena is real regardless;
+  doc had the wrong identifier.
+- **P2.1 risk → High** (was Medium-high). Adding `'arena` lifetime
+  to AST types likely requires distinct cached-AST vs arena-AST
+  types, or breaks parse_cache hit-path sharing. Closer to a
+  rewrite of the evaluator's ownership model than a refactor.
+- **P2.2 ABI hazard added.** Mismatched alloc/dealloc across the
+  chili/polars FFI is UB. Per-call mimalloc allocator instances
+  must own their dealloc paths; the proposal must specify a
+  free-with-same-allocator protocol before any pursuit.
+- **P2.3 verdict softened.** `libmimalloc-sys` exposes raw
+  `extern "C"` symbols (`mi_malloc`, `mi_free`, `mi_zalloc`,
+  `mi_realloc_aligned`); Rust code can call them directly via
+  `unsafe { libmimalloc_sys::mi_malloc(...) }` without registering
+  mimalloc as `#[global_allocator]`. The original "essentially
+  inert" verdict is too strong — direct mi_malloc calls for hot
+  paths are an option (a lower-level version of P2.2), though
+  whether mimalloc's library init still collides with pyarrow's
+  load path is empirically untested.
+- **P3.1 gain claim revised.** "30-50% reduction in per-eval cost"
+  applies to the **plan-setup fraction** of eval time, not total.
+  For data-heavy mdata OHLCV queries, plan setup is a small share
+  of total eval (most time is in polars execution). Revised:
+  "30-50% reduction in plan-setup overhead per repeated query
+  shape; overall eval impact depends on plan-setup's share of
+  total cost."
+
+### A.2 Additional perf opportunities surfaced
+
+These were not in the original §1–§5 and merit their own entries.
+
+- **A.2.1 — `load_par_df` GIL release** (high priority; same item
+  as P3.2b above). Cost ~5-8pp; gain potentially 30-100% on
+  CPU-bound multi-table loads called from threaded Python.
+- **A.2.2 — `upsert` / `insert` write-lock contention.** Both hold
+  the engine `vars` write-lock during DataFrame extend/groupby/collect
+  (`crates/chili-core/src/engine_state.rs:277-382`). Releasing the
+  lock around the heavy DataFrame ops: ~3-5pp cost; gain 15-40%
+  on upsert-heavy workloads (mdata's RDB ingest path).
+- **A.2.3 — Polars feature-flag audit (NEW Tier).** `simd` and
+  `streaming` may not be explicitly enabled for polars in
+  chili's workspace `Cargo.toml`. ~3-10% potential on numeric
+  Series ops if SIMD was off. Cost: compile-time only, no code
+  change. Bench gate: math-heavy eval benches.
+- **A.2.4 — On-disk parquet codec tuning (NEW Tier).** Page size,
+  row group size, dictionary encoding affect both write throughput
+  AND scan selectivity. The wide-range scan bench is currently
+  ~370 ms; codec tuning can compound. Cost ~1-2pp. Bench gate:
+  existing scan benches.
+- **A.2.5 — Result / DataFrame cache (NEW Tier).** Distinct from
+  P3.1 plan cache: cache the **materialized** DataFrame for
+  identical `(query, partition-state)` pairs. For mdata's REST
+  endpoint pattern (same OHLCV query, frequently repeated within
+  a TTL): higher-leverage than plan caching alone (skips both
+  plan setup AND polars execution). ADR territory.
+- **A.2.6 — `build_qualified_name` allocations.** `engine_state.rs:1561-1568`
+  allocates `Vec` + joins on every table entry during load. Use
+  `format!` or `SmallVec<[&str; 4]>` for typical nesting depth.
+  ~1pp; stacks with P1.3.
+- **A.2.7 — CSV/JSON write DataFrame clone.** `crates/chili-op/src/io.rs:250,264`
+  clones the entire DataFrame before writer; polars writers accept
+  `&mut`. ~1-2pp; gain 5-15% on write_csv/write_json paths.
+- **A.2.8 — `dir_has_partition_files` redundant traversals.**
+  `engine_state.rs:1574-1583` re-opens the dir listing on every
+  qualified-name build call. Batch dir read in Phase 1a.
+  ~1-2pp; stacks with Tier 1.
+
+### A.3 Cross-cutting gates the original missed
+
+- **Cumulative bench target now stated.** The combined recommended
+  sequence must clear:
+  - `load_multitable_5x200p ≤ 1.65 ms` (recover at least half of
+    the +22.8% regression observed Sprint 7 Part B)
+  - `parse_cache hit ≤ 400 ns` (golden rule 6 holds)
+  - `tests/bench_concurrent.py` ≥ baseline throughput (no
+    regression on concurrent eval)
+- **Per-step rollback criteria.** If a step bench-gates < 5pp gain
+  on its target bench, revert before proceeding to the next step.
+  Don't ship complexity with no measured benefit.
+- **P3.2b (load GIL release) requires new concurrency tests**, not
+  just benches: two threads loading the same HDB path; load racing
+  a `clear_par_df`. Functional correctness, not just performance.
+- **P3.4 (Categorical cache) is ADR territory** — same as P3.1, the
+  original proposal missed this flag. Cache invalidation on schema
+  change is a semantic surface change.
+
+### A.4 REVISED sequencing
+
+The original sequence (P4.2 → P1.1+P1.3 → P3.2 → P4.1) is wrong.
+
+- **P4.2 does NOT unlock P1.1/P1.3.** The Sprint 12 partial profile
+  ALREADY attributes the 17.7% Box::new cost on the chili side.
+  P4.2 only unlocks the polars-internal kernels (`0x450c`,
+  `0x4834`), which P1.1/P1.3 don't target. Sequencing P4.2 first
+  adds 2pp of infra cost + reboot-survival risk before the
+  highest-confidence optimization.
+- **P4.1 and P4.2 both BLOCKED on user-driven P0** (GitHub-host
+  the polars fork). The polars source tree at
+  `/tmp/polars-py-1.39.3` does not survive reboot; edits to its
+  `[profile.release]` are ghost. Until P0 lands, the polars-side
+  `[profile.bench]` override (P4.2) and the PGO-trained wheel
+  (P4.1) cannot reproduce in a fresh build environment.
+
+**Revised sequence:**
+
+1. **Sprint A** (no blockers): P1.1 + P1.3 + A.2.6 + A.2.7 + A.2.8
+   + Polars feature-flag audit (A.2.3). Cheap, all chili-side,
+   evidence in hand. Estimated ~9-13pp; implementation-sprint shape.
+2. **Sprint B**: P3.2b (`load_par_df` GIL release) + A.2.2
+   (upsert/insert lock release) + A.2.4 (parquet codec tuning) +
+   P3.4 (Categorical cache) with ADR. Estimated ~10-14pp.
+3. **(User P0 lands)** — GitHub-host the polars fork. Required for
+   reproducible builds and for the polars-side Cargo.toml edits.
+4. **Sprint C** (post-P0): P4.1 PGO + P4.2 symbolized polars infra.
+   Then re-profile and decide whether the remaining polars-internal
+   kernels (`0x450c`, `0x4834`) justify P1.2 (Box arena) or
+   A.2.5 (result cache).
+
+### A.5 Sprint sizing — REVISED
+
+Original: "1-2 sprints, ~13-20pp." Per the closed roadmap's
+cadence_metrics: implementation sprints (3, 4, 5, 7) calibrate at
+9-14pp; perf/infra sprints (8, 9, 12) calibrate at 2-4pp due to
+infrastructure friction (bench compile, macOS tooling, `/tmp/`
+volatility).
+
+**Revised total:** 2-3 sprints minimum.
+- Sprint A: 9-13pp implementation.
+- Sprint B: 10-14pp implementation (with one ADR).
+- Sprint C: 5-8pp infra (post-P0).
+
+The "1-2 sprints" estimate assumed `/tmp/` volatility was tractable;
+P4.2's polars `Cargo.toml` edit recreates the Sprint 9 P2
+infrastructure-friction pattern that consistently slipped.
+
+### A.6 What did NOT change
+
+The Tier 5 (discounted) section stands. No change to the
+"never `#[global_allocator]`" hard constraint. The bench-gate-or-
+revert principle stands. The proposal doc is still the
+authoritative scoping reference; the user's go/no-go on individual
+items remains the gating decision.
