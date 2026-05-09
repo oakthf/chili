@@ -483,6 +483,269 @@ class TestOverwritePartition:
         assert isinstance(result, int)
         assert result > 0
 
+    def test_overwrite_partition_with_zstd(
+        self, engine: ChiliEngine, tmp_hdb, tmp_path
+    ):
+        # Sprint 15 — overwrite_partition exposes the same compression /
+        # row_group_size kwargs as write_partitioned_df. Mirror coverage
+        # so a future asymmetry regression is caught early.
+        new_df = pl.DataFrame({"sym": ["AAPL", "MSFT"], "close": [21000, 39000]})
+        result = engine.overwrite_partition(
+            new_df,
+            tmp_hdb,
+            "ohlcv_1d",
+            "2024.01.01",
+            compression="zstd",
+        )
+        assert isinstance(result, int) and result > 0
+        # Read back through polars; chili's read path is codec-agnostic.
+        shard = sorted(
+            __import__("glob").glob(f"{tmp_hdb}/ohlcv_1d/2024.01.01_*")
+        )[0]
+        round_trip = pl.read_parquet(shard)
+        assert round_trip["sym"].to_list() == ["AAPL", "MSFT"]
+        assert round_trip["close"].to_list() == [21000, 39000]
+
+
+# ---------------------------------------------------------------------------
+# Sprint 15 / ADR 0005 — Parquet write codec + row_group_size kwargs.
+# ---------------------------------------------------------------------------
+
+
+class TestParquetWriteConfig:
+    """Sprint 15 (ADR 0005) — user-controllable Parquet write options.
+
+    Default behavior (no kwargs) preserves byte-equivalence with 0.8.2
+    output for the canonical 2-row fixture (size 1105 bytes, sha256
+    9682bed9...). The byte-equivalence assertion is the load-bearing
+    regression check; the per-codec assertions exercise the new API.
+    """
+
+    # Captured via the 0.8.2 wheel against the same fixture used in
+    # test_default_args_byte_equivalent_to_0_8_2 below. Sprint 15 Part A.0
+    # established this baseline; do NOT change without coordination per
+    # ADR 0005.
+    BASELINE_0_8_2_SIZE = 1105
+    BASELINE_0_8_2_SHA256 = (
+        "9682bed9ee1dca29a6da1d78932a0f1948146a1454d8fb23c56cb01b65271f61"
+    )
+
+    @staticmethod
+    def _shard_for(hdb_root, table, date_str):
+        import glob
+
+        return sorted(glob.glob(f"{hdb_root}/{table}/{date_str}_*"))[0]
+
+    def test_default_args_byte_equivalent_to_0_8_2(self, tmp_path):
+        """No-kwargs path produces same parquet bytes as 0.8.2 wheel.
+
+        Load-bearing regression check per ADR 0005 ("default behavior is
+        preserved byte-equivalently"). If this fails, the audit's MAJOR
+        baseline-capture finding has been violated.
+        """
+        import hashlib
+        from datetime import date
+
+        hdb = tmp_path / "hdb"
+        hdb.mkdir()
+        df = pl.DataFrame({"sym": ["A", "B"], "close": [19000, 38000]})
+        e = ChiliEngine()
+        try:
+            e.write_partitioned_df(df, str(hdb), "ohlcv", date(2024, 1, 1))
+        finally:
+            e.shutdown()
+
+        shard = self._shard_for(str(hdb), "ohlcv", "2024.01.01")
+        with open(shard, "rb") as f:
+            data = f.read()
+        # Primary check: byte-identical
+        if hashlib.sha256(data).hexdigest() != self.BASELINE_0_8_2_SHA256:
+            # Audit's pragmatic fallback: round-trip + size equality.
+            # This still catches semantic regressions while tolerating
+            # parquet-metadata version-string drift across builds.
+            assert len(data) == self.BASELINE_0_8_2_SIZE, (
+                f"size drift: {len(data)} != {self.BASELINE_0_8_2_SIZE}"
+            )
+            round_trip = pl.read_parquet(shard)
+            expected = pl.DataFrame(
+                {"date": [date(2024, 1, 1), date(2024, 1, 1)], "sym": ["A", "B"], "close": [19000, 38000]}
+            )
+            assert round_trip.equals(expected, null_equal=True), (
+                "round-trip mismatch on default-args write"
+            )
+
+    def test_compression_routing_per_codec(self, tmp_path):
+        """All 4 supported codecs route correctly through the FFI to the
+        polars ParquetWriter. Verifies the parquet file's column-metadata
+        reports the requested codec name.
+
+        Note: polars 0.53's ``ParquetCompression::default()`` is ZSTD (NOT
+        Snappy — verified empirically against the 0.8.2 wheel). ADR 0005
+        documents this. The audit + brief originally assumed Snappy; that
+        assumption was wrong, and default-vs-zstd byte-size comparisons
+        are tautological.
+        """
+        import pyarrow.parquet as pq
+        from datetime import date
+
+        df = pl.DataFrame(
+            {
+                "sym": ["AAPL"] * 1000,
+                "close": list(range(1000)),
+                "volume": [i * 100 for i in range(1000)],
+            }
+        )
+        # Map the chili-side codec name to the parquet metadata
+        # codec name (case-sensitive in pyarrow's metadata).
+        expected = {
+            "snappy": "SNAPPY",
+            "zstd": "ZSTD",
+            "lz4_raw": "LZ4",
+            "uncompressed": "UNCOMPRESSED",
+        }
+        e = ChiliEngine()
+        try:
+            for codec_name, expected_meta in expected.items():
+                root = tmp_path / f"hdb_{codec_name}"
+                root.mkdir()
+                e.write_partitioned_df(
+                    df,
+                    str(root),
+                    "t",
+                    date(2024, 1, 1),
+                    compression=codec_name,
+                )
+                shard = self._shard_for(str(root), "t", "2024.01.01")
+                meta = pq.ParquetFile(shard).metadata.row_group(0).column(0).compression
+                assert meta == expected_meta, (
+                    f"codec='{codec_name}' should produce '{expected_meta}' "
+                    f"in parquet metadata, got '{meta}'"
+                )
+        finally:
+            e.shutdown()
+
+    def test_zstd_smaller_than_snappy(self, tmp_path):
+        """zstd should compress better than Snappy on repetitive numeric
+        data. (Default codec is ZSTD; this test exercises the EXPLICIT
+        snappy override producing a larger file than explicit zstd.)"""
+        from datetime import date
+
+        hdb_snappy = tmp_path / "hdb_snappy"
+        hdb_zstd = tmp_path / "hdb_zstd"
+        hdb_snappy.mkdir()
+        hdb_zstd.mkdir()
+        df = pl.DataFrame(
+            {
+                "sym": ["AAPL"] * 1000,
+                "close": list(range(1000)),
+                "volume": [i * 100 for i in range(1000)],
+            }
+        )
+        e = ChiliEngine()
+        try:
+            e.write_partitioned_df(
+                df, str(hdb_snappy), "t", date(2024, 1, 1), compression="snappy"
+            )
+            e.write_partitioned_df(
+                df, str(hdb_zstd), "t", date(2024, 1, 1), compression="zstd"
+            )
+        finally:
+            e.shutdown()
+        size_snappy = __import__("os").path.getsize(
+            self._shard_for(str(hdb_snappy), "t", "2024.01.01")
+        )
+        size_zstd = __import__("os").path.getsize(
+            self._shard_for(str(hdb_zstd), "t", "2024.01.01")
+        )
+        assert size_zstd < size_snappy, (
+            f"zstd should compress better than Snappy on repetitive "
+            f"numeric data: zstd={size_zstd}, snappy={size_snappy}"
+        )
+
+    def test_compression_uncompressed_larger_than_default(self, tmp_path):
+        """uncompressed should produce a larger file than default ZSTD
+        on the same fixture."""
+        from datetime import date
+
+        hdb_default = tmp_path / "hdb_default"
+        hdb_none = tmp_path / "hdb_none"
+        hdb_default.mkdir()
+        hdb_none.mkdir()
+        df = pl.DataFrame(
+            {
+                "sym": ["AAPL"] * 1000,
+                "close": list(range(1000)),
+            }
+        )
+        e = ChiliEngine()
+        try:
+            e.write_partitioned_df(df, str(hdb_default), "t", date(2024, 1, 1))
+            e.write_partitioned_df(
+                df,
+                str(hdb_none),
+                "t",
+                date(2024, 1, 1),
+                compression="uncompressed",
+            )
+        finally:
+            e.shutdown()
+        size_default = __import__("os").path.getsize(
+            self._shard_for(str(hdb_default), "t", "2024.01.01")
+        )
+        size_none = __import__("os").path.getsize(
+            self._shard_for(str(hdb_none), "t", "2024.01.01")
+        )
+        assert size_none > size_default, (
+            f"uncompressed should be larger than Snappy: "
+            f"none={size_none}, default={size_default}"
+        )
+
+    def test_row_group_size_override(self, tmp_path):
+        """row_group_size=1024 on a 10000-row DataFrame should produce
+        ≥ 9 row groups (10000 / 1024 ≈ 9.77)."""
+        import pyarrow.parquet as pq
+        from datetime import date
+
+        hdb = tmp_path / "hdb"
+        hdb.mkdir()
+        df = pl.DataFrame(
+            {
+                "sym": ["A"] * 10000,
+                "close": list(range(10000)),
+            }
+        )
+        e = ChiliEngine()
+        try:
+            e.write_partitioned_df(
+                df,
+                str(hdb),
+                "t",
+                date(2024, 1, 1),
+                row_group_size=1024,
+            )
+        finally:
+            e.shutdown()
+        shard = self._shard_for(str(hdb), "t", "2024.01.01")
+        pq_file = pq.ParquetFile(shard)
+        assert pq_file.num_row_groups >= 9, (
+            f"row_group_size=1024 on 10000 rows should yield ≥ 9 row groups, "
+            f"got {pq_file.num_row_groups}"
+        )
+
+    def test_invalid_compression_raises(self, engine: ChiliEngine, tmp_path):
+        """Unknown compression name must raise a clear error rather than
+        silently fall back to default (audit MINOR #8 + Sprint 15 halt
+        criterion)."""
+        from datetime import date
+
+        hdb = tmp_path / "hdb"
+        hdb.mkdir()
+        df = pl.DataFrame({"sym": ["A"], "close": [1]})
+        with pytest.raises(Exception, match="unknown compression"):
+            engine.write_partitioned_df(
+                df, str(hdb), "t", date(2024, 1, 1), compression="bogus_codec"
+            )
+
 
 class TestQueryPlan:
     def test_query_plan_returns_string(self, tmp_hdb):

@@ -53,7 +53,12 @@ mod pepper_tests {
         assert_eq!(
             state.get_var("g").unwrap().to_string(),
             "{[y]\n  {[x; y; z] x + y * z}\n}"
-        )
+        );
+        // Reset CHILI_SYNTAX to the default. Without this, the env var leaks
+        // into chili_tests::eval_case01 (which expects chili-form Display
+        // output) when test ordering happens to schedule them adjacently.
+        // Surfaced by Sprint 15 recompile shuffling parallel-test order.
+        unsafe { std::env::set_var("CHILI_SYNTAX", "chili") };
     }
 
     #[test]

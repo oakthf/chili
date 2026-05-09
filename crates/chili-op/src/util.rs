@@ -138,17 +138,23 @@ pub(crate) fn list_op_list(
 // }
 
 pub(crate) fn write_parquet_to_filepath(filepath: &str, df: &DataFrame) -> SpicyResult<u64> {
-    write_parquet_to_filepath_with_row_group_size(filepath, df, None)
+    write_parquet_to_filepath_with_options(filepath, df, None, None)
 }
 
-// Variant of `write_parquet_to_filepath` that lets the caller pin a
-// `row_group_size`. — when a partition is written sorted by symbol, a smaller row group size lets
-// polars later prune row groups via parquet column statistics during
-// `where symbol=X` queries. Default `None` preserves polars' default row
-// group size for backwards compatibility.
-pub(crate) fn write_parquet_to_filepath_with_row_group_size(
+/// Sprint 15 — unified write entry point. Both args default to `None`,
+/// which preserves the pre-Sprint-15 behavior byte-equivalently:
+/// `compression = None` ⇒ `ParquetCompression::default()` (verified
+/// empirically against the 0.8.2 wheel as ZSTD in polars 0.53;
+/// see ADR 0005), and `row_group_size = None` ⇒ polars default
+/// (no `with_row_group_size` call).
+///
+/// Smaller row group sizes let polars later prune row groups via parquet
+/// column statistics during `where symbol=X` queries when partitions
+/// are sorted by symbol.
+pub(crate) fn write_parquet_to_filepath_with_options(
     filepath: &str,
     df: &DataFrame,
+    compression: Option<ParquetCompression>,
     row_group_size: Option<usize>,
 ) -> SpicyResult<u64> {
     let mut file = match File::create(filepath) {
@@ -161,7 +167,8 @@ pub(crate) fn write_parquet_to_filepath_with_row_group_size(
         }
     };
 
-    let mut writer = ParquetWriter::new(&mut file).with_compression(ParquetCompression::default());
+    let codec = compression.unwrap_or_default();
+    let mut writer = ParquetWriter::new(&mut file).with_compression(codec);
     if let Some(rgs) = row_group_size {
         writer = writer.with_row_group_size(Some(rgs));
     }

@@ -227,6 +227,9 @@ class ChiliEngine:
         sort_columns: Optional[list[str]] = None,
         rechunk: bool = False,
         overwrite: bool = False,
+        *,
+        compression: Optional[str] = None,
+        row_group_size: Optional[int] = None,
     ) -> int:
         """Write a DataFrame as a date-partitioned Parquet table.
 
@@ -239,6 +242,15 @@ class ChiliEngine:
             sort_columns: Optional columns to sort by before writing.
             rechunk: Re-chunk the data into a single contiguous allocation.
             overwrite: If ``True``, overwrite an existing partition.
+            compression: Optional Parquet compression codec name. One of
+                ``"snappy"`` (default if omitted), ``"zstd"``, ``"lz4_raw"``,
+                ``"uncompressed"``, ``"gzip"``, ``"brotli"``. Case-insensitive.
+                ``None`` preserves the default codec for byte-equivalence
+                with pre-Sprint-15 output (ADR 0005). Sprint 15 / 0.8.3.
+            row_group_size: Optional row group size override. ``None``
+                preserves chili's existing auto-sizing logic (auto-computed
+                clamp 1024..32768 when ``sort_columns`` is non-empty,
+                else polars default 262144). Sprint 15 / 0.8.3.
 
         Returns:
             The number of rows written.
@@ -256,7 +268,17 @@ class ChiliEngine:
         )
         return self.fn_call(
             "wpar",
-            [hdb_path, partition, table, df, sort_cols_arg, rechunk, overwrite],
+            [
+                hdb_path,
+                partition,
+                table,
+                df,
+                sort_cols_arg,
+                rechunk,
+                overwrite,
+                compression,  # str | None — Sprint 15 (ADR 0005)
+                row_group_size,  # int | None — Sprint 15 (ADR 0005)
+            ],
         )
 
     def load_partitioned_df(self, hdb_path: str) -> None:
@@ -331,6 +353,9 @@ class ChiliEngine:
         date: str,
         sort_columns: Optional[list[str]] = None,
         rechunk: bool = False,
+        *,
+        compression: Optional[str] = None,
+        row_group_size: Optional[int] = None,
     ) -> int:
         """Overwrite a date-partitioned table on disk with new data.
 
@@ -340,9 +365,20 @@ class ChiliEngine:
 
         Distinct from ``write_partitioned_df(overwrite=True)`` only in
         naming — preserves the API surface mdata depends on.
+
+        ``compression`` and ``row_group_size`` mirror
+        :meth:`write_partitioned_df` (Sprint 15 / ADR 0005).
         """
         return self.write_partitioned_df(
-            df, hdb_path, table, date, sort_columns, rechunk, overwrite=True
+            df,
+            hdb_path,
+            table,
+            date,
+            sort_columns,
+            rechunk,
+            overwrite=True,
+            compression=compression,
+            row_group_size=row_group_size,
         )
 
     def query_plan(self, query: str, hdb_path: Optional[str] = None) -> str:

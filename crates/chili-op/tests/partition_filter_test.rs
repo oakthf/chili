@@ -51,6 +51,7 @@ fn write_partition(engine_hdb: &str, date_days: i32, symbol: &str, value: f64) -
         &[],
         false,
         false,
+        None,
     )
     .map(|_| ())
 }

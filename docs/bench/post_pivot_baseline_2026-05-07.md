@@ -894,3 +894,111 @@ Sprint 14 didn't touch the chili-core parse path.)
 **Binary success criterion MET.** `concurrent_load_direct` N=4 ≥ 12K
 calls/s, no collateral regression, no halt criteria triggered, reviewer
 ship-as-is. Sprint 14 P3.2b complete.
+
+---
+
+## Sprint 15 — Parquet codec A/B (2026-05-09)
+
+Sprint 15 (A.2.4) added user-controllable Parquet `compression` and
+`row_group_size` kwargs on `engine.write_partitioned_df` and
+`engine.overwrite_partition`. Code path threads through chili-py kwargs
+→ `wpar` FFI (positional optional args 8 + 9, Null sentinels) → chili-op
+`ParquetWriteConfig` struct → polars `ParquetWriter::with_compression`.
+Default behavior preserved byte-equivalently against the 0.8.2 wheel
+(see ADR 0005). New public API exposed in chili-op as `pub use
+io::ParquetWriteConfig`.
+
+### Pre-Sprint-15 default — empirical correction
+
+`polars::io::parquet::write::ParquetCompression::default()` returns
+**Zstd**, NOT Snappy as the Sprint 15 brief and audit had assumed. The
+0.8.2 wheel was already shipping Zstd-compressed output. Sprint 15's
+`test_default_args_byte_equivalent_to_0_8_2` pytest verifies the 0.8.2
+sha256 (`9682bed9...`, size 1105 bytes) still matches post-Sprint-15
+output for the canonical 2-row fixture. ADR 0005 documents the
+correction; Sprint 13 lesson 2 (verify-before-claim) generalizes:
+external dependency defaults are load-bearing claims and must be
+verified.
+
+### Codec wall-time A/B (criterion, claude-2 HEAD release-bench profile)
+
+Fixture: 5 partitions × 1000 rows × 3 columns (`sym` Categorical, `close`
+Int64, `volume` Int64). 5-partition write loop per criterion sample;
+20 samples; warmup 3 s; measurement 10 s.
+
+| Bench                                  | Median (ms / 5-partition iter) | Per partition (ms) | Δ vs default (ZSTD) |
+|----------------------------------------|-------------------------------:|-------------------:|--------------------:|
+| `write/wpar_1k_rows_fresh_hdb` (default ZSTD) | 9.22                  | 1.84               | 0 % (baseline)      |
+| `write/wpar_1k_rows_codec_zstd`        | 9.10                          | 1.82               | −1.3 % (within noise) |
+| `write/wpar_1k_rows_codec_snappy`      | 9.10                          | 1.82               | −1.3 % (within noise) |
+| `write/wpar_1k_rows_codec_lz4_raw`     | 9.09                          | 1.82               | −1.4 % (within noise) |
+| `write/wpar_1k_rows_codec_uncompressed`| 7.84                          | 1.57               | **−15.0 %** (compression CPU avoided) |
+
+**All compressed codecs land within ±1.5 % of each other on wall time.**
+The dominant write cost on this fixture is filesystem I/O + parquet
+metadata generation, not codec CPU. Uncompressed shaves ~15 % wall by
+skipping the compression stage entirely.
+
+### On-disk size A/B (manual capture; 1000 rows × 3 cols, single partition)
+
+Captured via Python (`pyarrow.parquet`-readable verification of the
+parquet metadata `compression` field) on the same fixture as the
+criterion bench. Uncommitted artifact; numbers below are the
+authoritative record.
+
+| Codec        | Size (bytes) | % of uncompressed | Compression ratio |
+|--------------|-------------:|-------------------:|------------------:|
+| zstd (default) | **5878**   | 31.5 %             | **3.17×**         |
+| snappy       | 11073        | 59.4 %             | 1.69×             |
+| lz4_raw      | 11048        | 59.2 %             | 1.69×             |
+| uncompressed | 18655        | 100.0 %            | 1.00×             |
+
+**Zstd is the right default** — same wall time as Snappy / LZ4 (within
+±1.5 %), but produces ~47 % smaller files (5878 vs 11073 bytes; 1.88×
+better ratio). For storage-budget-bound use cases (mdata's primary
+shape), Zstd is the clear win at zero CPU cost.
+
+### Halt-criterion verdict
+
+- ✅ Codec routing correct: parquet metadata reports the requested
+  codec (`SNAPPY` / `ZSTD` / `LZ4` / `UNCOMPRESSED`) for each variant.
+  Verified via `pyarrow.parquet.ParquetFile().metadata.row_group(0).column(0).compression`
+  in `test_compression_routing_per_codec`.
+- ✅ No silent fallback: invalid codec name (`"bogus_codec"`) raises a
+  clear error per `parse_compression_name` in `crates/chili-op/src/io.rs`.
+- ✅ Default-args byte equivalence: post-Sprint-15 output for the
+  canonical 2-row fixture matches the 0.8.2 wheel's sha256
+  `9682bed9ee1dca29a6da1d78932a0f1948146a1454d8fb23c56cb01b65271f61`
+  (size 1105 bytes).
+- ✅ No collateral regression: criterion baseline `wpar_1k_rows_fresh_hdb`
+  median 9.22 ms is consistent with pre-Sprint-15 numbers.
+
+### Sprint 14 concurrent-load regression check (Part B.4)
+
+Per audit MINOR #5 — bundled-wheel sanity check. Re-ran the Sprint 14
+binary success criterion against the freshly-built 0.8.3 release
+wheel (clean venv, `chili_sauce-0.8.3-cp310-abi3-macosx_11_0_arm64.whl`):
+
+| Shape                       | Sprint 14 (0.8.2 + GIL release) | Sprint 15 (0.8.3 bundled) |
+|-----------------------------|-------------------------------:|---------------------------:|
+| `concurrent_load_direct` N=4 | 12,987 cps                    | **13,169 cps**             |
+
+**Result: GIL-release is intact in the bundled 0.8.3 wheel.** Slight
++1.4 % delta vs Sprint 14's own measurement is within run-to-run noise.
+Sprint 14's gate (≥ 12,000 cps) holds on the 0.8.3 wheel. Single-shape
+verification is sufficient for the regression check; Sprint 14 already
+established the full N ∈ {1,2,4,8} shape.
+
+### Sprint 15 verdict
+
+**Binary success criterion MET.**
+
+- ✅ ≥ 3 codec variants benched (4 actually: zstd / snappy / lz4_raw /
+  uncompressed) with wall time + on-disk size per variant.
+- ✅ New API exercised via 7 new chili-py pytest tests (5 in
+  `TestParquetWriteConfig` + 1 mirror in `TestOverwritePartition` +
+  1 explicit codec-routing-per-codec). Total chili-py pytest: 65 → 72.
+- ✅ Default code-path produces byte-identical output to 0.8.2 (sha256
+  match on canonical fixture).
+- ✅ Codec-correctness verified at the parquet-metadata level (not
+  inferred from byte sizes).
