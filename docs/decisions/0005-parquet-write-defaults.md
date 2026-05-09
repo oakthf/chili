@@ -4,7 +4,7 @@
 **Status:** Accepted.
 **Cutover:** None — current default behavior is preserved byte-equivalently. Sprint 15 ships only the user-controllable override path; no on-disk format change.
 **Supersedes:** None.
-**Related:** [Sprint 15 dispatch brief](../sim/sprint_15_dispatch_brief_2026-05-09.md); [`docs/sync/load_par_df_state_audit.md`](../sync/load_par_df_state_audit.md) (covers Sprint 14 GIL-release audit; this ADR is the write-side equivalent for Sprint 15).
+**Related:** [Sprint 15 dispatch brief](../history/sprints/sprint_15_dispatch_brief_2026-05-09.md); [`docs/sync/load_par_df_state_audit.md`](../sync/load_par_df_state_audit.md) (covers Sprint 14 GIL-release audit; this ADR is the write-side equivalent for Sprint 15).
 
 ---
 

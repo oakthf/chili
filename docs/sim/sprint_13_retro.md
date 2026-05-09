@@ -37,7 +37,7 @@ Part B (polars feature-flag audit) was completed as audit-only — no code chang
 
 **Docs:**
 
-- `docs/sim/sprint_13_dispatch_brief_2026-05-08.md` (commit `77ab60c`) — Sprint 13 brief, retained for audit trail.
+- `docs/history/sprints/sprint_13_dispatch_brief_2026-05-08.md` (commit `77ab60c`) — Sprint 13 brief, moved to history post-ratification.
 - This retro.
 
 **Tests:** unchanged. Pre-Sprint-13 baseline: 166 Rust + 65 chili-py pytest. Post-revert: identical.
@@ -104,7 +104,7 @@ Position in band: well below low. Pattern continues: Sprint 13 fits the autonomo
 
 ## Cross-references
 
-- **Audited proposal:** [`../proposals/perf_alternatives_post_mimalloc_2026-05-08.md`](../proposals/perf_alternatives_post_mimalloc_2026-05-08.md) §A.1 (where I correctly flagged P1.1 as unverified).
+- **Audited proposal:** [`../history/proposals/perf_alternatives_post_mimalloc_2026-05-08.md`](../history/proposals/perf_alternatives_post_mimalloc_2026-05-08.md) §A.1 (where I correctly flagged P1.1 as unverified).
 - **Sprint 12 P2 partial symbolization:** [`../bench/post_pivot_baseline_2026-05-07.md`](../bench/post_pivot_baseline_2026-05-07.md) §"Sprint 12 P2 partial symbolization" — the 17.7% main-thread Box::new + 93.1% polars-internal worker kernel attribution.
 - **Cadence metrics row 13:** [`cadence_metrics.md`](cadence_metrics.md).
 - **Sprints index:** [`sprints_index.md`](sprints_index.md).

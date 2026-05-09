@@ -153,7 +153,7 @@ observation.
 
 ## A.2.2 descope note (per user direction 2026-05-09)
 
-The original audited proposal (`docs/proposals/perf_alternatives_post_mimalloc_2026-05-08.md`
+The original audited proposal (`docs/history/proposals/perf_alternatives_post_mimalloc_2026-05-08.md`
 §A.2.2) proposed releasing the `vars` write-lock around heavy DataFrame
 ops in `upsert_var` / `insert_var` (`engine_state.rs:277-382`). The
 only feasible implementation is **clone-then-swap**: clone the inner
@@ -275,7 +275,7 @@ the lesson 8 floor.
 - **State audit (Part D output):** [`../sync/load_par_df_state_audit.md`](../sync/load_par_df_state_audit.md)
 - **Bench results (Parts B + C output):** [`../bench/post_pivot_baseline_2026-05-07.md`](../bench/post_pivot_baseline_2026-05-07.md) §"Sprint 13.5"
 - **Sprint 13 retro (the lesson 2 trigger):** [`sprint_13_retro.md`](sprint_13_retro.md)
-- **Audited proposal (revised plan input):** [`../proposals/perf_alternatives_post_mimalloc_2026-05-08.md`](../proposals/perf_alternatives_post_mimalloc_2026-05-08.md)
+- **Audited proposal (revised plan input):** [`../history/proposals/perf_alternatives_post_mimalloc_2026-05-08.md`](../history/proposals/perf_alternatives_post_mimalloc_2026-05-08.md)
 - **Implementation commits:** `65bcb7d` (Part A bench files), `<wrap-commit>` (Parts B/C/D docs + retro)
 - **Related artifacts (uncommitted, /tmp):** `/tmp/sprint_13.5_baseline_0_8_2_concurrent.json`, `/tmp/sprint_13.5_baseline_head_concurrent.json`, `/tmp/sprint_13.5_concurrent_load_profile.json`, `/tmp/sprint_13.5_head_dist/chili_sauce-0.8.2-cp310-abi3-macosx_11_0_arm64.whl`
 

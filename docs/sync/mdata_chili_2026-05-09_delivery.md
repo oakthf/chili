@@ -212,6 +212,6 @@ no migration required.
 - Sprint 14 retro: [`../sim/sprint_14_retro.md`](../sim/sprint_14_retro.md)
 - Sprint 15 retro: [`../sim/sprint_15_retro.md`](../sim/sprint_15_retro.md)
 - Bench evidence: [`../bench/post_pivot_baseline_2026-05-07.md`](../bench/post_pivot_baseline_2026-05-07.md) §§ "Sprint 14", "Sprint 15"
-- Previous delivery (0.8.2 hotfix): [`mdata_chili_2026-05-08_delivery.md`](mdata_chili_2026-05-08_delivery.md), [`mdata_chili_2026-05-08_pyarrow_response.md`](mdata_chili_2026-05-08_pyarrow_response.md)
+- Previous delivery (0.8.2 hotfix): [`../history/sync/mdata_chili_2026-05-08_delivery.md`](../history/sync/mdata_chili_2026-05-08_delivery.md), [`../history/sync/mdata_chili_2026-05-08_pyarrow_response.md`](../history/sync/mdata_chili_2026-05-08_pyarrow_response.md)
 - chili-py wrapper code: `crates/chili-py/chili/engine.py:221-260` (write_partitioned_df), `:326-360` (overwrite_partition)
 - Chili-side codec parsing: `crates/chili-op/src/io.rs::parse_compression_name`

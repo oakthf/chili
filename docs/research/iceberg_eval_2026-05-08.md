@@ -140,7 +140,7 @@ producing Parquet files (which it does).
   framing.
 - `docs/research/competitive_position_2026-05-06.md` — chili's defensible
   position framing.
-- `docs/sync/mdata_chili_2026-05-08_delivery.md` — current mdata
-  delivery (no Iceberg ask).
+- `docs/history/sync/mdata_chili_2026-05-08_delivery.md` — the 0.8.2
+  delivery (current at Sprint 12; superseded by 0.8.3 / `docs/sync/mdata_chili_2026-05-09_delivery.md`).
 - Sprint 12 retro: `../sim/sprint_12_retro.md` (lands at Sprint 12 wrap).
 - iceberg-rust upstream (for reference): https://github.com/apache/iceberg-rust
