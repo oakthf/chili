@@ -75,7 +75,7 @@ Start here: this file (CLAUDE.md docs map below). [`README.md`](README.md) is th
 - [`CHANGELOG.md`](CHANGELOG.md) — release notes (upstream-aligned; claude-2 internal 0.8.1 wheel documented in delivery doc, not here).
 - [`crates/chili-py/README.md`](crates/chili-py/README.md) — Python API surface.
 - [`docs/dev_setup.md`](docs/dev_setup.md) — local env (PYO3_PYTHON, DYLD_FALLBACK_LIBRARY_PATH, `.cargo/config.toml`).
-- [`docs/bench/post_pivot_baseline_2026-05-07.md`](docs/bench/post_pivot_baseline_2026-05-07.md) — claude-2 post-pivot rebaseline (rolling; Sprints 7-9-12 each absorbed an A/B + perf-pass).
+- [`docs/bench/post_pivot_baseline_2026-05-07.md`](docs/bench/post_pivot_baseline_2026-05-07.md) — claude-2 post-pivot rebaseline (rolling; through Sprint 15; Sprints 13.5/14/15 A/B numbers appended).
 - [`docs/bench/mdata-collab/`](docs/bench/mdata-collab/) — mdata↔chili collaboration: schema, parity, kdb+ comparison.
 - [`docs/research/`](docs/research/) — strategic research (kdb+ landscape, alternatives, Shakti, competitive position, claude-only-features inventory, Iceberg eval); start at `competitive_position_2026-05-06.md`.
 - [`docs/sim/`](docs/sim/) — sprint cadence: 15 ratified retros (Sprints 1-15, Sprint 13 reverted) + `cadence_metrics.md` + `sprints_index.md`; templates are `_*_template.md`. Closed roadmap at [`docs/history/sim/roadmap_2026-05-07.md`](docs/history/sim/roadmap_2026-05-07.md).
