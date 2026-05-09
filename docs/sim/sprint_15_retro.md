@@ -157,10 +157,15 @@ thread-pool defaults, etc. Generalizes Sprint 13 lesson 2 to specifically
 include "external-dependency defaults" as a load-bearing-claim category.
 
 **Cost saved.** ~0.5 pp per recurrence (a failed test round) plus the
-inherited-assumption risk. Worth promoting to a durable rule. **Promotion
-candidate:** this is the second observation of the verify-before-claim
-shape (Sprint 13 was the first); promote to
-`docs/standards/iteration_lessons.md` as lesson 18.
+inherited-assumption risk. **PROMOTED 2026-05-09 to user-level rule**
+at `~/.claude/rules/verify-before-claim.md` (added "External dependency
+defaults" bullet + concrete codec/library-default example + "2026-05-09
+incident" subsection documenting the inherited-wrong-premise across
+audit-chain failure mode). Portable team-share copy at
+`~/team/verify-before-claim.md` for cross-user adoption. The lesson
+extends the existing `verify-before-claim.md` rule rather than fragmenting
+into a new chili-only entry — its scope (any project with external
+dependencies) is broader than chili-specific.
 
 ### 2. (no second durable lesson this sprint)
 
