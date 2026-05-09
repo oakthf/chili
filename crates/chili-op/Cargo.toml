@@ -97,3 +97,7 @@ harness = false
 [[bench]]
 name = "write_partition"
 harness = false
+
+[[bench]]
+name = "categorical_eval"
+harness = false
