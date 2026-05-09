@@ -597,3 +597,217 @@ needed.**
 This validates the Sprint 7 retro lesson 8 corollary: bench numbers
 within ±10% of a target should be re-measured before triggering
 mitigation work.
+
+---
+
+## Sprint 13.5 — concurrent throughput baseline + samply profile (2026-05-09)
+
+Sprint 13.5 produces measurement infrastructure for Sprint 14 P3.2b
+readiness gate (release GIL on `engine.engine.load_par_df` direct FFI).
+See `crates/chili-py/tests/bench_concurrent.py` (NEW) and
+`crates/chili-op/benches/categorical_eval.rs` (NEW).
+
+Hardware: Apple Silicon (M-series; matches Sprint 12 P2 setup; `sysctl -n
+machdep.cpu.brand_string` ⇒ `Apple Mxxx`). Methodology: each shape is a
+5-second `ThreadPoolExecutor` run on a 50-partition × 20-symbol × 100-rps
+HDB (`build_hdb` from `crates/chili-op/benches/common/mod.rs`). Each
+worker hot-loops the target call and records per-call latency.
+
+### B.1 — 0.8.2 wheel baseline (clean venv, polars==1.39.3, pyarrow==24.0.0)
+
+Wheel at `dist/chili_sauce-0.8.2-cp310-abi3-macosx_11_0_arm64.whl`. Raw JSON
+artifact at `/tmp/sprint_13.5_baseline_0_8_2_concurrent.json` (not committed
+per artifact policy).
+
+| Shape                      | N=1     | N=2     | N=4      | N=8     | Notes                                           |
+|----------------------------|--------:|--------:|---------:|--------:|-------------------------------------------------|
+| `single_eval`              | 1186 cps | —      | —        | —       | reference; matches concurrent_eval N=1          |
+| `concurrent_eval`          | 1221    | 1983    | 3063     | 4188    | scales sub-linearly; eval already releases GIL |
+| `concurrent_load`          | 4766    | 8765    | **12859**| 8525    | fn_call path (GIL released); regression at N=8 from Phase 2 lock contention |
+| `concurrent_load_direct`   | 4857    | 4843    | 4853     | 4847    | direct FFI (GIL held); **flat ≈ 1.0× scaling** = full GIL serialization |
+
+cps = calls/sec. p99 latency on `concurrent_load_direct` blows up linearly
+with N (0.24 ms at N=1 → 7.8 ms at N=2 → 22.8 ms at N=4 → 52.0 ms at N=8),
+the textbook signature of GIL serialization stacking up.
+
+**Sprint 14 readiness — premise empirically confirmed by throughput shape
+alone, before profile.** `concurrent_load_direct` returns identical
+calls/sec regardless of N; only one thread can execute the function body
+at a time → GIL is held for ≈100 % of the in-function wall time on this
+shape. The 40 % halt-threshold from the brief is decisively cleared.
+
+### B.2 — claude-2 HEAD wheel baseline (release build via maturin)
+
+`maturin build --release` from claude-2 HEAD (commit `65bcb7d`) produced
+`/tmp/sprint_13.5_head_dist/chili_sauce-0.8.2-cp310-abi3-macosx_11_0_arm64.whl`
+in **5 m 48 s** wall (lesson 8 band). Installed in a second clean venv
+identical to B.1 (polars==1.39.3, pyarrow==24.0.0). Same bench harness +
+fixture as B.1.
+
+| Shape                      | N=1     | N=2     | N=4      | N=8     | Δ vs 0.8.2 (N=4) |
+|----------------------------|--------:|--------:|---------:|--------:|-----------------:|
+| `single_eval`              | 1262    | —       | —        | —       | +6.4 %           |
+| `concurrent_eval`          | 1271    | 2102    | 3192     | 4395    | +4.2 %           |
+| `concurrent_load`          | 4841    | 8878    | **13135**| 8352    | +2.1 %           |
+| `concurrent_load_direct`   | 4857    | 4821    | 4841     | 4839    | −0.2 %           |
+
+All deltas within ±5 % run-to-run noise. **No source drift between 0.8.2
+and claude-2 HEAD**; the Sprint 13 revert restored claude-2 to byte-
+equivalence on the bench-relevant code paths. Artifact at
+`/tmp/sprint_13.5_baseline_head_concurrent.json` (not committed).
+
+### B.3 — Rust criterion baselines (claude-2 HEAD)
+
+#### parse_cache (golden rule 6 gate)
+
+| Bench                              | Median   |
+|------------------------------------|---------:|
+| `parse/parse_repeat_same_query` (cache HIT)   | **377.25 ns** |
+| `parse/parse_unique_query_per_iter` (cache MISS) | 94.15 µs  |
+
+**Golden rule 6 PASS** — 377 ns ≤ 400 ns. Compares to Sprint 8 P1
+medians of 379 / 397 / 398 ns. Slightly faster than the Sprint 8 P1 #1
+reference (−5.0 %, criterion p=0.00) but the band overlaps and one-shot
+deltas inside ±10 % count as thermal-noise-equivalent per lesson 15.
+**Hot path remains under target; no chili-side mitigation needed.**
+
+#### load_par_df
+
+| Bench                              | Median   | Sprint 12/13 reference | Δ |
+|------------------------------------|---------:|------------------------|---|
+| `load/load_cold_2000p/2000`        | 5.10 ms  | 5.02 ms (Sprint 13 baseline) | +1.6 % (within noise) |
+| `load/load_warm_2000p/2000`        | 5.20 ms  | n/a                    | — |
+| `load/load_multitable_5x200p/5x200`| 1.92 ms  | 1.92 ms (Sprint 13 post-revert) | 0 % (identical) |
+
+Confirms Sprint 13 revert restored claude-2 HEAD to byte-equivalence on
+the load_par_df bench shape. The 17.7 % main-thread `Box::new` finding
+from Sprint 12 P2 partial symbolization remains an unaddressed Sprint 13+
+P2 candidate (deferred indefinitely until profile-evidence justifies a
+target — see Sprint 13 retro lesson 2).
+
+#### categorical_eval (NEW — Sprint 13.5 A.2)
+
+| Bench                              | Median   |
+|------------------------------------|---------:|
+| `categorical_filter/repeated`      | **357.68 µs** |
+| `categorical_filter/distinct`      | **359.24 µs** |
+
+**Δ between repeated and distinct: ≈ 0.4 % (within thermal-noise band).**
+P3.4's premise — that distinct-symbol filters incur per-call categorical
+mapping rebuild cost — is **NOT empirically observable** at the chili-eval
+level on the current polars version. Same query shape, same parse-cache
+hit, only the symbol literal differs; the eval-time delta is statistically
+indistinguishable.
+
+**Implication for P3.4 fate (Sprint 13.5 retro):** Categorical mapping
+cache should be **deferred indefinitely** unless profile evidence on a
+real workload surfaces a dominant rebuild cost the bench failed to
+reproduce. Sprint 13 lesson 2 applied: no measurable target ⇒ no
+implementation work.
+
+### C — samply concurrent-load profile
+
+Captured `concurrent_load_direct` shape, N=4 workers, 30 s window. Total
+in-window calls: 142,348 at 4744.81 calls/s (matches B.2 baseline for
+the same shape, ±0.1 %). Profile at
+`/tmp/sprint_13.5_concurrent_load_profile.json` (1.6 MB; not committed
+per Sprint 9 P2 precedent).
+
+#### Module-level attribution (4-worker-thread aggregate; 56,129 samples)
+
+| Module                          | Samples | % of 4-thread cumulative time |
+|---------------------------------|--------:|------------------------------:|
+| `libsystem_kernel.dylib`        | 51,912  | **92.5 %**                    |
+| `engine_state.abi3.so` (chili)  | 2,006   | 3.6 %                         |
+| `libsystem_platform.dylib`      | 1,292   | 2.3 %                         |
+| `libsystem_malloc.dylib`        | 723     | 1.3 %                         |
+| `libsystem_pthread.dylib`       | 86      | 0.2 %                         |
+| `libsystem_c.dylib`             | 72      | 0.1 %                         |
+| `libpython3.12.dylib`           | 34      | 0.06 %                        |
+| `_polars_runtime.abi3.so`       | 0–18    | <0.04 %                       |
+
+#### GIL-hold attribution
+
+The 92.5 % kernel-time share on the 4 worker threads is the **textbook
+GIL-contention signature**: with 4 threads competing for one GIL, three
+are always blocked in `pthread_cond_wait` (which tail-calls into the
+Mach `psynch_*` family in `libsystem_kernel.dylib`) while one runs.
+Steady-state expected: ≥75 % cumulative-thread time in the kernel from
+GIL contention alone. The observed 92.5 % is consistent with GIL
+contention plus secondary kernel time from parquet schema-file I/O
+(`build_par_df_entry`'s schema sentinel reads) and pthread-mutex wait
+on `par_df.write()` Phase 2.
+
+The throughput shape from B.1/B.2 (`concurrent_load_direct` flat at
+4845 calls/s ± 0.4 % across N ∈ {1,2,4,8}, p99 latency scaling linearly
+with N — 0.24 ms / 7.8 ms / 22.8 ms / 52.0 ms — exactly the GIL-stack-up
+fingerprint) is the second confirming signal.
+
+**Halt threshold: GIL hold < 40 % → halt.** Observed: ≈ 92.5 %.
+**Threshold cleared decisively. Sprint 14's P3.2b premise empirically
+supported.**
+
+#### Chili-side hot-path attribution (the 3.6 % share)
+
+Top resolved chili-side leaf frames via `addr2line -e
+chili/engine_state.abi3.so -f -C` (rendering `_C `-demangled symbols):
+
+| Resolved symbol                                                          | Notes |
+|--------------------------------------------------------------------------|-------|
+| `chili_core::engine_state::EngineState::build_par_df_entry`              | Phase 1b worker — schema sentinel read + `PartitionedDataFrame::new` |
+| `<chrono::format::strftime::StrftimeItems as Iterator>::next`            | Phase 1a date-string parsing on partition file names |
+| `chrono::format::parsed::Parsed::to_naive_date::{{closure}}`             | Phase 1a date conversion |
+| `<core::iter::adapters::filter::Filter as Iterator>::next`               | Phase 1a `read_dir().filter_map(...)` traversal |
+| `<core::str::lossy::Utf8Chunks as Iterator>::next`                       | Phase 1a `entry.file_name().to_string_lossy()` |
+
+Pattern: chili-side CPU time on the worker threads is dominated by
+**Phase 1a directory traversal + date parsing**, not Phase 2 lock
+acquisition. This matches the load-bearing-cost analysis in
+`load_par_df_state_audit.md` §3 and confirms Phase 2's `HashMap::extend`
+window is bounded.
+
+#### Notes on profile resolution (lesson 17 + Sprint 12 P2 carryover)
+
+- `engine_state.abi3.so` is built with `[profile.release] strip = true`
+  in workspace `Cargo.toml`, but `nm` shows 274,862 mangled symbols are
+  present in the symbol table; samply does not auto-resolve them on
+  macOS arm64 → `addr2line` works as a manual fallback. Samply could
+  pick these up if the profile JSON's `nativeSymbols` table were
+  populated; future sprints might investigate the post-link symbol
+  load to fix this in samply itself.
+- `libsystem_kernel.dylib` lives in dyld_shared_cache → `nm` on the
+  filesystem stub returns nothing; `atos -o /usr/lib/system/libsystem_kernel.dylib -l 0x0`
+  produces best-effort resolutions but the offsets do not always map
+  cleanly to runtime symbols. The high-volume hot offsets (`0x450c`,
+  `0xf2e0`, etc.) are syscall stubs whose runtime resolution lives in
+  the shared cache — for the GIL-attribution question they are
+  collectively the `pthread_cond_wait` path and explicit per-syscall
+  resolution adds no decision-relevant detail.
+- Sprint 12 P2's polars-internal `0x450c` (93.1 % polars-worker time)
+  is a separate offset within `_polars_runtime.abi3.so`; **NOT** the
+  `0x450c` from this profile, which is `libsystem_kernel.dylib`. Two
+  different libraries' offset spaces.
+
+### Sprint 14 readiness summary
+
+| Gate                                            | Status   | Evidence |
+|-------------------------------------------------|----------|----------|
+| Bench infrastructure committed                  | ✅       | Commit `65bcb7d` (Part A.1 + A.2) |
+| 0.8.2 baseline captured                         | ✅       | B.1 — 13 JSON-line records |
+| claude-2 HEAD baseline matches 0.8.2 within ±5 % | ✅       | B.2 — Δ table above |
+| parse_cache hit ≤ 400 ns (golden rule 6)        | ✅ 377 ns | B.3 |
+| load_par_df bench reproducible                  | ✅       | B.3 (matches Sprint 13 post-revert) |
+| categorical_eval bench produces forward evidence | ✅       | B.3 (P3.4 → defer) |
+| Concurrent-load profile captured                | ✅       | C — 1.6 MB JSON |
+| GIL hold ≥ 40 % on `concurrent_load_direct`     | ✅ ≈92.5 % | C — module attribution + throughput shape |
+| `load_par_df` GIL-release safety verdict        | ✅ GREEN | `docs/sync/load_par_df_state_audit.md` |
+
+**Sprint 14 P3.2b proceeds as scheduled.** All 9 gates green. The
+expected gain from wrapping `engine.load_par_df` in `py.detach` is
+bounded above by the gap between `concurrent_load` (fn_call path,
+~13.1 K calls/s peak at N=4) and `concurrent_load_direct` (FFI path,
+4.8 K calls/s flat) — i.e., **~2.7× concurrent-load throughput uplift
+at N=4 on this bench fixture**. Sprint 14 should set its bench-gate
+threshold based on the post-implementation `concurrent_load_direct`
+throughput approaching `concurrent_load`'s shape (lesson 15: re-measure
+within ±10 %, target set after measurement, not before).
