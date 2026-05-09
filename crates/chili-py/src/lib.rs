@@ -529,16 +529,28 @@ impl PyEngineState {
     }
 
     /// Load a partitioned database from the given directory.
-    fn load_par_df(&self, hdb_path: &str) -> PyResult<()> {
+    ///
+    /// The GIL is released around `EngineState::load_par_df` so concurrent
+    /// Python callers don't serialize on it. Safety verified by the
+    /// `docs/sync/load_par_df_state_audit.md` GREEN verdict (Sprint 13.5
+    /// Part D): `EngineState` is `Send + Sync`, the only shared-state
+    /// access during the call is a bounded `par_df.write()` window
+    /// during Phase 2 extend.
+    fn load_par_df(&self, py: Python<'_>, hdb_path: &str) -> PyResult<()> {
         self.check_fork()?;
-        map_spicy_error(self.inner.load_par_df(hdb_path))?;
+        let path = hdb_path.to_owned();
+        py.detach(move || map_spicy_error(self.inner.load_par_df(&path)))?;
         Ok(())
     }
 
     /// Remove all loaded partitioned DataFrames from memory.
-    fn clear_par_df(&self) -> PyResult<()> {
+    ///
+    /// GIL released for the same reason as `load_par_df`; both methods
+    /// hold the same `par_df.write()` lock and the state audit covers
+    /// both (`docs/sync/load_par_df_state_audit.md` §5.2).
+    fn clear_par_df(&self, py: Python<'_>) -> PyResult<()> {
         self.check_fork()?;
-        map_spicy_error(self.inner.clear_par_df())?;
+        py.detach(move || map_spicy_error(self.inner.clear_par_df()))?;
         Ok(())
     }
 

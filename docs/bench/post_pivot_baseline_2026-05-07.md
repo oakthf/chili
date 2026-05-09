@@ -811,3 +811,86 @@ at N=4 on this bench fixture**. Sprint 14 should set its bench-gate
 threshold based on the post-implementation `concurrent_load_direct`
 throughput approaching `concurrent_load`'s shape (lesson 15: re-measure
 within ±10 %, target set after measurement, not before).
+
+---
+
+## Sprint 14 — P3.2b implementation A/B (2026-05-09)
+
+**Change:** wrapped `engine.load_par_df` and `engine.clear_par_df` in
+`py.detach(...)` (`crates/chili-py/src/lib.rs:531-548`). FFI surface
+change only; no engine-state behavior change. Code-reviewer dispatch at
+Part C found 6 OK + 2 MINOR + 0 CRITICAL/MAJOR; verdict "ship as-is."
+
+**Method:** Sprint 14 release-wheel built via `maturin build --release`
+(3.59 s incremental compile). Installed in a fresh clean venv
+(polars==1.39.3, pyarrow==24.0.0). Same bench harness + 50p × 20sym ×
+100rps fixture as Sprint 13.5. Wheel artifact at
+`/tmp/sprint_14_post_dist/chili_sauce-0.8.2-cp310-abi3-macosx_11_0_arm64.whl`
+(not committed; same wheel name+version as 0.8.2 since chili-py version
+not bumped — the change is self-contained, mdata uses fn_call path
+already, no breaking-change semantic shift). Bench output JSON at
+`/tmp/sprint_14_post_release_concurrent.json`.
+
+### Concurrent throughput A/B — direct FFI now matches fn_call shape
+
+| Shape                      | N | Sprint 13.5 (pre-change) | Sprint 14 (post-change) | Δ      | Verdict |
+|----------------------------|--:|-------------------------:|------------------------:|-------:|---------|
+| `single_eval`              | 1 | 1262                     | 1244                    | −1.4 % | ≈ unchanged ✓ |
+| `concurrent_eval`          | 1 | 1271                     | 1249                    | −1.7 % | ≈ unchanged ✓ |
+| `concurrent_eval`          | 4 | 3192                     | 3140                    | −1.6 % | ≈ unchanged ✓ |
+| `concurrent_eval`          | 8 | 4395                     | 4287                    | −2.5 % | ≈ unchanged ✓ |
+| `concurrent_load` (fn_call) | 1 | 4841                    | 4811                    | −0.6 % | ≈ unchanged ✓ |
+| `concurrent_load` (fn_call) | 4 | 13135                   | 13114                   | −0.2 % | ≈ unchanged ✓ |
+| `concurrent_load` (fn_call) | 8 | 8352                    | 8593                    | +2.9 % | ≈ unchanged ✓ |
+| **`concurrent_load_direct`** | 1 | 4857                  | 4811                    | −0.9 % | ≈ unchanged (single-thread; GIL release adds negligible overhead) |
+| **`concurrent_load_direct`** | 2 | 4821                  | **8742**                | **+81.3 %** | scaling restored ✓ |
+| **`concurrent_load_direct`** | 4 | 4841                  | **12987**               | **+168.3 %** | **bench gate PASS** (≥ 12000 target; 8.2 % above) ✓ |
+| **`concurrent_load_direct`** | 8 | 4839                  | 8721                    | +80.2 % | scaling restored, Phase 2 lock contention regression at N=8 (same shape as `concurrent_load`) |
+
+Δ legend: ≈ unchanged = within ±5 % thermal-noise band per lesson 15.
+
+**Key findings:**
+
+1. **Bench gate PASSED.** `concurrent_load_direct` N=4 = 12,987 cps ≥
+   12,000 cps target (8.2 % above). The post-change shape on every N
+   matches `concurrent_load` (fn_call path) within ±1 %:
+
+   | N | concurrent_load | concurrent_load_direct | gap |
+   |--:|----------------:|------------------------:|----:|
+   | 1 | 4811            | 4811                    | 0.0 % |
+   | 2 | 8747            | 8742                    | −0.05 % |
+   | 4 | 13114           | 12987                   | −1.0 % |
+   | 8 | 8593            | 8721                    | +1.5 % |
+
+   Sprint 14 closed the GIL-release-symmetry gap between the two FFI
+   call paths.
+
+2. **No collateral regression.** The non-target shapes (`single_eval`,
+   `concurrent_eval` × N, `concurrent_load` × N) all moved within
+   ±5 % vs Sprint 13.5 — within the thermal-noise band. The change
+   touched no code outside the two FFI method bodies.
+
+3. **Phase 2 lock-contention boundary now reached on direct-FFI path.**
+   Pre-change: concurrent_load_direct flat 1.0× scaling (GIL-bound,
+   never reached the lock). Post-change: scales to N=4, regresses at
+   N=8 because of `par_df.write()` contention — exactly the same
+   shape as `concurrent_load` because both paths now hit the same
+   lock. Future sprints could attack this boundary (per-table mutex
+   or finer-grained lock); out of Sprint 14 scope.
+
+4. **Single-thread N=1 cost of GIL release: ~1 %.** `concurrent_load_direct`
+   N=1 went from 4857 → 4811 cps (−0.9 %). That's the cost of
+   releasing-and-reacquiring the GIL on every call when there's no
+   contention to relieve. Negligible; well within noise.
+
+### Golden rule 6 sanity check
+
+(Not re-run this sprint; parse_cache hot path is independent of FFI
+surface. The Sprint 13.5 reading 377 ns is still the standing number;
+Sprint 14 didn't touch the chili-core parse path.)
+
+### Sprint 14 verdict
+
+**Binary success criterion MET.** `concurrent_load_direct` N=4 ≥ 12K
+calls/s, no collateral regression, no halt criteria triggered, reviewer
+ship-as-is. Sprint 14 P3.2b complete.
