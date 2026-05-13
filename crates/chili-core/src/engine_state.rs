@@ -1228,21 +1228,45 @@ impl EngineState {
     }
 
     pub fn signal_eod(&self, args: &SpicyObj) -> SpicyResult<()> {
-        let handles: Vec<i64> = {
-            let handle = self.handle.read();
-            handle
-                .iter()
-                .filter(|(_, v)| v.conn_type == ConnType::Publishing)
-                .map(|(k, _)| *k)
-                .collect()
-        };
-        for h in handles {
-            if let Err(e) = self.sync(&h, args) {
-                warn!(
-                    "failed to signal EOD to handle {} - err {}, disconnecting...",
-                    h, e
-                );
-                self.disconnect_handle(&h)?;
+        // Sprint 17 — broadcast EOD via the same Async fire-and-forget
+        // path as `EngineState::publish` (the broker `upd` path).
+        //
+        // The previous implementation called `self.sync(&h, args)` which
+        // routed through `sync()`'s match on conn_type — and `sync()`'s
+        // match has no `Publishing` arm, so every `signal_eod` call
+        // returned `EvalErr("cannot sync for Publishing handle")` and
+        // immediately disconnected the subscriber, completely
+        // suppressing the EOD broadcast. Bug surfaced by mdata wishlist
+        // P1 + Sprint 17 Part A.2 acceptance test
+        // (`test_subscriber_eod_dispatch.py`).
+        //
+        // The fix: serialize the message once, then write it directly to
+        // each Publishing handle's TCP socket via
+        // `write_chili_ipc_msg(rw, &bytes, MessageType::Async)` — same
+        // contract as `state.publish`. The subscriber's
+        // `handle_chili_conn` loop reads it and dispatches via
+        // `state.eval` → `eval_op` → looks up the symbol head (`eod`)
+        // and invokes it as a function.
+        let bytes = serde9::serialize(args, false)?;
+        let mut handle = self.handle.write();
+        for (h, v) in handle.iter_mut() {
+            if v.conn_type != ConnType::Publishing {
+                continue;
+            }
+            match &mut v.rw {
+                Some(rw) => {
+                    if let Err(e) = utils::write_chili_ipc_msg(rw, &bytes, MessageType::Async) {
+                        warn!(
+                            "failed to signal EOD to handle {} - err {}, disconnecting...",
+                            h, e
+                        );
+                        v.conn_type = ConnType::Disconnected;
+                    }
+                }
+                None => {
+                    warn!("handle {} is disconnected (no rw), removing", h);
+                    v.conn_type = ConnType::Disconnected;
+                }
             }
         }
         Ok(())
