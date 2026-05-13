@@ -28,3 +28,7 @@ polars-core
 crates/chili-py/Cargo.lock
 crates/chili-py/uv.lock
 /dist/
+
+# Bus runtime state (per vantage's onboarding_runbook Path B)
+.cross_comms/
+*.token
