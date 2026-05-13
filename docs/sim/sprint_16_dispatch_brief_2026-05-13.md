@@ -472,3 +472,96 @@ reflects two real unknowns: Part A trait coherence design choice + Part C
 reproduction-first uncertainty. If both resolve favorably (Option α straightforward, P2 already-works outcome), sprint lands ≈10pp. If both go hard, ≈18–20pp — at which point Sprint 16.5 housekeeping spillover is likely.
 
 **Recommendation:** Brief stays as-is but adopt the appendix's cross-cutting gates + revised sizing. Kickoff with K1 + K2 verified; resolve Part A design before code; reproduce Part C failure before code. If pp budget at 14pp threatens overrun, defer Part C to Sprint 17 (it's the most uncertain).
+
+---
+
+## Appendix 2 — mdata reply lock-in (2026-05-13)
+
+Source: `~/code/mdata/docs/sync/chili_wishlist_2026-05-13_mdata_reply.md`.
+All four clarification questions answered. Wheel sha256 cross-check passed
+(0.8.3 wheel byte-identical between chili build output and mdata's pinned
+hash — no drift trip-wire).
+
+### Q1 — fsync scope: LOCKED to (a) tplog only
+
+par_df Parquet writes are wdb's responsibility per mdata PRD §3.3: wdb runs
+`os.fsync(fd)` itself on the file it wrote via `chili.write_partitioned_df`.
+chili doesn't need to fsync par_df — redundant + cross-cuts wdb's
+`latest_durable_seq` accounting.
+
+**Part A scope unchanged.** `engine.flush_tplog() -> int` returns
+bytes-since-last-flush. Predicted pp band stays 5–8.
+
+### Q2 — `;` separator: LOCKED, scope tightens significantly
+
+mdata confirmed both data points. Reproduced locally on chili-sauce 0.8.3:
+
+| Case | Result |
+|---|---|
+| `engine.eval("a: 1; b: 2; c: a + b")` | **ACCEPTS** → c = 3. Audit's reading of `expr.rs:1025-1038` was right. |
+| `engine.eval(".sub.eod.fired: ::; eod: {...}")` | **REJECTS** at col 19 with `found 'Punc';' expected arguments` while parsing binary. |
+| `engine.eval("x: ::; y: 1")` (predicted minimum) | **REJECTS** at col 6 with same "expected arguments" parsing-binary error. |
+
+**Root cause** (verified): `::` is being parsed as a *binary operator* expecting RHS arguments, then encounters `;` and the binary-arg production rejects. The bug is specifically the `::` (null-literal) vs `:: <expr>` (binary continuation) ambiguity.
+
+**Revised Part C scope (narrow):** Disambiguate the `::` null-literal token from the binary-operator continuation so the parser knows where the `::` arg list ends before `;` is consumed. This is **not** a top-level statement-production change (the audit was right — that production already accepts `;`); it's a token-level disambiguation in the `::` production.
+
+**Acceptance test:** mdata is authoring `test_pepper_syntax.py::test_null_literal_semicolon_disambiguation` against the actual repro shape — narrower than the wishlist's original "accept `;` everywhere" test.
+
+**Part C predicted pp band tightens to 2–4** (was 1–6). The narrower-scope estimate makes Sprint 16's risk band shrink:
+- Original audit total: 10.5–21.5 pp
+- **Post-lock-in total: 8.5–18 pp** (honest mid-range ~11–13 pp)
+
+**Lead change:** keep `coordinator-solo` (per audit NIT) — the work is now a clear token-disambiguation fix, not an investigation. Reproduce + minimal grammar tweak.
+
+### Q3 — `publish_remote` API: LOCKED to (b) thin marshalling, Sprint 17 saves ~10 pp
+
+mdata reverses their wishlist preference: chili ships `engine.publish_via_handle(h, table, df)` as a thin one-shot publish primitive. mdata writes the `RemoteTpClient` connection-manager class on their side (~50–80 LOC, mdata-internal `src/mdata/feed/remote_tp_client.py`).
+
+**Sprint 17 P1-publish scope drops to ~8 pp** (was 15–25). Surface is just:
+
+```rust
+pub fn publish_via_handle(&self, h: &i64, table: &str, df: &SpicyObj) -> SpicyResult<()> {
+    // Marshals MixedList[`upd, table, df] via existing sync(h, msg)
+    self.sync(h, &SpicyObj::MixedList(vec![
+        SpicyObj::Symbol("upd".into()),
+        SpicyObj::Symbol(table.into()),
+        df.clone(),
+    ])).map(|_| ())
+}
+```
+
+Plus chili-py wrapper. Sprint 17 Part B will draft against this scope.
+
+### Q4 — Subscriber `eod` dispatch: copy-pasteable repro provided
+
+mdata provided full failing test source (`test_subscriber_eod_shim_triggered_by_publisher_eod`), shim source (`eod: {[msg] .sub.eod.fired: msg}`), and boot order (eval-defines-eod BEFORE engine.subscribe). Key facts:
+
+1. Shim is registered via `engine.eval` from main Python thread BEFORE subscribe opens the IPC handle — so the global var is set before any IPC traffic.
+2. Subscriber thread has `Stack::new(None, 0, handle, user)` (fresh stack) but shares `Arc<EngineState>` — global vars from main thread should be visible.
+3. `_check_eod` polls `get_var(".sub.eod.fired")` — always raises `NameError`, never returns a value. Meaning `.sub.eod.fired` is never written by the eod shim. Meaning `eod` was never invoked despite `(eod; date)` arriving at the subscriber engine.
+
+**This isolates the bug to hypothesis (1) from our audit:** `eval_op(MixedList[Symbol("eod"), date])` does NOT dispatch as function-call. Sprint 17 P1-eod-dispatch becomes a clear scope: special-case the chili IPC handler `handle_chili_conn` (or `engine_state.eval_op`) to recognize symbol-headed MixedList on incoming Subscribing-conn messages and invoke as `eod[date]`.
+
+mdata committed to copy the test into chili's tree if helpful. Sprint 17 will likely just port the test into chili-py's pytest suite as the load-bearing acceptance test.
+
+### Bonus signals from mdata's reply
+
+- **0.8.3 wheel sha256 confirmed identical** between chili build (`6345fcac...`) and mdata's pinned hash. No drift; chili-side bug repro will match what mdata observes in prod daemons. Future wheels should preserve this property.
+- **mdata's cadence_metrics:** 7-sprint v1-arc (v1-14 → v1-20) landed ~28 pp actual vs 29–43 pp predicted (−18% to −38% under). Their coordinator-solo `first_of_kind` model consistently under-runs. Their suggestion: Sprint 16 might land 6–8 pp on chili side. Our cadence model differs (we don't have a `first_of_kind` axis); we keep our 8.5–18 pp band but note theirs as a data point.
+- **chili-side `first_of_kind` data point comparison:** Sprint 14 was a chili-side first-of-kind (GIL release on direct-FFI) and landed 5 pp against a 5–9 pp prediction — also low-edge, matching mdata's pattern. Suggests chili-side `first_of_kind` sprints similarly under-run.
+- **Capability inventory pointer:** `~/code/mdata/docs/standards/chili_capability_inventory.md` § 1-5 useful for Sprint 18+ scoping. §3 notes IPC message size limit ~10MB-ish per `sync` call before stalls — worth knowing for `publish_via_handle` if mdata sends large DataFrames.
+
+### Locked Sprint 16 scope (final)
+
+| # | Surface | Predicted pp (locked) |
+|---|---|---|
+| Pre-kickoff gates K1 + K2 | 0.2 | 0.2 |
+| Part A — `engine.flush_tplog()` + trait coherence design (Option α/β/γ) | 5–8 | 5–8 |
+| Part B — `engine.add_at_time()` PyO3 binding | 2–3 | 2–3 |
+| **Part C — `::` null-literal/binary-arg disambiguation** | **2–4** | (was 1–6) |
+| 0.8.4 wheel cut + handoff doc | 0.5–1 | 0.5–1 |
+| Wrap + retro + every-5-sprint housekeeping trigger | 1–2 | 1–2 |
+| **Total** | **10.7–18.2 pp** | (was 10.5–21.5) |
+
+**Kickoff status: READY.** All audit findings resolved; all four mdata answers locked.
