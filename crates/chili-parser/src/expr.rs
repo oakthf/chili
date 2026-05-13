@@ -134,6 +134,12 @@ impl Expr {
                     Token::Str(s) = e => Expr::Lit((Token::Str(s), e.span())),
                     Token::Column(c) = e => Expr::Lit((Token::Column(c), e.span())),
                 }
+                // Sprint 16 — `::` parses as a standalone null literal in atom
+                // position (mdata wishlist Q2 lock-in 2026-05-13). Without this,
+                // `Op("::")` falls through to the binary-operator production
+                // which expects RHS args, so `x: ::; y: 1` rejected with
+                // `found 'Punc';' expected arguments`.
+                .or(just(Token::Op("::".to_string())).map_with(|_, e| Expr::Nil(e.span())))
                 .labelled("literal");
 
                 let op =
@@ -596,6 +602,12 @@ impl Expr {
                     Token::Str(s) = e => Expr::Lit((Token::Str(s), e.span())),
                     Token::Column(c) = e => Expr::Lit((Token::Column(c), e.span())),
                 }
+                // Sprint 16 — `::` parses as a standalone null literal in atom
+                // position (mdata wishlist Q2 lock-in 2026-05-13). Without this,
+                // `Op("::")` falls through to the binary-operator production
+                // which expects RHS args, so `x: ::; y: 1` rejected with
+                // `found 'Punc';' expected arguments`.
+                .or(just(Token::Op("::".to_string())).map_with(|_, e| Expr::Nil(e.span())))
                 .labelled("literal");
 
                 let op =

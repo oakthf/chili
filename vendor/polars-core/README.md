@@ -28,29 +28,39 @@ it from GitHub if hinmeru ever archives or deletes the repo.
 | `hinmeru-reference/01-a600521-cosmetic-fmt.patch` | hinmeru/polars-core-patch commit `a600521 patch fmt` | Cosmetic only — re-adds trailing commas to match arms. **Not load-bearing.** Kept for completeness. |
 | `hinmeru-reference/02-6c64273-fmt-qstyle-only.patch` | hinmeru/polars-core-patch commits `a600521..6c64273` (fmt.rs slice only) | The actual q-style Datetime/Duration display logic (`fmt_datetime`, `fmt_duration_string` bodies). **This is what chili depends on semantically.** |
 | `hinmeru-reference/03-init-to-tip-full-fmt.patch` | hinmeru/polars-core-patch full fmt.rs delta `c14b1be..6c64273` | The full hinmeru fmt.rs diff from init to v0.53.0 tip. Superset of (01) + (02). |
+| `chili-port-py-1.39.3.patch` | chili-side q-style fmt port, against py-1.39.3 polars-core base (Sprint 16 wrap, 2026-05-13) | **The actual chili-side patch.** Apply this directly to a fresh `/tmp/polars-py-1.39.3` clone — `fmt_datetime` + `fmt_duration_string` bodies replaced with q-style versions. Saves the manual hunk-by-hunk reconstruction. |
 
 ## Reconstruction protocol — when /tmp/polars-py-1.39.3 is missing
+
+**Preferred path (Sprint 16+):** apply the saved `chili-port-py-1.39.3.patch` directly.
 
 ```bash
 # 1. Re-clone the base
 rm -rf /tmp/polars-py-1.39.3
 git clone --branch py-1.39.3 --depth 1 https://github.com/pola-rs/polars /tmp/polars-py-1.39.3
 
-# 2. Apply the q-style hunks. Hinmeru's patches are against v0.53.0,
-#    not py-1.39.3 — they will NOT apply with `git apply` cleanly.
-#    Instead, port two function bodies manually:
-#      - `fn fmt_datetime` (around line 987 in py-1.39.3 polars-core/src/fmt.rs):
-#        replace its `match tz { ... }` body with the q-style match
-#        (see 02-6c64273-fmt-qstyle-only.patch, the fmt_datetime hunk —
-#        emits "%Y.%m.%dD%H:%M:%S%.f" for ns/us, "%Y.%m.%dT%H:%M:%S%.f" for ms).
-#      - `pub fn fmt_duration_string` (around line 1021 in py-1.39.3):
-#        replace the multi-part "3d 22m 55s 1ms" body with the q-style
-#        "{sign}{days}D{HH}:{MM}:{SS}.{frac}" body (precision depends on TimeUnit).
-#
-# 3. Verify by running fmt_test:
+# 2. Apply the chili-side q-style fmt port (one shot)
+cd /tmp/polars-py-1.39.3
+git apply /Users/oakadmin/code/chili/vendor/polars-core/chili-port-py-1.39.3.patch
+
+# 3. Verify by running fmt_test from the chili repo:
+cd /Users/oakadmin/code/chili
 cargo test --workspace --exclude chili-py -- fmt_test
 #    Expected: `test fmt_duration_series ... ok`
 ```
+
+**Fallback path** (if `chili-port-py-1.39.3.patch` doesn't apply cleanly — e.g.,
+after a polars py-x.y.z bump): manually port the two function bodies using
+the hinmeru reference patches as a guide:
+
+- `fn fmt_datetime` (around line 987 in py-1.39.3 polars-core/src/fmt.rs):
+  replace its `match tz { ... }` body with the q-style match
+  (see `hinmeru-reference/02-6c64273-fmt-qstyle-only.patch`, the
+  fmt_datetime hunk — emits `"%Y.%m.%dD%H:%M:%S%.f"` for ns/us,
+  `"%Y.%m.%dT%H:%M:%S%.f"` for ms).
+- `pub fn fmt_duration_string` (around line 1021 in py-1.39.3):
+  replace the multi-part "3d 22m 55s 1ms" body with the q-style
+  `"{sign}{days}D{HH}:{MM}:{SS}.{frac}"` body (precision depends on TimeUnit).
 
 ## Why we don't just check the polars clone into vendor/ as a submodule
 

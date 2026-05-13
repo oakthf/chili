@@ -1,7 +1,7 @@
 """Python bindings for Chili's ``EngineState`` (Rust ``chili-core``)."""
 
 import re
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -466,6 +466,67 @@ class ChiliEngine:
 
     def eod(self, date: date) -> None:
         self.fn_call(".tick.eod", [date])
+
+    def add_at_time(
+        self,
+        fn_name: str,
+        start_time: datetime,
+        description: str = "",
+    ) -> int:
+        """Schedule a pepper function to fire once at ``start_time``.
+
+        Thin wrapper over chili's ``.job.addAtTime`` registered builtin.
+        Backs mdata's PRD §3.2 Option A EOD timer path — replaces their
+        Python asyncio timer with a chili-scheduler-owned timer.
+
+        Parameters
+        ----------
+        fn_name : str
+            Name of a **nullary** pepper function in the engine's global
+            namespace (e.g., ``my_handler: {[] ...}``). The scheduler
+            invokes it as ``fn_name[]`` — passing args via the job spec
+            is not supported; use engine variables (``today[]``, ``now[]``,
+            or a pre-set global) inside the handler for time context.
+        start_time : datetime.datetime
+            When to fire. Must be timezone-aware; naive datetimes raise
+            ``TypeError``. Attach ``timezone.utc`` explicitly for UTC.
+        description : str, optional
+            Free-text label, returned by the job-list helpers.
+
+        Returns
+        -------
+        int
+            Job ID. Pass to :meth:`cancel_job` to revoke.
+
+        Notes
+        -----
+        The chili job scheduler must be running for the timer to fire.
+        Construct :class:`ChiliEngine` with ``job_interval > 0`` (in
+        milliseconds) to start the scheduler thread.
+        """
+        return self.engine.add_at_time(fn_name, start_time, description)
+
+    def flush_tplog(self) -> int:
+        """Flush + ``fsync`` the active tplog handle (``.tick.msgHandle``).
+
+        Closes the durability gap for mdata's PRD §5.1 part-2 ``kill -9``
+        cold-restart guarantee. After this call returns, any row previously
+        accepted via :meth:`publish` is on disk — a hard process kill cannot
+        lose it.
+
+        Returns
+        -------
+        int
+            Payload bytes-since-last-flush. Replaces the
+            ``log_path.stat().st_size`` proxy with a precise monitor probe.
+
+        Raises
+        ------
+        RuntimeError
+            If :meth:`init_tick` hasn't been called yet (``.tick.msgHandle``
+            is undefined).
+        """
+        return self.engine.flush_tplog()
 
     # Subscriber functions
     def load_sub(self) -> None:

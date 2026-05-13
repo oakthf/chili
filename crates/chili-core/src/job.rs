@@ -112,7 +112,15 @@ pub fn add_at_time(
         end_time: start_time,
         interval: 0,
         last_run_time: None,
-        next_run_time: 0,
+        // Sprint 16: was `next_run_time: 0` — that made the scheduler fire
+        // the job on the very next poll (since `get_local_now_ns() >= 0` is
+        // always true). The user's intent with `addAtTime` is "fire at
+        // start_time," so seeding next_run_time = start_time defers firing
+        // until then. With interval = 0 and end_time = start_time, the
+        // execute_jobs branch `next_run_time + interval < end_time` is
+        // `start_time + 0 < start_time` = false, so `is_active = false`
+        // after the single fire — one-shot semantics preserved.
+        next_run_time: start_time,
         is_active: true,
         description: description.to_owned(),
     };

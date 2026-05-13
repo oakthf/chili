@@ -3,12 +3,15 @@ use std::{
     env,
     fmt::Display,
     fs::{self, DirEntry, OpenOptions},
-    io::{Read, Seek, SeekFrom, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     net::{TcpListener, TcpStream},
     num::NonZeroUsize,
     path::PathBuf,
     process,
-    sync::{Arc, LazyLock},
+    sync::{
+        Arc, LazyLock,
+        atomic::{AtomicU64, Ordering},
+    },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -59,9 +62,38 @@ use crate::{
     func::Func,
 };
 
-pub trait ReadWrite: Read + Write + Send + Sync {}
+// Sprint 16 (2026-05-13): added `sync_all` to support mdata's PRD §5.1 part-2
+// kill-9 durability requirement (`engine.flush_tplog()` Python API). Default
+// is a no-op so non-file-backed wire types (TcpStream) don't pretend to fsync.
+// The blanket `impl<T: Read+Write+Send+Sync> ReadWrite for T` was removed in
+// the same change — `sync_all`'s correct semantic differs by underlying type,
+// and Rust's coherence rules disallow a specific override of a blanket impl
+// (E0119). Adding a new wire type now requires an explicit `impl ReadWrite for
+// <Type>` — by design, since the contributor needs to decide what sync_all
+// means for that type.
+pub trait ReadWrite: Read + Write + Send + Sync {
+    fn sync_all(&self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
-impl<T: Read + Write + Send + Sync> ReadWrite for T {}
+impl ReadWrite for fs::File {
+    fn sync_all(&self) -> io::Result<()> {
+        fs::File::sync_all(self)
+    }
+}
+
+impl ReadWrite for TcpStream {}
+
+// Forward the trait through Box<T> so `Box<TcpStream>` / `Box<fs::File>` /
+// `Box<dyn ReadWrite>` all satisfy `ReadWrite`. Without this, coercing
+// `&mut Box<T>` to `&mut dyn ReadWrite` (which the IPC handler call sites
+// at engine_state.rs:2079-2082 do) fails since the blanket impl is gone.
+impl<T: ReadWrite + ?Sized> ReadWrite for Box<T> {
+    fn sync_all(&self) -> io::Result<()> {
+        (**self).sync_all()
+    }
+}
 
 pub struct Handle {
     pub rw: Option<Box<dyn ReadWrite>>,
@@ -71,6 +103,11 @@ pub struct Handle {
     pub ipc_type: IpcType,
     pub conn_type: ConnType,
     pub on_disconnected: Option<String>,
+    /// Bytes written via `state.sync(h, …)` or `state.publish(table, …)`
+    /// since the most recent successful `state.flush_handle(h)` call.
+    /// Counter resets to 0 on each flush. Used by mdata's monitor probe
+    /// (replaces their `stat().st_size` proxy).
+    pub bytes_since_flush: AtomicU64,
 }
 
 /// LRU cache size for parsed AST trees. 256 entries × ~1 KB per AST is
@@ -850,6 +887,7 @@ impl EngineState {
                 ipc_type,
                 conn_type,
                 on_disconnected: None,
+                bytes_since_flush: AtomicU64::new(0),
             },
         );
         Ok(SpicyObj::I64(h))
@@ -900,6 +938,7 @@ impl EngineState {
                         ipc_type: handle.ipc_type,
                         conn_type: ConnType::Subscribing,
                         on_disconnected: handle.on_disconnected,
+                        bytes_since_flush: AtomicU64::new(0),
                     },
                 );
                 let user = self.user.clone();
@@ -937,6 +976,7 @@ impl EngineState {
                 is_local,
                 ipc_type,
                 conn_type,
+                bytes_since_flush,
                 ..
             }) => {
                 if *conn_type == ConnType::Outgoing {
@@ -996,6 +1036,8 @@ impl EngineState {
                     match msg {
                         SpicyObj::Symbol(s) | SpicyObj::String(s) => {
                             writeln!(rw, "{}", s).map_err(|e| SpicyError::Err(e.to_string()))?;
+                            // s + '\n'
+                            bytes_since_flush.fetch_add(s.len() as u64 + 1, Ordering::Relaxed);
                             *conn_type = ConnType::File;
                             Ok(SpicyObj::I64(s.len() as i64))
                         }
@@ -1018,6 +1060,8 @@ impl EngineState {
                                 rw.write_all(&bytes)
                                     .map_err(|e| SpicyError::Err(e.to_string()))?;
                             }
+                            // 8 (magic) + 8 (total_len) + 8 (timestamp) + payload
+                            bytes_since_flush.fetch_add(24 + total_len as u64, Ordering::Relaxed);
                             *conn_type = ConnType::Sequence;
                             Ok(SpicyObj::I64(total_len as i64))
                         }
@@ -1030,6 +1074,7 @@ impl EngineState {
                     match msg {
                         SpicyObj::Symbol(s) | SpicyObj::String(s) => {
                             writeln!(rw, "{}", s).map_err(|e| SpicyError::Err(e.to_string()))?;
+                            bytes_since_flush.fetch_add(s.len() as u64 + 1, Ordering::Relaxed);
                             Ok(SpicyObj::I64(s.len() as i64))
                         }
                         _ => Err(SpicyError::MismatchedTypeErr(
@@ -1056,6 +1101,8 @@ impl EngineState {
                                 rw.write_all(&bytes)
                                     .map_err(|e| SpicyError::Err(e.to_string()))?;
                             }
+                            // 8 (total_len) + 8 (timestamp) + payload
+                            bytes_since_flush.fetch_add(16 + total_len as u64, Ordering::Relaxed);
                             *conn_type = ConnType::Sequence;
                             Ok(SpicyObj::I64(total_len as i64))
                         }
@@ -1073,6 +1120,45 @@ impl EngineState {
             }
             _ => Err(SpicyError::InvalidHandleErr(*h)),
         }
+    }
+
+    /// Sprint 16 — `engine.flush_tplog()` backing for mdata's PRD §5.1
+    /// part-2 kill-9 durability requirement.
+    ///
+    /// Flushes user-space buffers then `fsync`s the kernel buffers for a
+    /// file:// handle. Returns the count of payload bytes written through
+    /// this handle since the most recent successful `flush_handle` (or
+    /// since handle creation if never flushed) — this replaces mdata's
+    /// `log_path.stat().st_size` proxy with a precise monitor probe.
+    ///
+    /// Returns Err for non-file:// connections (TCP handles don't have
+    /// `fsync` semantics; per Q1 lock-in 2026-05-13, par_df Parquet
+    /// fsync is wdb's responsibility via `os.fsync(fd)`).
+    pub fn flush_handle(&self, h: &i64) -> SpicyResult<i64> {
+        let mut handles = self.handle.write();
+        let handle = handles.get_mut(h).ok_or(SpicyError::InvalidHandleErr(*h))?;
+
+        match handle.conn_type {
+            ConnType::New | ConnType::File | ConnType::Sequence => {}
+            other => {
+                return Err(SpicyError::Err(format!(
+                    "flush_handle: handle {h} is not a file:// connection (conn_type={other:?})"
+                )));
+            }
+        }
+
+        let rw = handle
+            .rw
+            .as_mut()
+            .ok_or_else(|| SpicyError::Err(format!("flush_handle: handle {h} has no rw")))?;
+        rw.flush()
+            .map_err(|e| SpicyError::Err(format!("flush failed for handle {h}: {e}")))?;
+        rw.sync_all()
+            .map_err(|e| SpicyError::Err(format!("sync_all failed for handle {h}: {e}")))?;
+
+        // Both flush() and sync_all() succeeded — safe to reset counter.
+        let bytes = handle.bytes_since_flush.swap(0, Ordering::AcqRel);
+        Ok(bytes as i64)
     }
 
     pub fn add_subscriber(&self, topic: &str, h: i64) -> SpicyResult<()> {

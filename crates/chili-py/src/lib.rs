@@ -560,6 +560,99 @@ impl PyEngineState {
         self.inner.par_df_count()
     }
 
+    /// Sprint 16 — schedule a registered pepper function to fire at
+    /// `start_time` on the chili scheduler thread.
+    ///
+    /// Thin PyO3 binding around `.job.addAtTime` (defined at
+    /// `crates/chili-core/src/job.rs:96`). Backs mdata's PRD §3.2 Option A
+    /// EOD timer path (chili-side scheduler) — replaces their Python asyncio
+    /// timer for callers who prefer chili to own the timer thread.
+    ///
+    /// Parameters
+    /// ----------
+    /// fn_name : str
+    ///     Name of a pepper function in the engine's global namespace.
+    ///     The scheduler will look it up by name at fire time, so the
+    ///     function must exist when the timer fires.
+    /// start_time : datetime.datetime
+    ///     When to fire. Coerced via `spicy_from_py_bound` →
+    ///     `SpicyObj::Timestamp` (nanoseconds since UNIX epoch).
+    /// description : str | None
+    ///     Free-text label, surfaced in the job-list output. Defaults to "".
+    ///
+    /// Returns
+    /// -------
+    /// int
+    ///     Job ID. Pass to `cancel_job` to revoke.
+    fn add_at_time(
+        &self,
+        py: Python<'_>,
+        fn_name: &str,
+        start_time: Bound<'_, PyAny>,
+        description: Option<&str>,
+    ) -> PyResult<i64> {
+        self.check_fork()?;
+        // The chili job scheduler compares jobs' next_run_time against
+        // `job::get_local_now_ns()`, which is local-wall-clock nanoseconds
+        // interpreted as UTC ns (i.e., UTC_ns + local_offset_seconds * 1e9).
+        // `spicy_from_py_bound` extracts tz-aware Python datetimes as
+        // `DateTime<Utc>` → real UTC ns. The two are off by the local-UTC
+        // offset, so without this conversion the scheduler would never see
+        // `now >= start_time` for any reasonable target time in a non-UTC
+        // host timezone. Add the local offset here so the scheduler's
+        // comparison lands at the correct wall-clock instant.
+        let ts_obj = spicy_from_py_bound(&start_time)?;
+        let ts_obj = match ts_obj {
+            SpicyObj::Timestamp(utc_ns) => {
+                let local_offset_sec = chrono::Local::now().offset().local_minus_utc() as i64;
+                SpicyObj::Timestamp(utc_ns + local_offset_sec * 1_000_000_000)
+            }
+            other => other,
+        };
+        let name_obj = SpicyObj::Symbol(fn_name.to_owned());
+        let desc_obj = SpicyObj::Symbol(description.unwrap_or("").to_owned());
+        let args: Vec<&SpicyObj> = vec![&name_obj, &ts_obj, &desc_obj];
+        let result =
+            py.detach(move || map_spicy_error(self.inner.fn_call(".job.addAtTime", &args)));
+        match result? {
+            SpicyObj::I64(id) => Ok(id),
+            other => Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "add_at_time: expected i64 job id, got {}",
+                other.get_type_name()
+            ))),
+        }
+    }
+
+    /// Sprint 16 — flush + `fsync` the active tplog handle (`.tick.msgHandle`).
+    ///
+    /// Backs mdata's PRD §5.1 part-2 kill-9 durability requirement. Looks up
+    /// `.tick.msgHandle` (set by `.tick.createLog` during `init_tick`),
+    /// flushes user-space buffers, then `fs::File::sync_all` flushes kernel
+    /// buffers to disk. Returns payload bytes-since-last-flush — replaces
+    /// mdata's `log_path.stat().st_size` proxy with a precise monitor probe.
+    ///
+    /// Raises `RuntimeError` if `init_tick()` hasn't been called yet
+    /// (`.tick.msgHandle` would be undefined). GIL is released around the
+    /// fsync syscall.
+    fn flush_tplog(&self, py: Python<'_>) -> PyResult<i64> {
+        self.check_fork()?;
+        let handle_obj = map_spicy_error(self.inner.get_var(".tick.msgHandle")).map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err(
+                "flush_tplog: `.tick.msgHandle` is not set — call init_tick() first",
+            )
+        })?;
+        let h = match handle_obj {
+            SpicyObj::I64(h) => h,
+            other => {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "flush_tplog: `.tick.msgHandle` is not an integer handle id (got {})",
+                    other.get_type_name()
+                )));
+            }
+        };
+        py.detach(move || map_spicy_error(self.inner.flush_handle(&h)))
+    }
+
     /// Start a TCP listener on the given port in a background thread.
     ///
     /// The listener runs until the process exits.  The GIL is released so
