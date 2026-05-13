@@ -27,5 +27,3 @@ impl Pipe {
         Self { printer }
     }
 }
-
-unsafe impl Send for Pipe {}

@@ -455,14 +455,14 @@ pub fn minus(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
                     Err(SpicyError::MismatchedLengthErr(s0.len(), l1.len()))
                 } else {
                     let l0 = arg0.as_vec()?;
-                    list_op_list(&l0, l1, add)
+                    list_op_list(&l0, l1, minus)
                 }
             }
             SpicyObj::Dict(d1) => {
                 if s0.len() != d1.len() {
                     Err(SpicyError::MismatchedLengthErr(s0.len(), d1.len()))
                 } else {
-                    Ok(list_op_dict(&arg0.as_vec()?, d1, add)?)
+                    Ok(list_op_dict(&arg0.as_vec()?, d1, minus)?)
                 }
             }
             _ => {
@@ -740,7 +740,7 @@ pub fn dict(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
             return Ok(SpicyObj::Dict(m));
         }
         let values = values.as_vec()?;
-        for (key, value) in keys.into_iter().zip(values.into_iter()) {
+        for (key, value) in keys.into_iter().zip(values) {
             m.insert(key.to_owned(), value);
         }
         Ok(SpicyObj::Dict(m))
@@ -921,10 +921,10 @@ pub fn true_div(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
         if arg0.is_matrix() && arg1.is_matrix() {
             // matrix0 * inverse matrix1, pending
             Err(err())
-        } else if arg0.is_matrix() && arg1.is_bool() || arg1.is_numeric() {
+        } else if arg0.is_matrix() && (arg1.is_bool() || arg1.is_numeric()) {
             let m0 = arg0.matrix().unwrap();
             Ok(SpicyObj::Matrix((m0 / arg1.to_f64().unwrap()).to_shared()))
-        } else if arg0.is_bool() || arg0.is_numeric() && arg1.is_matrix() {
+        } else if (arg0.is_bool() || arg0.is_numeric()) && arg1.is_matrix() {
             let m1 = arg1.matrix().unwrap();
             Ok(SpicyObj::Matrix((m1 / arg0.to_f64().unwrap()).to_shared()))
         } else {
@@ -1119,13 +1119,13 @@ pub fn div(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
         if arg0.is_matrix() && arg1.is_matrix() {
             // matrix0 * inverse matrix1, pending
             Err(err())
-        } else if arg0.is_matrix() && arg1.is_bool() || arg1.is_numeric() {
+        } else if arg0.is_matrix() && (arg1.is_bool() || arg1.is_numeric()) {
             let m0 = arg0.matrix().unwrap();
             Ok(SpicyObj::Matrix(
                 m0.clone()
                     .mapv_into(|x| x.div_euclid(arg1.to_f64().unwrap())),
             ))
-        } else if arg0.is_bool() || arg0.is_numeric() && arg1.is_matrix() {
+        } else if (arg0.is_bool() || arg0.is_numeric()) && arg1.is_matrix() {
             let m1 = arg1.matrix().unwrap();
             Ok(SpicyObj::Matrix(
                 m1.clone()
@@ -2409,11 +2409,9 @@ pub fn apply(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
     let mut i_iter = indices.iter();
     let mut res = chili_core::at(&[arg0, i_iter.next().unwrap()])
         .map_err(|e| SpicyError::Err(format!("Failed to apply first index, '{}'", e)))?;
-    let mut i: usize = 2;
-    for idx in i_iter {
+    for (i, idx) in (2usize..).zip(i_iter) {
         res = chili_core::at(&[&res, idx])
             .map_err(|e| SpicyError::Err(format!("Failed to apply {} index, '{}'", i, e)))?;
-        i += 1;
     }
     Ok(res)
 }

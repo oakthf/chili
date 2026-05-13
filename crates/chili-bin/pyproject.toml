@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "chili-pie"
-version = "0.8.0"
+version = "0.8.1"
 description = "Chili Language Runtime, written in Rust."
 authors = [{ name = "hinmeru", email = "purple-chili@hotmail.com" }]
 readme = "README.md"
@@ -32,6 +32,7 @@ Documentation = "https://purple-chili.github.io/"
 Changelog = "https://github.com/purple-chili/chili/blob/main/CHANGELOG.md"
 
 [tool.maturin]
+manifest-path = "Cargo.toml"
 bindings = "bin"
 strip = true
 exclude = []
