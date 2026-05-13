@@ -129,3 +129,28 @@ Global:
 - Wheel-only install protocol: **NEVER** ship editable installs to mdata (lesson 14). The wheel byte-stream is fully self-contained; chili dev on this tree does not affect mdata's installed wheel.
 - Next: **Sprint 17 scope unscoped** — 0.8.4 delivered to mdata 2026-05-13. 7 ideas in `docs/sync/ideas.md`. Sprint 16 clarification cycle locked in mdata Q2 (P1-publish deferred to Sprint 17 Option B saves ~10pp). **User-driven backlog**: (P0) GitHub-host the polars fork — replace `path = "/tmp/polars-py-1.39.3"` with `git = "..." + tag = "..."` in workspace + chili-py `[patch.crates-io]` blocks; without it, fresh clones break at `cargo build`. Until done, `vendor/polars-core/README.md` is the recovery protocol. (P1) KDB-X CE comparison once GA + interactive registration available. (P3) Box::new mitigation + A.2.2 vars-write-lock + P3.4 Categorical cache: all **deferred indefinitely** (Sprint 13/13.5 retros; no measurable targets).
 - Open items: see `~/.claude/projects/-Users-oakadmin-code-chili/memory/MEMORY.md`.
+
+## Cross-project mesh (vantage team-bus)
+
+This project participates in vantage's team-bus per `~/team/oak/vantage/docs/architecture/team_bus.md`.
+
+### Producer contract (binding for any agent/script emitting cross-project signals)
+
+Write outbound events to `.cross_comms/outbox/<idempotency_key>.json` using the atomic pattern:
+
+1. Write to `.cross_comms/outbox/<idempotency_key>.json.tmp`
+2. `os.rename()` to `.cross_comms/outbox/<idempotency_key>.json` (atomic on POSIX)
+
+Required envelope fields: `topic`, `payload`, `idempotency_key`. For `contract.*`, `directive.*`, `ratification_*`, `phase.boundary.*` also include `correlation_id` — the bus rejects events on those topics without it.
+
+### Inbox
+
+Read events written by the thin client to `.cross_comms/inbox/<event_id>.json`. Each file is a one-shot delivery; process + `mark_event_processed` (move to `.sent/`) when done.
+
+### Topics this project subscribes to
+
+See `.cross_comms/config.json`'s `subscriptions:` list. Topic ACL registry: `~/team/oak/vantage/mesh/registry/topics.toml` (canonical).
+
+### Token
+
+`.cross_comms/.chili.token` (mode 0600, gitignored). If lost: ask the principal to issue a replacement.
