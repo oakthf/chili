@@ -4,6 +4,10 @@ tmp
 dist
 /.vscode
 polars-core
+# But explicitly track vendor/polars-core/ — reference patches for
+# reconstructing the chili-side q-style fmt patch when /tmp/polars-py-1.39.3
+# is lost. See vendor/polars-core/README.md.
+!vendor/polars-core/
 **/__pycache__
 *.so
 .mypy_cache

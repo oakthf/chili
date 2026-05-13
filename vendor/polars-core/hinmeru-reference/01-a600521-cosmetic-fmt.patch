@@ -1,0 +1,339 @@
+From a6005215998a26f40655486ac7e631a44f0c865c Mon Sep 17 00:00:00 2001
+From: hinmeru <purple-chili@hotmail.com>
+Date: Fri, 5 Dec 2025 18:34:26 +0800
+Subject: [PATCH] patch fmt
+
+---
+ src/fmt.rs | 154 +++++++++++++++++++++++++----------------------------
+ 1 file changed, 73 insertions(+), 81 deletions(-)
+
+diff --git a/src/fmt.rs b/src/fmt.rs
+index da41088..ec6d7d1 100644
+--- a/src/fmt.rs
++++ b/src/fmt.rs
+@@ -238,7 +238,7 @@ fn format_object_array(
+                 writeln!(f, "\t{}", v.unwrap())?;
+             }
+             write!(f, "]")
+-        },
++        }
+         _ => unreachable!(),
+     }
+ }
+@@ -331,80 +331,80 @@ impl Debug for Series {
+         match self.dtype() {
+             DataType::Boolean => {
+                 format_array!(f, self.bool().unwrap(), "bool", self.name(), "Series")
+-            },
++            }
+             DataType::String => {
+                 format_array!(f, self.str().unwrap(), "str", self.name(), "Series")
+-            },
++            }
+             DataType::UInt8 => {
+                 format_array!(f, self.u8().unwrap(), "u8", self.name(), "Series")
+-            },
++            }
+             DataType::UInt16 => {
+                 format_array!(f, self.u16().unwrap(), "u16", self.name(), "Series")
+-            },
++            }
+             DataType::UInt32 => {
+                 format_array!(f, self.u32().unwrap(), "u32", self.name(), "Series")
+-            },
++            }
+             DataType::UInt64 => {
+                 format_array!(f, self.u64().unwrap(), "u64", self.name(), "Series")
+-            },
++            }
+             DataType::UInt128 => {
+                 feature_gated!(
+                     "dtype-u128",
+                     format_array!(f, self.u128().unwrap(), "u128", self.name(), "Series")
+                 )
+-            },
++            }
+             DataType::Int8 => {
+                 format_array!(f, self.i8().unwrap(), "i8", self.name(), "Series")
+-            },
++            }
+             DataType::Int16 => {
+                 format_array!(f, self.i16().unwrap(), "i16", self.name(), "Series")
+-            },
++            }
+             DataType::Int32 => {
+                 format_array!(f, self.i32().unwrap(), "i32", self.name(), "Series")
+-            },
++            }
+             DataType::Int64 => {
+                 format_array!(f, self.i64().unwrap(), "i64", self.name(), "Series")
+-            },
++            }
+             DataType::Int128 => {
+                 feature_gated!(
+                     "dtype-i128",
+                     format_array!(f, self.i128().unwrap(), "i128", self.name(), "Series")
+                 )
+-            },
++            }
+             DataType::Float32 => {
+                 format_array!(f, self.f32().unwrap(), "f32", self.name(), "Series")
+-            },
++            }
+             DataType::Float64 => {
+                 format_array!(f, self.f64().unwrap(), "f64", self.name(), "Series")
+-            },
++            }
+             #[cfg(feature = "dtype-date")]
+             DataType::Date => format_array!(f, self.date().unwrap(), "date", self.name(), "Series"),
+             #[cfg(feature = "dtype-datetime")]
+             DataType::Datetime(_, _) => {
+                 let dt = format!("{}", self.dtype());
+                 format_array!(f, self.datetime().unwrap(), &dt, self.name(), "Series")
+-            },
++            }
+             #[cfg(feature = "dtype-time")]
+             DataType::Time => format_array!(f, self.time().unwrap(), "time", self.name(), "Series"),
+             #[cfg(feature = "dtype-duration")]
+             DataType::Duration(_) => {
+                 let dt = format!("{}", self.dtype());
+                 format_array!(f, self.duration().unwrap(), &dt, self.name(), "Series")
+-            },
++            }
+             #[cfg(feature = "dtype-decimal")]
+             DataType::Decimal(_, _) => {
+                 let dt = format!("{}", self.dtype());
+                 format_array!(f, self.decimal().unwrap(), &dt, self.name(), "Series")
+-            },
++            }
+             #[cfg(feature = "dtype-array")]
+             DataType::Array(_, _) => {
+                 let dt = format!("{}", self.dtype());
+                 format_array!(f, self.array().unwrap(), &dt, self.name(), "Series")
+-            },
++            }
+             DataType::List(_) => {
+                 let dt = format!("{}", self.dtype());
+                 format_array!(f, self.list().unwrap(), &dt, self.name(), "Series")
+-            },
++            }
+             #[cfg(feature = "object")]
+             DataType::Object(_) => format_object_array(f, self, self.name(), "Series"),
+             #[cfg(feature = "dtype-categorical")]
+@@ -412,14 +412,14 @@ impl Debug for Series {
+                 with_match_categorical_physical_type!(cats.physical(), |$C| {
+                     format_array!(f, self.cat::<$C>().unwrap(), "cat", self.name(), "Series")
+                 })
+-            },
++            }
+ 
+             #[cfg(feature = "dtype-categorical")]
+             DataType::Enum(fcats, _) => {
+                 with_match_categorical_physical_type!(fcats.physical(), |$C| {
+                     format_array!(f, self.cat::<$C>().unwrap(), "enum", self.name(), "Series")
+                 })
+-            },
++            }
+             #[cfg(feature = "dtype-struct")]
+             dt @ DataType::Struct(_) => format_array!(
+                 f,
+@@ -430,10 +430,10 @@ impl Debug for Series {
+             ),
+             DataType::Null => {
+                 format_array!(f, self.null().unwrap(), "null", self.name(), "Series")
+-            },
++            }
+             DataType::Binary => {
+                 format_array!(f, self.binary().unwrap(), "binary", self.name(), "Series")
+-            },
++            }
+             DataType::BinaryOffset => {
+                 format_array!(
+                     f,
+@@ -442,7 +442,7 @@ impl Debug for Series {
+                     self.name(),
+                     "Series"
+                 )
+-            },
++            }
+             dt => panic!("{dt:?} not impl"),
+         }
+     }
+@@ -802,7 +802,7 @@ impl Display for DataFrame {
+                         "RIGHT" => column.set_cell_alignment(CellAlignment::Right),
+                         "LEFT" => column.set_cell_alignment(CellAlignment::Left),
+                         "CENTER" => column.set_cell_alignment(CellAlignment::Center),
+-                        _ => {},
++                        _ => {}
+                     }
+                 }
+             }
+@@ -984,7 +984,13 @@ fn fmt_datetime(
+         TimeUnit::Milliseconds => timestamp_ms_to_datetime(v),
+     };
+     match tz {
+-        None => std::fmt::Display::fmt(&ndt, f),
++        None => {
++            if matches!(tu, TimeUnit::Milliseconds) {
++                write!(f, "{}", ndt.format("%Y.%m.%dT%H:%M:%S%.f"))
++            } else {
++                write!(f, "{}", ndt.format("%Y.%m.%dD%H:%M:%S%.f"))
++            }
++        }
+         Some(tz) => PlTzAware::new(ndt, tz).fmt(f),
+     }
+ }
+@@ -1007,54 +1013,40 @@ const SIZES_MS: [i64; 4] = [86_400_000, 3_600_000, 60_000, 1_000];
+ 
+ #[cfg(feature = "dtype-duration")]
+ pub fn fmt_duration_string<W: Write>(f: &mut W, v: i64, unit: TimeUnit) -> fmt::Result {
+-    // take the physical/integer duration value and return a
+-    // friendly/readable duration string, eg: "3d 22m 55s 1ms"
+-    if v == 0 {
+-        return match unit {
+-            TimeUnit::Nanoseconds => f.write_str("0ns"),
+-            TimeUnit::Microseconds => f.write_str("0µs"),
+-            TimeUnit::Milliseconds => f.write_str("0ms"),
+-        };
++    let unit_in_s = match unit {
++        TimeUnit::Nanoseconds => 1000_000_000,
++        TimeUnit::Microseconds => 1000_000,
++        TimeUnit::Milliseconds => 1000,
+     };
+-    // iterate over dtype-specific sizes to appropriately scale
+-    // and extract 'days', 'hours', 'minutes', and 'seconds' parts.
+-    let sizes = match unit {
+-        TimeUnit::Nanoseconds => SIZES_NS.as_slice(),
+-        TimeUnit::Microseconds => SIZES_US.as_slice(),
+-        TimeUnit::Milliseconds => SIZES_MS.as_slice(),
+-    };
+-    let mut buffer = itoa::Buffer::new();
+-    for (i, &size) in sizes.iter().enumerate() {
+-        let whole_num = if i == 0 {
+-            v / size
+-        } else {
+-            (v % sizes[i - 1]) / size
+-        };
+-        if whole_num != 0 {
+-            f.write_str(buffer.format(whole_num))?;
+-            f.write_str(DURATION_PARTS[i])?;
+-            if v % size != 0 {
+-                f.write_char(' ')?;
+-            }
+-        }
+-    }
+-    // write fractional seconds as integer nano/micro/milliseconds.
+-    let (v, units) = match unit {
+-        TimeUnit::Nanoseconds => (v % 1_000_000_000, ["ns", "µs", "ms"]),
+-        TimeUnit::Microseconds => (v % 1_000_000, ["µs", "ms", ""]),
+-        TimeUnit::Milliseconds => (v % 1_000, ["ms", "", ""]),
++
++    let sign = if v < 0 { "-" } else { "" };
++    let v = v.abs();
++    let n = v % unit_in_s;
++    let secs = v / unit_in_s;
++    let mins = secs / 60;
++    let hours = mins / 60;
++    let days = hours / 24;
++    let secs = secs % 60;
++    let mins = mins % 60;
++    let hours = hours % 24;
++
++    match unit {
++        TimeUnit::Nanoseconds => write!(
++            f,
++            "{}{}D{:02}:{:02}:{:02}.{:09}",
++            sign, days, hours, mins, secs, n,
++        )?,
++        TimeUnit::Microseconds => write!(
++            f,
++            "{}{}D{:02}:{:02}:{:02}.{:06}",
++            sign, days, hours, mins, secs, n,
++        )?,
++        TimeUnit::Milliseconds => write!(
++            f,
++            "{}{}D{:02}:{:02}:{:02}.{:03}",
++            sign, days, hours, mins, secs, n,
++        )?,
+     };
+-    if v != 0 {
+-        let (value, suffix) = if v % 1_000 != 0 {
+-            (v, units[0])
+-        } else if v % 1_000_000 != 0 {
+-            (v / 1_000, units[1])
+-        } else {
+-            (v / 1_000_000, units[2])
+-        };
+-        f.write_str(buffer.format(value))?;
+-        f.write_str(suffix)?;
+-    }
+     Ok(())
+ }
+ 
+@@ -1180,14 +1172,14 @@ impl Display for AnyValue<'_> {
+             #[cfg(feature = "dtype-datetime")]
+             AnyValue::DatetimeOwned(v, tu, tz) => {
+                 fmt_datetime(f, *v, *tu, tz.as_ref().map(|v| v.as_ref()))
+-            },
++            }
+             #[cfg(feature = "dtype-duration")]
+             AnyValue::Duration(v, tu) => fmt_duration_string(f, *v, *tu),
+             #[cfg(feature = "dtype-time")]
+             AnyValue::Time(_) => {
+                 let nt: chrono::NaiveTime = self.into();
+                 write!(f, "{nt}")
+-            },
++            }
+             #[cfg(feature = "dtype-categorical")]
+             AnyValue::Categorical(_, _)
+             | AnyValue::CategoricalOwned(_, _)
+@@ -1195,7 +1187,7 @@ impl Display for AnyValue<'_> {
+             | AnyValue::EnumOwned(_, _) => {
+                 let s = self.get_str().unwrap();
+                 write!(f, "\"{s}\"")
+-            },
++            }
+             #[cfg(feature = "dtype-array")]
+             AnyValue::Array(s, _size) => write!(f, "{}", s.fmt_list()),
+             AnyValue::List(s) => write!(f, "{}", s.fmt_list()),
+@@ -1208,7 +1200,7 @@ impl Display for AnyValue<'_> {
+                 let mut avs = vec![];
+                 av._materialize_struct_av(&mut avs);
+                 fmt_struct(f, &avs)
+-            },
++            }
+             #[cfg(feature = "dtype-struct")]
+             AnyValue::StructOwned(payload) => fmt_struct(f, &payload.0),
+             #[cfg(feature = "dtype-decimal")]
+@@ -1240,8 +1232,8 @@ impl Display for PlTzAware<'_> {
+             Ok(tz) => {
+                 let dt_utc = chrono::Utc.from_local_datetime(&self.ndt).unwrap();
+                 let dt_tz_aware = dt_utc.with_timezone(&tz);
+-                write!(f, "{dt_tz_aware}")
+-            },
++                write!(f, "{}", dt_tz_aware.format("%Y.%m.%dD%H:%M:%S%.f"))
++            }
+             Err(_) => write!(f, "invalid timezone"),
+         }
+         #[cfg(not(feature = "timezones"))]
+@@ -1288,7 +1280,7 @@ impl Series {
+                 // remove trailing ", " and replace with closing brace
+                 result.truncate(result.len() - 2);
+                 result.push(']');
+-            },
++            }
+             _ => {
+                 let s = self.slice(0, max_items).rechunk();
+                 for (i, item) in s.iter().enumerate() {
+@@ -1300,7 +1292,7 @@ impl Series {
+                     }
+                 }
+                 result.push(']');
+-            },
++            }
+         };
+         result
+     }
+-- 
+2.53.0
+

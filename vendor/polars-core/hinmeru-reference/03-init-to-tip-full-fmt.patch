@@ -1,0 +1,244 @@
+diff --git a/src/fmt.rs b/src/fmt.rs
+index da41088..e83f467 100644
+--- a/src/fmt.rs
++++ b/src/fmt.rs
+@@ -2,7 +2,7 @@
+ #[cfg(any(feature = "fmt", feature = "fmt_no_tty"))]
+ use std::borrow::Cow;
+ use std::fmt::{Debug, Display, Formatter, Write};
+-use std::str::FromStr;
++use std::num::IntErrorKind;
+ use std::sync::RwLock;
+ use std::{fmt, str};
+ 
+@@ -94,20 +94,23 @@ pub fn set_trim_decimal_zeros(trim: Option<bool>) {
+     arrow::compute::decimal::set_trim_decimal_zeros(trim)
+ }
+ 
+-/// Parses an environment variable value.
+-fn parse_env_var<T: FromStr>(name: &str) -> Option<T> {
+-    std::env::var(name).ok().and_then(|v| v.parse().ok())
+-}
+ /// Parses an environment variable value as a limit or set a default.
+ ///
+ /// Negative values (e.g. -1) are parsed as 'no limit' or [`usize::MAX`].
+ fn parse_env_var_limit(name: &str, default: usize) -> usize {
+-    parse_env_var(name).map_or(
+-        default,
+-        |n: i64| {
+-            if n < 0 { usize::MAX } else { n as usize }
++    let Ok(v) = std::env::var(name) else {
++        return default;
++    };
++
++    let n = match v.parse::<i64>() {
++        Ok(n) => n,
++        Err(e) => match e.kind() {
++            IntErrorKind::PosOverflow | IntErrorKind::NegOverflow => -1,
++            _ => return default,
+         },
+-    )
++    };
++
++    if n < 0 { usize::MAX } else { n as usize }
+ }
+ 
+ fn get_row_limit() -> usize {
+@@ -160,7 +163,7 @@ macro_rules! format_array {
+         )?;
+ 
+         let ellipsis = get_ellipsis();
+-        let truncate = match $a.dtype() {
++        let truncate = match $a.dtype().to_storage() {
+             DataType::String => true,
+             #[cfg(feature = "dtype-categorical")]
+             DataType::Categorical(_, _) | DataType::Enum(_, _) => true,
+@@ -371,6 +374,10 @@ impl Debug for Series {
+                     format_array!(f, self.i128().unwrap(), "i128", self.name(), "Series")
+                 )
+             },
++            #[cfg(feature = "dtype-f16")]
++            DataType::Float16 => {
++                format_array!(f, self.f16().unwrap(), "f16", self.name(), "Series")
++            },
+             DataType::Float32 => {
+                 format_array!(f, self.f32().unwrap(), "f32", self.name(), "Series")
+             },
+@@ -443,6 +450,11 @@ impl Debug for Series {
+                     "Series"
+                 )
+             },
++            #[cfg(feature = "dtype-extension")]
++            DataType::Extension(_, _) => {
++                let dt = format!("{}", self.dtype());
++                format_array!(f, self.ext().unwrap(), &dt, self.name(), "Series")
++            },
+             dt => panic!("{dt:?} not impl"),
+         }
+     }
+@@ -581,7 +593,7 @@ impl Display for DataFrame {
+         {
+             let height = self.height();
+             assert!(
+-                self.columns.iter().all(|s| s.len() == height),
++                self.columns().iter().all(|s| s.len() == height),
+                 "The column lengths in the DataFrame are not equal."
+             );
+ 
+@@ -657,7 +669,7 @@ impl Display for DataFrame {
+ 
+                     for i in 0..(half + rest) {
+                         let row = self
+-                            .get_columns()
++                            .columns()
+                             .iter()
+                             .map(|c| c.str_value(i).unwrap())
+                             .collect();
+@@ -678,7 +690,7 @@ impl Display for DataFrame {
+ 
+                     for i in (height - half)..height {
+                         let row = self
+-                            .get_columns()
++                            .columns()
+                             .iter()
+                             .map(|c| c.str_value(i).unwrap())
+                             .collect();
+@@ -719,7 +731,7 @@ impl Display for DataFrame {
+                     }
+                 }
+             } else if height > 0 {
+-                let dots: Vec<String> = vec![ellipsis; self.columns.len()];
++                let dots: Vec<String> = vec![ellipsis; self.width()];
+                 table.add_row(dots);
+             }
+             let tbl_fallback_width = 100;
+@@ -984,7 +996,13 @@ fn fmt_datetime(
+         TimeUnit::Milliseconds => timestamp_ms_to_datetime(v),
+     };
+     match tz {
+-        None => std::fmt::Display::fmt(&ndt, f),
++        None => {
++            if matches!(tu, TimeUnit::Milliseconds) {
++                write!(f, "{}", ndt.format("%Y.%m.%dT%H:%M:%S%.f"))
++            } else {
++                write!(f, "{}", ndt.format("%Y.%m.%dD%H:%M:%S%.f"))
++            }
++        }
+         Some(tz) => PlTzAware::new(ndt, tz).fmt(f),
+     }
+ }
+@@ -1007,54 +1025,40 @@ const SIZES_MS: [i64; 4] = [86_400_000, 3_600_000, 60_000, 1_000];
+ 
+ #[cfg(feature = "dtype-duration")]
+ pub fn fmt_duration_string<W: Write>(f: &mut W, v: i64, unit: TimeUnit) -> fmt::Result {
+-    // take the physical/integer duration value and return a
+-    // friendly/readable duration string, eg: "3d 22m 55s 1ms"
+-    if v == 0 {
+-        return match unit {
+-            TimeUnit::Nanoseconds => f.write_str("0ns"),
+-            TimeUnit::Microseconds => f.write_str("0µs"),
+-            TimeUnit::Milliseconds => f.write_str("0ms"),
+-        };
+-    };
+-    // iterate over dtype-specific sizes to appropriately scale
+-    // and extract 'days', 'hours', 'minutes', and 'seconds' parts.
+-    let sizes = match unit {
+-        TimeUnit::Nanoseconds => SIZES_NS.as_slice(),
+-        TimeUnit::Microseconds => SIZES_US.as_slice(),
+-        TimeUnit::Milliseconds => SIZES_MS.as_slice(),
++    let unit_in_s = match unit {
++        TimeUnit::Nanoseconds => 1000_000_000,
++        TimeUnit::Microseconds => 1000_000,
++        TimeUnit::Milliseconds => 1000,
+     };
+-    let mut buffer = itoa::Buffer::new();
+-    for (i, &size) in sizes.iter().enumerate() {
+-        let whole_num = if i == 0 {
+-            v / size
+-        } else {
+-            (v % sizes[i - 1]) / size
+-        };
+-        if whole_num != 0 {
+-            f.write_str(buffer.format(whole_num))?;
+-            f.write_str(DURATION_PARTS[i])?;
+-            if v % size != 0 {
+-                f.write_char(' ')?;
+-            }
+-        }
+-    }
+-    // write fractional seconds as integer nano/micro/milliseconds.
+-    let (v, units) = match unit {
+-        TimeUnit::Nanoseconds => (v % 1_000_000_000, ["ns", "µs", "ms"]),
+-        TimeUnit::Microseconds => (v % 1_000_000, ["µs", "ms", ""]),
+-        TimeUnit::Milliseconds => (v % 1_000, ["ms", "", ""]),
++
++    let sign = if v < 0 { "-" } else { "" };
++    let v = v.abs();
++    let n = v % unit_in_s;
++    let secs = v / unit_in_s;
++    let mins = secs / 60;
++    let hours = mins / 60;
++    let days = hours / 24;
++    let secs = secs % 60;
++    let mins = mins % 60;
++    let hours = hours % 24;
++
++    match unit {
++        TimeUnit::Nanoseconds => write!(
++            f,
++            "{}{}D{:02}:{:02}:{:02}.{:09}",
++            sign, days, hours, mins, secs, n,
++        )?,
++        TimeUnit::Microseconds => write!(
++            f,
++            "{}{}D{:02}:{:02}:{:02}.{:06}",
++            sign, days, hours, mins, secs, n,
++        )?,
++        TimeUnit::Milliseconds => write!(
++            f,
++            "{}{}D{:02}:{:02}:{:02}.{:03}",
++            sign, days, hours, mins, secs, n,
++        )?,
+     };
+-    if v != 0 {
+-        let (value, suffix) = if v % 1_000 != 0 {
+-            (v, units[0])
+-        } else if v % 1_000_000 != 0 {
+-            (v / 1_000, units[1])
+-        } else {
+-            (v / 1_000_000, units[2])
+-        };
+-        f.write_str(buffer.format(value))?;
+-        f.write_str(suffix)?;
+-    }
+     Ok(())
+ }
+ 
+@@ -1166,6 +1170,7 @@ impl Display for AnyValue<'_> {
+             AnyValue::Int32(v) => fmt_integer(f, width, *v),
+             AnyValue::Int64(v) => fmt_integer(f, width, *v),
+             AnyValue::Int128(v) => feature_gated!("dtype-i128", fmt_integer(f, width, *v)),
++            AnyValue::Float16(v) => feature_gated!("dtype-f16", fmt_float(f, width, *v)),
+             AnyValue::Float32(v) => fmt_float(f, width, *v),
+             AnyValue::Float64(v) => fmt_float(f, width, *v),
+             AnyValue::Boolean(v) => write!(f, "{}", *v),
+@@ -1240,8 +1245,8 @@ impl Display for PlTzAware<'_> {
+             Ok(tz) => {
+                 let dt_utc = chrono::Utc.from_local_datetime(&self.ndt).unwrap();
+                 let dt_tz_aware = dt_utc.with_timezone(&tz);
+-                write!(f, "{dt_tz_aware}")
+-            },
++                write!(f, "{}", dt_tz_aware.format("%Y.%m.%dD%H:%M:%S%.f"))
++            }
+             Err(_) => write!(f, "invalid timezone"),
+         }
+         #[cfg(not(feature = "timezones"))]
+@@ -1290,7 +1295,7 @@ impl Series {
+                 result.push(']');
+             },
+             _ => {
+-                let s = self.slice(0, max_items).rechunk();
++                let s = self.slice(0, max_items);
+                 for (i, item) in s.iter().enumerate() {
+                     if i == max_items.saturating_sub(1) {
+                         write!(result, "{ellipsis} {}", self.get(self.len() - 1).unwrap()).unwrap();
