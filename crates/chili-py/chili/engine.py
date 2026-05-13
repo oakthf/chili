@@ -540,3 +540,33 @@ class ChiliEngine:
     def subscribe(self, tick_socket: str, topics: Optional[list[str]] = None) -> None:
         self.load_sub()
         self.fn_call(".sub.init", [tick_socket, topics or []])
+
+    # Publisher functions (Sprint 17)
+    def publish_via_handle(self, h: int, table: str, df: pl.DataFrame) -> None:
+        """Publish a DataFrame to a remote tp via an open chili-IPC handle.
+
+        Thin one-shot wrapper — open the handle via
+        ``engine.open_handle("chili://host:port")``, cache it, call
+        ``publish_via_handle`` repeatedly, then close via
+        ``engine.close_handle``. Per Sprint 16 mdata-wishlist Q3
+        lock-in (Option B): chili owns the marshalling primitive;
+        callers (e.g. mdata's RemoteTpClient) own connection-manager
+        semantics on top.
+
+        Args:
+            h: Handle id from ``engine.open_handle("chili://...")``;
+                must still be ``Outgoing`` (not promoted to Subscribing).
+            table: Table name the remote tp will dispatch via ``.tick.upd``.
+            df: Rows to publish.
+
+        Raises:
+            RuntimeError: if ``df`` is not a DataFrame, ``h`` has no
+                live connection, or the handle is not ``Outgoing``.
+
+        Note:
+            ``sync()`` is a blocking send-and-receive on chili IPC;
+            this method does not return until the remote tp has
+            answered. The GIL is released around the network round-trip
+            so concurrent Python publishers don't serialize on it.
+        """
+        self.engine.publish_via_handle(h, table, df)

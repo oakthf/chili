@@ -1248,6 +1248,60 @@ impl EngineState {
         Ok(())
     }
 
+    /// Sprint 17 — Publish a DataFrame to a remote tp via an open
+    /// chili-IPC handle. Thin one-shot wrapper over `sync()`.
+    ///
+    /// Builds the message `(`upd; table; df)` (a 3-tuple MixedList
+    /// matching the in-process `.tick.upd[table; df]` shape) and
+    /// dispatches via `sync()` to the remote tp on handle `h`.
+    ///
+    /// Per Sprint 16 mdata-wishlist Q3 lock-in (Option B): chili owns
+    /// the marshalling primitive; downstream callers (e.g. mdata's
+    /// RemoteTpClient) own connection-manager semantics on top.
+    ///
+    /// Note: `sync()` is a blocking send-and-receive on chili IPC.
+    /// The remote tp's response value is read and discarded, but this
+    /// method does not return until the remote has answered. If the
+    /// remote is slow or unreachable, the handle map's write lock is
+    /// held across the network read (inherited from `sync()`;
+    /// pre-Sprint-17 concern, not this method's responsibility to fix).
+    /// Callers needing client-side cancellation/timeout must implement
+    /// it above this layer.
+    ///
+    /// Errors:
+    ///   - `Err` if `df` is not a `DataFrame`.
+    ///   - `InvalidHandleErr` if `h` has no entry.
+    ///   - `Err` if handle is not `ConnType::Outgoing` (i.e. not a
+    ///     client-side chili:// connection).
+    pub fn publish_via_handle(&self, h: &i64, table: &str, df: &SpicyObj) -> SpicyResult<()> {
+        if !matches!(df, SpicyObj::DataFrame(_)) {
+            return Err(SpicyError::Err(format!(
+                "publish_via_handle: df must be DataFrame, got {}",
+                df.get_type_name()
+            )));
+        }
+        // Validate handle exists + is Outgoing. The read lock is
+        // dropped before sync() so sync()'s internal write lock does
+        // not deadlock (parking_lot RwLock is not re-entrant).
+        {
+            let handles = self.handle.read();
+            let handle = handles.get(h).ok_or(SpicyError::InvalidHandleErr(*h))?;
+            if handle.conn_type != ConnType::Outgoing {
+                return Err(SpicyError::Err(format!(
+                    "publish_via_handle: handle {h} is not Outgoing (got {:?})",
+                    handle.conn_type
+                )));
+            }
+        }
+        let msg = SpicyObj::MixedList(vec![
+            SpicyObj::Symbol("upd".into()),
+            SpicyObj::Symbol(table.into()),
+            df.clone(),
+        ]);
+        self.sync(h, &msg)?;
+        Ok(())
+    }
+
     pub fn handle_subscriber(&self, h: &i64) -> SpicyResult<()> {
         let mut handles = self.handle.write();
         let handle = handles.get_mut(h).ok_or(SpicyError::InvalidHandleErr(*h))?;

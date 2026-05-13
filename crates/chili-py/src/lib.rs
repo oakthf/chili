@@ -653,6 +653,49 @@ impl PyEngineState {
         py.detach(move || map_spicy_error(self.inner.flush_handle(&h)))
     }
 
+    /// Sprint 17 — Publish a DataFrame to a remote tp via an open
+    /// chili-IPC handle. Thin one-shot wrapper over `sync(h, (`upd; table; df))`.
+    ///
+    /// Per Sprint 16 mdata-wishlist Q3 lock-in (Option B): chili owns the
+    /// marshalling primitive; the caller (e.g. mdata's RemoteTpClient)
+    /// owns connection-manager semantics on top — open the handle via
+    /// `engine.open_handle("chili://host:port")`, cache it, call
+    /// `publish_via_handle` repeatedly, and close via `close_handle`.
+    ///
+    /// Parameters
+    /// ----------
+    /// h : int
+    ///     A handle id from `engine.open_handle("chili://...")` that
+    ///     is currently `Outgoing` (not yet promoted to Subscribing).
+    /// table : str
+    ///     Table name the remote tp will dispatch into via `.tick.upd`.
+    /// df : polars.DataFrame
+    ///     Rows to publish.
+    ///
+    /// Notes
+    /// -----
+    /// Blocking: `sync()` is a send-and-receive on chili IPC. This
+    /// method does not return until the remote tp has answered. If the
+    /// remote is slow or unreachable, the chili-side handle map's write
+    /// lock is held across the network read (inherited from `sync()`;
+    /// pre-Sprint-17 concern). Callers needing timeout / cancellation
+    /// must implement it above this layer.
+    ///
+    /// GIL is released around the `sync()` syscall + network read
+    /// per the Sprint 14 P3.2b convention.
+    fn publish_via_handle(
+        &self,
+        py: Python<'_>,
+        h: i64,
+        table: &str,
+        df: Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        self.check_fork()?;
+        let df_spicy = spicy_from_py_bound(&df)?;
+        let table = table.to_owned();
+        py.detach(move || map_spicy_error(self.inner.publish_via_handle(&h, &table, &df_spicy)))
+    }
+
     /// Start a TCP listener on the given port in a background thread.
     ///
     /// The listener runs until the process exits.  The GIL is released so
