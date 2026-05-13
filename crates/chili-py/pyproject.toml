@@ -25,6 +25,11 @@ dependencies = [
 dev = [
     "pytest>=9.0",
     "pluggy>=1.5",
+    # Sprint 15 tests (TestParquetWriteConfig) read parquet metadata via
+    # pyarrow to verify the requested codec / row_group_size landed on disk.
+    # Was previously installed ad-hoc in the local venv; declaring here
+    # makes the test suite reproducible on fresh clones.
+    "pyarrow>=20",
 ]
 
 [tool.maturin]
