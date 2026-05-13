@@ -215,3 +215,47 @@ no migration required.
 - Previous delivery (0.8.2 hotfix): [`../history/sync/mdata_chili_2026-05-08_delivery.md`](../history/sync/mdata_chili_2026-05-08_delivery.md), [`../history/sync/mdata_chili_2026-05-08_pyarrow_response.md`](../history/sync/mdata_chili_2026-05-08_pyarrow_response.md)
 - chili-py wrapper code: `crates/chili-py/chili/engine.py:221-260` (write_partitioned_df), `:326-360` (overwrite_partition)
 - Chili-side codec parsing: `crates/chili-op/src/io.rs::parse_compression_name`
+
+---
+
+## mdata response received 2026-05-09
+
+**Sign-off:** option 1 (smoke pass). 0.8.3 wheel adopted as mdata's
+pinned version for all work topology v3 onward.
+
+**Smoke pass result:** 1856 passed, 75 skipped (no regressions vs the
+0.8.2 baseline). Surface verification confirmed all 0.8.2 methods
+preserved + new `compression=` / `row_group_size=` kwargs present with
+default `None`.
+
+**Reciprocal codec evidence at production scale** (full numbers in
+`~/code/mdata/docs/sync/chili_0.8.3_upgrade_assessment_2026-05-09.md`):
+mdata benched 3 real OHLCV partitions (~4M rows total) across 5
+codecs. ZSTD default holds; storage win is ~30 % vs LZ4/Snappy at
+2M-row scale. ADR-0005 §"Validation 2026-05-09" captures the headline
+table.
+
+**What's exercised vs not exercised in mdata:**
+
+- ✅ `write_partitioned_df` / `overwrite_partition` ZSTD default code
+  path — production use across all HDB writes.
+- ✅ Mixed-codec HDB read path (pl.scan_parquet AND chili eval).
+- ❌ Sprint 14 GIL-release on direct-FFI `load_par_df` /
+  `clear_par_df` — mdata routes all calls through the chili-py wrapper
+  (`fn_call`-routed since 0.8.0). The Sprint 14 fix improves callers
+  that bypass the wrapper; none in mdata's source today. Improvement
+  is correct as public-surface symmetry — just unmotivated by
+  mdata's current usage.
+- ❌ Non-default codecs (LZ4/Snappy/Uncompressed/Gzip/Brotli) — no
+  Phase 1 use case; revisit if mdata Sprint 29 (gw latency) or
+  Sprint 40 (Type-2 benchmark) surfaces a write/read-bound table.
+- ❌ Explicit `row_group_size=` — chili's auto-sizing
+  (`df.height/16` clamped to [1024, 32768] when sort_columns is
+  non-empty) hits the right balance for mdata's `where symbol=X`
+  patterns.
+
+**4 forward-looking suggestions** captured in
+[`ideas.md`](ideas.md) (`load_partitioned_df_eager`,
+chili-native read overhead profile, ≥100k-row CI bench fixture,
+struct-shaped FFI for `ParquetWriteConfig`). Each has an explicit
+trigger condition; none are scoped for Sprint 16+ yet.

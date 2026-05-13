@@ -8,7 +8,7 @@ auto-detected by cargo.
 ## Prerequisites
 
 - macOS (Apple Silicon or Intel) or Linux
-- Rust toolchain (stable; project is edition 2024)
+- Rust toolchain — stable ≥ **1.95** (edition 2024). Required since the 2026-05-13 merge of upstream main brought in `sysinfo = "0.39"`, which requires rustc 1.95. No `rust-toolchain.toml` pin in-tree; run `rustup update stable` if you're behind.
 - [uv](https://docs.astral.sh/uv/) ≥ 0.5
 
 ## Setup steps

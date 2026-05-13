@@ -211,6 +211,36 @@ compression of those bytes is configurable.
   `9682bed9ee1dca29a6da1d78932a0f1948146a1454d8fb23c56cb01b65271f61`,
   size 1105 bytes). See `crates/chili-py/tests/test_engine.py::TestParquetWriteConfig::test_default_args_byte_equivalent_to_0_8_2`.
 
+## Validation 2026-05-09 (post-delivery, real-data)
+
+mdata adopted the 0.8.3 wheel and benched the codec axis on three real
+production HDB partitions (~4M rows of OHLCV-shape data; 11 cols; mixed
+Date / Datetime / Utf8 / Int / Float dtypes). Full results in
+`~/code/mdata/docs/sync/chili_0.8.3_upgrade_assessment_2026-05-09.md` §2.
+
+Confirmed at production scale:
+
+| Claim | Synthetic (chili 1000-row fixture) | Real-data (mdata 2.03M rows) | Holds? |
+|---|---|---|---|
+| `compression=None` ≡ explicit `"zstd"` (byte-equiv) | sha256 match | byte counts match across 3 partitions | ✅ |
+| ZSTD vs uncompressed | 3.17× smaller (ratio 0.32) | 1.88× smaller (ratio 0.53) | ✅ direction; magnitude shrinks |
+| ZSTD vs Snappy/LZ4 | 1.88× smaller | 1.34–1.35× smaller | ✅ direction; magnitude shrinks |
+| Mixed-codec read transparency (§4) | not exercised | confirmed across `pl.scan_parquet` + chili `eval`, all 4 codecs | ✅ |
+| ZSTD read penalty | ±1.5% on 1000-row | +12ms on 2M-row full scan; +5–12ms on filtered reads | ✅ small absolute; fits Q22 latency budgets |
+| ZSTD write penalty | not benched | +15–30% vs uncompressed; +10–25% vs LZ4/Snappy on 2M-row | ✅ irrelevant at archiver flush cadence |
+
+**Calibration insight (durable):** synthetic small-fixture bench
+overstates ZSTD storage win by ~70 % vs production OHLCV. The
+default-codec choice is still right; the *magnitude* of the win is
+smaller than the 1000-row fixture suggests. Future codec-axis
+decisions should use ≥ 100k-row fixtures (see `docs/sync/ideas.md`
+[validation] entry, mdata-offered fixture).
+
+**mdata adoption decision:** option 1 (smoke pass). ZSTD default kept
+across all Type 1 / Type 3 tables; Type 2 codec choice deferred to
+mdata Sprint 40. No per-table opt-in to non-default codecs Phase 1.
+0.8.3 wheel pinned for all mdata work going forward.
+
 ## Cross-references
 
 - Sprint 15 dispatch brief: [`../sim/sprint_15_dispatch_brief_2026-05-09.md`](../sim/sprint_15_dispatch_brief_2026-05-09.md)
