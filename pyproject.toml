@@ -1,0 +1,8 @@
+[project]
+name = "chili-bus"
+version = "0.0.1"
+description = "Repo-root Python env for chili's vantage bus thin client. NOT the chili-sauce wheel (that lives in crates/chili-py/)."
+requires-python = ">=3.10"
+dependencies = [
+    "websockets>=14.0",
+]
