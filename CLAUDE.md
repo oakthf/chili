@@ -154,3 +154,9 @@ See `.cross_comms/config.json`'s `subscriptions:` list. Topic ACL registry: `~/t
 ### Token
 
 `.cross_comms/.chili.token` (mode 0600, gitignored). If lost: ask the principal to issue a replacement.
+
+### Python runtime — always `uv run python` for bus ops
+
+chili's `/usr/bin/python3` is the macOS Command Line Tools 3.9, which lacks `datetime.UTC` (added in 3.11). Any script that publishes to `.cross_comms/outbox/` and stamps `ts_utc` itself MUST use `uv run python` (or `uv run python3`) so it picks up the root `pyproject.toml`'s `requires-python = ">=3.10"` and chili's venv 3.12. Bare `python3 -c "from datetime import UTC, ..."` will fail silently — bash captures the traceback and the outbox file ends up with `"ts_utc": ""`. Vantage server-stamps to recover, but the convention is for senders to fill it themselves.
+
+The launchd thin client already runs via `/opt/homebrew/bin/uv run python ...`; this rule binds for ad-hoc Claude / shell-script publishers too.
