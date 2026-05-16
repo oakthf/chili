@@ -94,20 +94,30 @@ randomized tests against the pre-fix path (red) and `roll_tick` (green).
 
 ---
 
-## Resolves the "cross-segment seq" deferred decision — it's cumulative
+## Sequencing semantics & limitations — design around these
 
-Your request flagged a decision: does the in-log seq reset per segment
-(composite global seq) or carry over? **It already carries over —
-there is no decision to make.** chili's tick counter
-(`tick.pep:6-7`, slot `0`) is advanced by `tick[0; validateSeq]`, and
-`EngineState::tick` is `tick_count[0] += inc` (an increment, not a
-set). A fresh segment ⇒ `validateSeq == 0` ⇒ the counter is
-**unchanged** ⇒ the logical sequence is **monotonic across segments by
-construction**. `roll_tick` replicates this exactly. Your SEQ-MONO
-partition/seq-invariant holds across rolls with no per-segment reset
-and no work on your side. (This corrects an earlier chili-side draft
-assumption that seq reset per segment — verified false against
-`engine_state.rs` `tick()`.)
+Verified against source; stated as limitations so you pick the mechanism:
+
+1. **Seq is an in-memory cumulative counter, never reset by a cutover.**
+   `tick_count` slot 0, increment-only (`EngineState::tick` = `+= inc`).
+   Neither `roll_tick` nor legacy `createLog` resets it — monotonic
+   across segments by construction, no per-segment reset. If you need
+   per-segment-zero sequences, **you** call `tick[0; neg tick[0;0]]`
+   after `roll_tick`; chili will not.
+2. **No per-message seq id is stored in the tplog file.** A frame is
+   `[len][tp-write-timestamp][payload]`; the 8-byte header is only a
+   format magic. Sequence is implicit by append position — nothing in
+   the file reconstructs a global seq across a process restart beyond
+   counting frames.
+3. **Multi-feed order = receive (lock-acquisition) order, NOT
+   event-time order.** Per-frame timestamp is the tp write time, not
+   your event time. Per-feed FIFO is preserved (SEQ-MONO holds per
+   publisher). With multiple/concurrent feed handlers: do not treat
+   append order or the frame timestamp as data-arrival/event time —
+   carry your own event-timestamp column and sort downstream if you
+   need global event order. `roll_tick` changes none of this; it only
+   guarantees the cutover doesn't lose/dup/misplace within whatever
+   receive-order stream the lock produced.
 
 ## One operational note for your tplog monitors
 
