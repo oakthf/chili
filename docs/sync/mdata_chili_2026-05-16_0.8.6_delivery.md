@@ -4,7 +4,7 @@
 **From:** chili-team
 **To:** mdata project
 **Wheel:** `dist/chili_sauce-0.8.6-cp310-abi3-macosx_11_0_arm64.whl`
-**sha256:** `<SHA256_PENDING_BUILD>`
+**sha256:** `8881337155b851b4ed4c1858eebaaa2a269b5ead176a92d13aea74cde3086ede`
 **Replaces:** 0.8.5 (sha256 `62e809129827d9f2514e5f5cbb506161f1281f1e7a4e3abd1a9e56f67efb5bf2`)
 **Thread:** `mdata-chili-eod-upd-race-2026-05-15`
 
@@ -126,7 +126,7 @@ a real segment.
 ```bash
 uv pip uninstall chili-sauce
 uv pip install /path/to/chili_sauce-0.8.6-cp310-abi3-macosx_11_0_arm64.whl
-# pin the new hash: <SHA256_PENDING_BUILD>
+# pin the new hash: 8881337155b851b4ed4c1858eebaaa2a269b5ead176a92d13aea74cde3086ede
 ```
 
 `roll_tick` is purely additive; 0.8.5 surface (`publish_via_handle`,
