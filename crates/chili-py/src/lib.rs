@@ -696,6 +696,44 @@ impl PyEngineState {
         py.detach(move || map_spicy_error(self.inner.publish_via_handle(&h, &table, &df_spicy)))
     }
 
+    /// Atomically roll the tplog to the next segment (Sprint 18; mdata
+    /// wishlist v2 P0, thread `mdata-chili-eod-upd-race-2026-05-15`).
+    ///
+    /// Holds chili's internal handle write-lock across open-next →
+    /// swap-writer (same handle id) → fsync+close-old, so a concurrent
+    /// inbound `.tick.upd` is serviced by exactly one valid handle and
+    /// lands wholly in the old segment or wholly in the new one — never
+    /// dropped (`InvalidHandleErr`), never misplaced into the wrong
+    /// segment. Replaces the racy `engine.eod(d)` + `init_tick(..d+1)`
+    /// pair at the segment boundary; no Python-side drain barrier
+    /// required.
+    ///
+    /// Parameters
+    /// ----------
+    /// log_dir : str
+    ///     Same directory string passed to `init_tick` (chili appends
+    ///     `segment_label` to it via plain concatenation).
+    /// segment_label : str
+    ///     Opaque caller-owned next-segment path component. A date, a
+    ///     zero-padded UHF counter — anything. The caller owns the
+    ///     monotonic increment and naming convention. Must be non-empty.
+    ///
+    /// Notes
+    /// -----
+    /// Cutover-only: does NOT fire the EOD broadcast. Call
+    /// `engine.eod(d)` first if a `(eod;d)` broadcast is wanted.
+    /// Idempotent: a repeat call once the live handle already points at
+    /// `segment_label` is a no-op. The logical tick sequence is
+    /// cumulative across segments (carry-over, matching `.tick.createLog`).
+    ///
+    /// GIL is released around the cutover per the Sprint 14 convention.
+    fn roll_tick(&self, py: Python<'_>, log_dir: &str, segment_label: &str) -> PyResult<()> {
+        self.check_fork()?;
+        let log_dir = log_dir.to_owned();
+        let segment_label = segment_label.to_owned();
+        py.detach(move || map_spicy_error(self.inner.roll_tick(&log_dir, &segment_label)))
+    }
+
     /// Start a TCP listener on the given port in a background thread.
     ///
     /// The listener runs until the process exits.  The GIL is released so

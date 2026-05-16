@@ -699,6 +699,46 @@ impl EngineState {
         }
     }
 
+    /// Open a `file://` path as a tplog writer: open (read+write+create,
+    /// no truncate) → detect `ConnType` from the existing content
+    /// (`New` empty / `File` <8 bytes / `Sequence` `[255,0,0,0]` magic)
+    /// → seek to EOF so writes append. Sprint 18: extracted verbatim
+    /// from `open_handle`'s `file://` arm so `roll_tick` reuses the
+    /// EXACT same file-prep (audit CRITICAL-1: a hand-rolled open in
+    /// `roll_tick` that omitted the EOF seek would clobber a
+    /// pre-existing segment's head). The single source of truth — a
+    /// future change here cannot desync the two callers.
+    fn prepare_file_writer(path: &str) -> SpicyResult<(Box<dyn ReadWrite>, ConnType)> {
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .map_err(|e| SpicyError::Err(e.to_string()))?;
+        let metadata = file
+            .metadata()
+            .map_err(|e| SpicyError::Err(e.to_string()))?;
+        let conn_type = if metadata.len() == 0 {
+            ConnType::New
+        } else if metadata.len() < 8 {
+            ConnType::File
+        } else {
+            let mut header = [0u8; 4];
+            file.read_exact(&mut header)
+                .map_err(|e| SpicyError::Err(format!("failed to read header, error: {}", e)))?;
+            if [255, 0, 0, 0] == header {
+                ConnType::Sequence
+            } else {
+                ConnType::File
+            }
+        };
+        file.seek(SeekFrom::End(0))
+            .map_err(|e| SpicyError::Err(format!("failed to seek to end of file, error: {}", e)))?;
+        let rw: Box<dyn ReadWrite> = Box::new(file);
+        Ok((rw, conn_type))
+    }
+
     pub fn open_handle(&self, uri: &str, h: i64) -> SpicyResult<SpicyObj> {
         let mut callback = None;
         let uri = if h > 0 {
@@ -730,36 +770,9 @@ impl EngineState {
                 } else if schema == "chili" {
                     (IpcType::Chili, path, 9)
                 } else if schema == "file" {
-                    let mut file = fs::OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .create(true)
-                        .truncate(false)
-                        .open(path)
-                        .map_err(|e| SpicyError::Err(e.to_string()))?;
-                    let metadata = file
-                        .metadata()
-                        .map_err(|e| SpicyError::Err(e.to_string()))?;
-                    let conn_type = if metadata.len() == 0 {
-                        ConnType::New
-                    } else if metadata.len() < 8 {
-                        ConnType::File
-                    } else {
-                        let mut header = [0u8; 4];
-                        file.read_exact(&mut header).map_err(|e| {
-                            SpicyError::Err(format!("failed to read header, error: {}", e))
-                        })?;
-                        if [255, 0, 0, 0] == header {
-                            ConnType::Sequence
-                        } else {
-                            ConnType::File
-                        }
-                    };
-                    file.seek(SeekFrom::End(0)).map_err(|e| {
-                        SpicyError::Err(format!("failed to seek to end of file, error: {}", e))
-                    })?;
+                    let (rw, conn_type) = Self::prepare_file_writer(path)?;
                     let h = self.set_handle(
-                        Some(Box::new(file)),
+                        Some(rw),
                         &format!("file://{}", path),
                         &uri,
                         false,
@@ -813,6 +826,139 @@ impl EngineState {
         let mut handle = self.handle.write();
         handle.shift_remove(handle_num);
         Ok(SpicyObj::Null)
+    }
+
+    /// Sprint 18 — atomic tplog segment rollover (mdata wishlist v2 P0;
+    /// thread `mdata-chili-eod-upd-race-2026-05-15`).
+    ///
+    /// Replaces the racy `.tick.createLog` close-then-reopen pair
+    /// (`tick.pep:9`→`:10`, two separate `handle.write()` acquisitions
+    /// with the id `shift_remove`d in between). Holds `handle.write()`
+    /// across the whole writer cutover **keeping the same handle id**,
+    /// so a concurrent inbound `.tick.upd` (`sync()` `:971`) either ran
+    /// fully before the swap (→ old segment) or runs fully after (→ new
+    /// segment): never `InvalidHandleErr` (gap-loss), never misplaced
+    /// into the wrong segment via id-reuse (`set_handle:874` derives
+    /// `1+max(keys)` — a single-tplog tickerplant re-derives the freed
+    /// id). The swap point is the crisp day/segment boundary.
+    ///
+    /// `segment_label` is an opaque caller-owned path component (a
+    /// date, a zero-padded UHF counter, …) appended to `log_dir`
+    /// exactly as `.tick.createLog` does (`.tick.msgLog: logDir+date`).
+    /// Cutover-only: does NOT fire `signal_eod` (it filters
+    /// `ConnType::Publishing` and skips the `Sequence` tplog handle —
+    /// independent by construction). Idempotent: a repeat call once the
+    /// live handle already points at `segment_label` is a no-op.
+    ///
+    /// Failure artifact (review MAJOR, Sprint 18): the next-segment file
+    /// is `create`-opened (by `prepare_file_writer`) BEFORE the old
+    /// segment is fsync'd. If that fsync errors, `roll_tick` returns
+    /// `Err` with the old segment still live and writable (no swap), but
+    /// a **zero-byte next-segment file may be left on disk**. This is
+    /// safe and retry-correct: a re-invocation sees `len==0 → New`,
+    /// `validateSeq` returns 0, and the open is idempotent — no data is
+    /// lost or duplicated. File-count monitors (e.g. mdata's tplog
+    /// probes) should treat a zero-byte trailing segment as "roll did
+    /// not complete; retry pending", not as a real segment.
+    pub fn roll_tick(&self, log_dir: &str, segment_label: &str) -> SpicyResult<()> {
+        if segment_label.is_empty() {
+            return Err(SpicyError::Err(
+                "roll_tick: segment_label must not be empty".to_owned(),
+            ));
+        }
+        let h = match self.get_var(".tick.msgHandle")? {
+            SpicyObj::I64(h) => h,
+            other => {
+                return Err(SpicyError::Err(format!(
+                    "roll_tick: .tick.msgHandle is not an i64 handle: {:?}",
+                    other
+                )));
+            }
+        };
+        let next_path = format!("{}{}", log_dir, segment_label);
+        let next_uri = format!("file://{}", next_path);
+
+        // Early idempotent short-circuit: if the live handle already
+        // points at this segment, return before any file I/O. This
+        // makes the realistic EodScheduler-retry path a cheap no-op and
+        // — critically — keeps `validateSeq`'s whole-file walk + torn-
+        // tail `set_len` from ever running against an ALREADY-LIVE
+        // segment (which a concurrent writer could be appending to).
+        // Callers must single-flight rolls (do not invoke `roll_tick`
+        // concurrently with itself for the same handle); mdata's EOD is
+        // a single asyncio task, so this holds. A true concurrent
+        // double-roll is still serialized by the `handle.write()` swap
+        // below and re-checked there.
+        {
+            let handle = self.handle.read();
+            if let Some(e) = handle.get(&h)
+                && e.uri == next_uri
+            {
+                return Ok(());
+            }
+        }
+
+        // Validate / recover the next segment BEFORE it becomes the
+        // live handle — matches `.tick.createLog:7` (`validateSeq`
+        // precedes the open). No `.tick.upd` can race a not-yet-live
+        // file, and the whole-file walk + torn-tail `set_len` stays
+        // OUT of the `handle.write()` critical section (audit OPP-1).
+        // Fresh segment ⇒ 0.
+        let seq_delta = match self.fn_call(
+            ".broker.validateSeq",
+            &[
+                &SpicyObj::String(next_path.clone()),
+                &SpicyObj::Boolean(false),
+            ],
+        )? {
+            SpicyObj::I64(n) => n,
+            other => {
+                return Err(SpicyError::Err(format!(
+                    "roll_tick: validateSeq returned non-i64: {:?}",
+                    other
+                )));
+            }
+        };
+
+        // Open the next writer BEFORE touching the live handle. If this
+        // errors the old segment is untouched and still writable
+        // (failure-atomicity invariant).
+        let (new_rw, conn_type) = Self::prepare_file_writer(&next_path)?;
+
+        {
+            let mut handle = self.handle.write();
+            let entry = handle.get_mut(&h).ok_or(SpicyError::InvalidHandleErr(h))?;
+            // Idempotent: already rolled to this segment → no-op.
+            if entry.uri == next_uri {
+                return Ok(());
+            }
+            // Durability: fsync the old segment's tail before it stops
+            // being the live writer (mdata PRD §5.1). Bounded; once per
+            // roll; under the lock by design (fsync-inside-lock).
+            if let Some(old) = entry.rw.as_mut() {
+                old.flush().map_err(|e| SpicyError::Err(e.to_string()))?;
+                old.sync_all().map_err(|e| SpicyError::Err(e.to_string()))?;
+            }
+            // Atomic same-id swap. `rw` is replaced (never taken-then-
+            // filled) so it is `Some` at every lock-release point;
+            // `sync()`'s wildcard arm (`:1121`, also covers `rw: None`)
+            // is never reached for this id mid-roll.
+            entry.rw = Some(new_rw);
+            entry.conn_type = conn_type;
+            entry.uri = next_uri;
+            entry.socket = format!("file://{}", next_path);
+            entry.bytes_since_flush.store(0, Ordering::Relaxed);
+        }
+
+        // Cumulative tick counter, matching `.tick.createLog:7`
+        // `tick[0; validateSeq]` — index 0 is the conventional tplog
+        // slot (`tick.pep:6`). `tick()` is `+= inc` and bounds-checks
+        // internally, so a fresh segment (seq_delta 0) leaves the
+        // logical sequence MONOTONIC across segments (carry-over by
+        // construction — NOT a per-segment reset; mdata SEQ-MONO holds).
+        self.tick(0, seq_delta)?;
+        self.set_var(".tick.msgLog", SpicyObj::String(next_path))?;
+        Ok(())
     }
 
     pub fn exists_handle(&self, handle_num: &i64) -> SpicyResult<SpicyObj> {

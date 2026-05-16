@@ -570,3 +570,45 @@ class ChiliEngine:
             so concurrent Python publishers don't serialize on it.
         """
         self.engine.publish_via_handle(h, table, df)
+
+    def roll_tick(self, log_dir: str, segment_label: str) -> None:
+        """Atomically roll the tplog to the next segment.
+
+        Holds chili's internal handle write-lock across open-next →
+        swap-writer (same handle id) → fsync+close-old so a concurrent
+        inbound ``.tick.upd`` is serviced by exactly one valid handle
+        and lands wholly in the old segment or wholly in the new one —
+        never dropped, never misplaced. Replaces the racy
+        ``engine.eod(d)`` + ``init_tick(.., d+1)`` pair at the segment
+        boundary; no Python-side drain barrier required.
+
+        ``roll_tick`` is the safe replacement for the create-next-log
+        step only. It is **cutover-only**: it does NOT fire the EOD
+        broadcast. If a ``(eod;d)`` broadcast is wanted, call
+        ``eod(d)`` first, then ``roll_tick(log_dir, next_label)``.
+
+        Rollover is not date-bound: ``segment_label`` is an opaque
+        caller-owned path component appended to ``log_dir`` exactly as
+        ``init_tick`` does (``.tick.msgLog = log_dir + label``). Pass a
+        date for daily rolls, or a zero-padded counter for size/count-
+        triggered UHF rolls — the caller owns the monotonic increment
+        and naming convention. The logical tick sequence is cumulative
+        across segments (carry-over, matching ``init_tick``).
+
+        Args:
+            log_dir: Same directory string passed to ``init_tick``.
+            segment_label: Opaque next-segment path component
+                (non-empty); caller-owned and monotonically increasing.
+
+        Raises:
+            RuntimeError: if ``segment_label`` is empty, the live
+                ``.tick.msgHandle`` is unset/invalid, the next segment
+                cannot be opened (in which case the current segment is
+                left intact and writable), or the durability fsync of
+                the current segment fails.
+
+        Note:
+            The GIL is released around the cutover so concurrent Python
+            publishers don't serialize on it.
+        """
+        self.engine.roll_tick(log_dir, segment_label)
