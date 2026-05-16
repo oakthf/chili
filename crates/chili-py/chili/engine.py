@@ -612,3 +612,9 @@ class ChiliEngine:
             publishers don't serialize on it.
         """
         self.engine.roll_tick(log_dir, segment_label)
+    def open_handle(self, socket: str) -> int:
+        return self.fn_call(".handle.open", [socket])
+
+    def sync(self, handle_num: int, query: str) -> Any:
+        self.fn_call("set", ["pyHandle", handle_num])
+        return self.eval("pyHandle", [query])
