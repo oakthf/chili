@@ -69,6 +69,25 @@ For the chili-py side:
 cd crates/chili-py && uv run maturin develop && uv run pytest
 ```
 
+### 5. Install the `chili` CLI onto PATH (manual copy — no auto-tracking)
+
+`cargo build --release -p chili-bin` produces `target/release/chili`, but that
+path is **not** on PATH. The shell `chili` command resolves to
+`~/.local/bin/chili`, which is a **plain copied binary**, not a symlink. After
+every release build whose CLI you want to use, re-copy it:
+
+```bash
+cargo build --release -p chili-bin
+cp -f target/release/chili ~/.local/bin/chili
+chili --version   # confirm it matches the just-built version
+```
+
+Because it is a copy, not a symlink, it does **not** track rebuilds — skipping
+the re-copy is how the on-PATH CLI silently went stale to `0.8.1` for an entire
+Sprint-18/19 cycle while `target/release/chili` was current `0.8.6`. Treat
+`cp -f target/release/chili ~/.local/bin/chili` as the final step of any
+release-build that should be reachable from the shell.
+
 ## Why `--workspace --exclude chili-py` is the gate (load-bearing)
 
 `chili-py`'s `Cargo.toml` declares `pyo3 = { features = ["extension-module"] }`. The
@@ -116,6 +135,9 @@ uses Python's runtime loading — no link-time `-lpython` needed there.
   Verify `ls $(grep DYLD .cargo/config.toml | cut -d'"' -f2)/libpython3.12.dylib`.
 - **`uv run pytest` fails with `ImportError: chili module not found`:** maturin
   didn't install the wheel. Re-run `cd crates/chili-py && uv run maturin develop`.
+- **`chili --version` shows an old version after a fresh release build:**
+  `~/.local/bin/chili` is a stale copy — it does not track `target/release/`.
+  Re-run `cp -f target/release/chili ~/.local/bin/chili` (see step 5).
 
 ## Cross-references
 
