@@ -721,3 +721,43 @@ otherwise re-discover this; ~2pp on the symbolization-infra setup
 spread across multiple sprints if the install is shared. Plus
 risk-reduction on the "I have a profile but can't act on it" anti-
 pattern in autonomous run.
+
+### verify-before-claim binds a brief/ADR's *mechanism* claims, not only current-state facts — and the implementer is the last line
+
+**Rule.** A brief/ADR/dispatch claim of the form "component X currently
+*behaves* like Y" (not just "X exists" / "X is at version V") is a
+load-bearing claim. RULE-7 it — open and read the function — before
+writing it into the artifact. A 3-agent audit will NOT catch a wrong
+mechanism claim: audit agents inherit the brief's framing (documented
+2026-05-09 chili Sprint-15 inherited-wrong-premise incident). The
+implementer's first read of the cited code is the last line of
+defense; structure the impl so that read happens before the claim is
+relied on.
+
+**Why.** Sprint 18: the dispatch brief + its 3-agent audit appendix
+both asserted (a) the tplog logical seq "resets per segment ⇒ composite
+global seq" and (b) a "per-handle `tick_count` slot indexed by `h`".
+Reading `EngineState::tick` at implementation showed `tick_count[index]
++= inc` (cumulative carry-over, NOT a reset) and that the tplog slot is
+the literal `0` (`tick.pep:6`), not the handle id. Both claims were
+speculation; all 3 audit agents inherited and propagated the framing
+(audit MAJOR-2 flagged a `tick_count` 1024-bound panic that was moot
+once the mechanism was actually read). This is a confirmed recurrence
+of the chronic speculation-where-verification-is-cheap pattern
+(`feedback_speculation_pattern` memory; 2026-05-09 Sprint-15;
+cross-project mdata incidents) — generalizing
+`~/.claude/rules/verify-before-claim.md`'s "current state" bullet from
+*existence/version* facts to *behavioral/mechanism* claims.
+
+**Apply where.** Every dispatch brief, ADR, audit appendix, or
+cross-project reply that says "X currently does Y" about an existing
+function/lock/counter/format. Especially load-bearing when a
+"deferred decision" or a downstream consumer's design hinges on the
+claimed mechanism (here: mdata's SEQ-MONO partition invariant).
+
+**Cost saved.** Prevented shipping a wrong "deferred cross-segment-seq
+decision" + a wrong seq mental model into the mdata 0.8.6 delivery doc
+and cross-comms reply — i.e. a bad cross-project round-trip plus
+downstream mdata mis-design built on a false premise. Conservatively
+~2–4pp (one mdata clarification cycle) + the inherited-premise risk to
+any v1-25.2 work that consumed the wrong seq model.
