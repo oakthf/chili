@@ -156,5 +156,5 @@ still empirically confirm, but the invariant now holds by construction.
   `docs/sim/sprint_18_dispatch_brief_2026-05-16.md`.
 - ADR 0001 (pub/sub canonical) — Sprint 18 cross-ref note: `roll_tick`
   is cutover-only, does not touch `signal_eod`.
-- Prior delivery: `docs/sync/mdata_chili_2026-05-14_0.8.5_delivery.md`
+- Prior delivery: `docs/history/sync/mdata_chili_2026-05-14_0.8.5_delivery.md`
   (0.8.6 supersedes for mdata).
