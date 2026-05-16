@@ -612,9 +612,17 @@ class ChiliEngine:
             publishers don't serialize on it.
         """
         self.engine.roll_tick(log_dir, segment_label)
+
+    # IPC remote queries (upstream 606d1cc, merged Sprint 19).
     def open_handle(self, socket: str) -> int:
         return self.fn_call(".handle.open", [socket])
 
-    def sync(self, handle_num: int, query: str) -> Any:
+    def sync(self, handle_num: int, query: Any) -> Any:
+        # Adapted for claude-2 (Sprint 19): upstream's `sync` called
+        # `self.eval("pyHandle", [query])`, but claude-2's `eval()` 2nd
+        # positional is `src_path` (ADR 0002 lazy/src_path divergence),
+        # not apply-args. Route via `fn_call` instead — 606d1cc's own
+        # `fn_call` I64 arm (engine_state.rs) → `eval_call` I64 arm
+        # (eval.rs) → `state.sync(h, query)` is the claude-2 path.
         self.fn_call("set", ["pyHandle", handle_num])
-        return self.eval("pyHandle", [query])
+        return self.fn_call("pyHandle", [query])

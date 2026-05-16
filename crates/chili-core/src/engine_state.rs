@@ -6,7 +6,7 @@ use std::{
     io::{self, Read, Seek, SeekFrom, Write},
     net::{TcpListener, TcpStream},
     num::NonZeroUsize,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process,
     sync::{
         Arc, LazyLock,
@@ -1811,42 +1811,31 @@ impl EngineState {
     /// 2. Global `$CHIZPATH/.index`
     ///
     /// Returns the version string, or "latest" as a fallback.
-    pub fn resolve_package_version(
-        &self,
-        pkg_name: &str,
-        chiz_root: &PathBuf,
-    ) -> SpicyResult<String> {
+    pub fn resolve_package_version(&self, pkg_name: &str, chiz_root: &Path) -> SpicyResult<String> {
         // Try local chiz_index.json first
         let local_index_path = PathBuf::from("chiz_index.json");
-        if local_index_path.exists() {
-            if let Ok(content) = fs::read_to_string(&local_index_path) {
-                if let Ok(index) =
-                    serde_json::from_str::<HashMap<String, serde_json::Value>>(&content)
-                {
-                    if let Some(entry) = index.get(pkg_name) {
-                        if let Some(version) = entry["version"].as_str() {
-                            return Ok(version.to_string());
-                        }
-                    }
-                }
-            }
+        if local_index_path.exists()
+            && let Ok(content) = fs::read_to_string(&local_index_path)
+            && let Ok(index) = serde_json::from_str::<HashMap<String, serde_json::Value>>(&content)
+            && let Some(entry) = index.get(pkg_name)
+            && let Some(version) = entry["version"].as_str()
+        {
+            return Ok(version.to_string());
         }
 
         // Try global index at $CHIZPATH/.index
         let global_index_path = chiz_root.join(".index");
-        if global_index_path.exists() {
-            if let Ok(content) = fs::read_to_string(&global_index_path) {
-                if let Ok(index) =
-                    serde_json::from_str::<HashMap<String, serde_json::Value>>(&content)
+        if global_index_path.exists()
+            && let Ok(content) = fs::read_to_string(&global_index_path)
+            && let Ok(index) = serde_json::from_str::<HashMap<String, serde_json::Value>>(&content)
+        {
+            // Global index keys are "pkg-name@version"
+            for (key, value) in &index {
+                if key.starts_with(pkg_name)
+                    && key[pkg_name.len()..].starts_with('@')
+                    && let Some(version) = value["version"].as_str()
                 {
-                    // Global index keys are "pkg-name@version"
-                    for (key, value) in &index {
-                        if key.starts_with(pkg_name) && key[pkg_name.len()..].starts_with('@') {
-                            if let Some(version) = value["version"].as_str() {
-                                return Ok(version.to_string());
-                            }
-                        }
-                    }
+                    return Ok(version.to_string());
                 }
             }
         }
