@@ -1,7 +1,7 @@
 # ADR-0006 — Async upd-notification FFI contract (mdata push-model D-1/D-3)
 
 **Date:** 2026-05-18 (Sprint 21).
-**Status:** **Accepted** (committed before implementation, per Sprint-21 audit BLOCKER-2 — the queue capacity, `UpdEvent` schema, and back-pressure/escalation contract must be fixed before impl + acceptance tests).
+**Status:** **Accepted** (committed before implementation, per Sprint-21 audit BLOCKER-2 — the queue capacity, `UpdEvent` schema, and back-pressure/escalation contract must be fixed before impl + acceptance tests). **Implemented + gate-green Sprint-21 commit `4c3fe0c` (Rust 201 / pytest 97, 0 failed); awaiting user ratification.** Impl-time corrections to this ADR are inline (crossbeam version §3; deps-in-chili-core §Consequences; cross-thread no-deadlock review §Consequences). Field-naming resolved: `cursor_lo`/`cursor_hi` (per-handle delivery ordinal), NOT `seq_*` (audit#2 C6).
 **Cutover:** None for existing surface — purely additive (`upd_notify_fd`/`drain_upds`/`UpdEvent`/`subscribe(resume_from=)`/`get_var_lazy`). No on-disk or wire-format change. tplog remains the source of truth.
 **Supersedes:** None.
 **Related:** `docs/sync/mdata_push_model_proposal_2026-05-17.md` (evaluation + 3-agent audit + mirrored mdata Q1–Q5); ADR-0001 (pub/sub canonical — this is the *subscriber-side delivery notification*, not a new pub/sub channel); ADR-0002/0003 (true-lazy — `get_var_lazy` reuses, unaffected); Sprint-21 dispatch brief + audit appendix.
