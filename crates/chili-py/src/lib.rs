@@ -33,7 +33,7 @@ use std::process;
 use std::sync::Arc;
 
 use chili_core::constant::{NS_IN_DAY, UNIX_EPOCH_DAY};
-use chili_core::{EngineState, SpicyObj, Stack};
+use chili_core::{EngineState, SpicyObj, Stack, UpdEventCore};
 use chili_op::{BUILT_IN_FN, LOG_FN};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Timelike, Utc};
 use indexmap::IndexMap;
@@ -272,6 +272,40 @@ fn spicy_to_py(py: Python<'_>, obj: SpicyObj) -> PyResult<Py<PyAny>> {
     }
 }
 
+/// One applied `upd` batch delivered to a Python subscriber
+/// (Sprint 21 / ADR-0006 — mdata push-model D-1).
+///
+/// ``cursor_lo``/``cursor_hi`` are chili's **per-handle delivery
+/// ordinal** before/after this batch — a monotonic per-handle
+/// position, **not** mdata's per-row ``seq`` column. Per-table
+/// contiguity is the caller's own ``seq`` (Q1 Path-1); these cursor
+/// fields are named ``cursor_*`` (not ``seq_*``) deliberately to
+/// prevent that collision.
+#[pyclass(name = "UpdEvent", frozen)]
+struct UpdEvent {
+    #[pyo3(get)]
+    table: String,
+    #[pyo3(get)]
+    cursor_lo: i64,
+    #[pyo3(get)]
+    cursor_hi: i64,
+    #[pyo3(get)]
+    frame: PyDataFrame,
+}
+
+#[pymethods]
+impl UpdEvent {
+    fn __repr__(&self) -> String {
+        format!(
+            "UpdEvent(table={:?}, cursor_lo={}, cursor_hi={}, rows={})",
+            self.table,
+            self.cursor_lo,
+            self.cursor_hi,
+            self.frame.0.height(),
+        )
+    }
+}
+
 /// Chili evaluation engine; mirrors Rust ``chili_core::EngineState``.
 #[pyclass(name = "EngineState")]
 struct PyEngineState {
@@ -383,6 +417,19 @@ impl PyEngineState {
     fn get_var(&self, py: Python<'_>, id: &str) -> PyResult<Py<PyAny>> {
         self.check_fork()?;
         let obj = py.detach(move || map_spicy_error(self.inner.get_var(id)));
+        spicy_to_py(py, obj?)
+    }
+
+    /// D-2 (Sprint 21 / ADR-0006 §5) — retrieve a variable as a
+    /// `polars.LazyFrame` snapshot for pushdown-capable chaining.
+    ///
+    /// A shallow snapshot-clone under the read-lock then `.lazy()`.
+    /// `.collect()` is byte-identical to :meth:`get_var`;
+    /// projection / predicate pushdown appears in the lazy plan over
+    /// the in-memory frame. GIL released around the native clone.
+    fn get_var_lazy(&self, py: Python<'_>, id: &str) -> PyResult<Py<PyAny>> {
+        self.check_fork()?;
+        let obj = py.detach(move || map_spicy_error(self.inner.get_var_lazy(id)));
         spicy_to_py(py, obj?)
     }
 
@@ -734,6 +781,65 @@ impl PyEngineState {
         py.detach(move || map_spicy_error(self.inner.roll_tick(&log_dir, &segment_label)))
     }
 
+    /// Arm GIL-free `upd` delivery notification and return the
+    /// self-pipe **read** fd (Sprint 21 / ADR-0006 — mdata push-model
+    /// D-1).
+    ///
+    /// The fd is `O_NONBLOCK` + `FD_CLOEXEC`; register it with
+    /// ``asyncio.loop.add_reader(fd, drain_cb)`` (or ``kqueue``). When
+    /// it becomes readable, call :meth:`drain_upds`. Idempotent: every
+    /// call returns the same fd. Arm this **before** :meth:`subscribe`
+    /// so no applied ``upd`` goes unsignalled.
+    ///
+    /// The fd must not be used across ``os.fork`` without re-creation
+    /// (``check_fork`` still guards every method; the close-on-exec is
+    /// the defensive belt for ``multiprocessing`` — Q5).
+    fn upd_notify_fd(&self) -> PyResult<i32> {
+        self.check_fork()?;
+        self.inner
+            .enable_upd_notify()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Drain all applied-`upd` notifications since the last call
+    /// (Sprint 21 / ADR-0006 — D-1). Non-blocking; returns ``[]`` when
+    /// the queue is empty or notification was never armed.
+    ///
+    /// Drains the self-pipe wakeup bytes then the bounded queue, so
+    /// after this returns the fd is not readable until the next
+    /// applied ``upd``. GIL is released around the native drain.
+    fn drain_upds(&self, py: Python<'_>) -> PyResult<Vec<UpdEvent>> {
+        self.check_fork()?;
+        let core: Vec<UpdEventCore> = py.detach(|| self.inner.drain_upds());
+        Ok(core
+            .into_iter()
+            .map(|e| UpdEvent {
+                table: e.table,
+                cursor_lo: e.cursor_lo,
+                cursor_hi: e.cursor_hi,
+                frame: PyDataFrame(e.frame),
+            })
+            .collect())
+    }
+
+    /// Seed the D-3 per-table resume cursors before `subscribe`
+    /// (Sprint 21 / ADR-0006 §4). `cursors` maps table → the
+    /// last-delivered cursor the caller persisted. `.sub.init` /
+    /// `.sub.recover` then replay from the conservative **min** across
+    /// the subscribed topics; mdata's own per-row `seq` does the exact
+    /// per-table dedup (Q1 Path-1), so a bounded over-replay is
+    /// harmless. An unseeded table replays from the start.
+    fn set_resume_cursors(
+        &self,
+        cursors: std::collections::HashMap<String, i64>,
+    ) -> PyResult<()> {
+        self.check_fork()?;
+        for (table, cursor) in &cursors {
+            self.inner.set_resume_cursor(table, *cursor);
+        }
+        Ok(())
+    }
+
     /// Start a TCP listener on the given port in a background thread.
     ///
     /// The listener runs until the process exits.  The GIL is released so
@@ -807,5 +913,6 @@ fn engine_state(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.py().get_type::<SerializationError>(),
     )?;
     m.add_class::<PyEngineState>()?;
+    m.add_class::<UpdEvent>()?;
     Ok(())
 }

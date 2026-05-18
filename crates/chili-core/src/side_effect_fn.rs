@@ -297,6 +297,35 @@ fn tick(state: &EngineState, _stack: &mut Stack, args: &[&SpicyObj]) -> SpicyRes
     state.tick(index, inc)
 }
 
+// resume_cursor[topics] -> i64 — ADR-0006 §4 / D-3. The conservative
+// replay start (min persisted cursor over `topics`; 0 ⇒ full replay).
+// `.sub.init` / `.sub.recover` call this instead of the old hardcoded
+// `0` / `tick[0]`.
+fn resume_cursor(
+    state: &EngineState,
+    _stack: &mut Stack,
+    args: &[&SpicyObj],
+) -> SpicyResult<SpicyObj> {
+    // `topics` arrives as Symbol / String / Series / a (possibly
+    // non-empty) MixedList of syms depending on how the subscription
+    // was constructed. Be tolerant — extract what names we can;
+    // anything unrecognised falls back to the global min (still a safe
+    // lower bound, and 0 when the resume map is empty, i.e. the
+    // no-`resume_from` path). This MUST never error: `.sub.init` calls
+    // it on every subscribe, resume cursor or not.
+    let names: Vec<&str> = match args[0] {
+        SpicyObj::MixedList(items) => items
+            .iter()
+            .filter_map(|o| match o {
+                SpicyObj::Symbol(s) | SpicyObj::String(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect(),
+        other => other.to_str_vec().unwrap_or_default(),
+    };
+    Ok(SpicyObj::I64(state.resume_start_for(&names)))
+}
+
 fn set(state: &EngineState, _stack: &mut Stack, args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
     let id = args[0].str()?;
     let value = args[1];
@@ -587,6 +616,15 @@ pub static SIDE_EFFECT_FN: LazyLock<HashMap<String, Func>> = LazyLock::new(|| {
         (
             "tick".to_owned(),
             Func::new_side_effect_built_in_fn(Some(Box::new(tick)), 2, "tick", &["index", "inc"]),
+        ),
+        (
+            "resume_cursor".to_owned(),
+            Func::new_side_effect_built_in_fn(
+                Some(Box::new(resume_cursor)),
+                1,
+                "resume_cursor",
+                &["topics"],
+            ),
         ),
         (
             "set".to_owned(),

@@ -6,6 +6,7 @@ use std::{
     io::{self, Read, Seek, SeekFrom, Write},
     net::{TcpListener, TcpStream},
     num::NonZeroUsize,
+    os::fd::RawFd,
     path::{Path, PathBuf},
     process,
     sync::{
@@ -50,6 +51,7 @@ use crate::{
     par_df::{DFType, PartitionedDataFrame},
     parse, read_chili_ipc_msg, serde6, serde9,
     side_effect_fn::SIDE_EFFECT_FN,
+    upd_notify::{UpdEventCore, UpdNotify},
     utils::{
         self, MessageType, convert_list_to_df, handle_chili_conn, handle_q_conn, read_q_msg,
         read_q_table_name, send_auth, unpack_socket,
@@ -129,6 +131,17 @@ pub struct EngineState {
     // handle number, rw, is_local, version, ipc type
     handle: RwLock<IndexMap<i64, Handle>>,
     tick_count: RwLock<Vec<i64>>,
+    /// Sprint 21 / ADR-0006 — mdata push-model D-1. Lazily-created
+    /// GIL-free `upd` notification (None until the first
+    /// `enable_upd_notify()`; non-subscribers pay nothing on the
+    /// receive hot path beyond a read-lock + `Option` check).
+    upd_notify: RwLock<Option<Arc<UpdNotify>>>,
+    /// ADR-0006 §4 — D-3 per-table resume cursor (table →
+    /// last-delivered cursor), seeded from `subscribe(resume_from=)`,
+    /// consulted by `.sub.init` / `.sub.recover`. The field is added
+    /// here with D-1 (cheap; avoids touching the struct twice); the
+    /// `.sub.*` wiring lands in the D-3 step.
+    resume_cursor: RwLock<HashMap<String, i64>>,
     job: RwLock<IndexMap<i64, Job>>,
     topic_map: RwLock<HashMap<String, Vec<i64>>>,
     arc_self: RwLock<Option<Arc<Self>>>,
@@ -191,6 +204,8 @@ impl EngineState {
             source: RwLock::new(source),
             handle: RwLock::new(IndexMap::new()),
             tick_count: RwLock::new(vec![0i64; MAX_HANDLE_NUM]),
+            upd_notify: RwLock::new(None),
+            resume_cursor: RwLock::new(HashMap::new()),
             job: RwLock::new(IndexMap::new()),
             topic_map: RwLock::new(HashMap::new()),
             arc_self: RwLock::new(None),
@@ -291,6 +306,27 @@ impl EngineState {
         let vars = self.vars.read();
         match vars.get(id) {
             Some(obj) => Ok(obj.clone()),
+            None => Err(SpicyError::NameErr(id.to_owned())),
+        }
+    }
+
+    /// D-2 (Sprint 21 / ADR-0006 §5) — a variable as a `LazyFrame`
+    /// snapshot. A shallow Arc-clone of the in-memory accumulated
+    /// `DataFrame` under the read-lock, then `.lazy()`. Sound: the IPC
+    /// receive thread only mutates the var under the write-lock, so
+    /// the clone is a stable snapshot — no live view. `.collect()` is
+    /// byte-identical to `get_var(id)`; projection/predicate pushdown
+    /// appears in the lazy plan over the in-memory frame (NOT a
+    /// Parquet scan).
+    pub fn get_var_lazy(&self, id: &str) -> Result<SpicyObj, SpicyError> {
+        let vars = self.vars.read();
+        match vars.get(id) {
+            Some(SpicyObj::DataFrame(df)) => Ok(SpicyObj::LazyFrame(df.clone().lazy())),
+            Some(other) => Err(SpicyError::Err(format!(
+                "get_var_lazy: '{}' is {}, not a DataFrame",
+                id,
+                other.get_type_name()
+            ))),
             None => Err(SpicyError::NameErr(id.to_owned())),
         }
     }
@@ -2221,6 +2257,92 @@ impl EngineState {
         }
         Ok(self.tick_count.read()[index])
     }
+
+    // ---- Sprint 21 / ADR-0006 — mdata push-model D-1 ---------------
+
+    /// Arm GIL-free `upd` notification and return the self-pipe read fd
+    /// (`O_NONBLOCK` + `FD_CLOEXEC`; `asyncio.add_reader`-able).
+    ///
+    /// Idempotent + lazy: first call creates the bounded queue +
+    /// self-pipe; later calls return the same fd. Callers should arm
+    /// this *before* `.sub.init` so no applied `upd` goes unsignalled
+    /// (any gap is recoverable via the tplog — Q4 — but arming first
+    /// avoids the recovery path entirely).
+    pub fn enable_upd_notify(&self) -> io::Result<RawFd> {
+        {
+            let guard = self.upd_notify.read();
+            if let Some(n) = guard.as_ref() {
+                return Ok(n.read_fd());
+            }
+        }
+        let mut guard = self.upd_notify.write();
+        // Re-check under the write lock (another thread may have armed
+        // it between the read-unlock and the write-acquire).
+        if let Some(n) = guard.as_ref() {
+            return Ok(n.read_fd());
+        }
+        let notify = Arc::new(UpdNotify::new()?);
+        let fd = notify.read_fd();
+        *guard = Some(notify);
+        Ok(fd)
+    }
+
+    /// Receive-thread accessor: an `Arc` clone of the notifier iff a
+    /// subscriber has armed it. One uncontended read-lock + (when
+    /// armed) one `Arc` atomic increment per inbound IPC message —
+    /// negligible, and `None` (the common non-subscriber case) is a
+    /// bare `Option` check.
+    pub fn upd_notify(&self) -> Option<Arc<UpdNotify>> {
+        self.upd_notify.read().clone()
+    }
+
+    /// Python-caller-thread drain: non-blocking; empty when notify was
+    /// never armed.
+    pub fn drain_upds(&self) -> Vec<UpdEventCore> {
+        match self.upd_notify() {
+            Some(n) => n.drain(),
+            None => Vec::new(),
+        }
+    }
+
+    /// ADR-0006 §4 — D-3 per-table resume-cursor accessors (the
+    /// `.sub.*` wiring that consumes these lands in the D-3 step).
+    pub fn set_resume_cursor(&self, table: &str, cursor: i64) {
+        self.resume_cursor.write().insert(table.to_owned(), cursor);
+    }
+
+    /// The persisted resume cursor for `table`, or `0` (replay from the
+    /// start of the tplog) when none was seeded.
+    pub fn get_resume_cursor(&self, table: &str) -> i64 {
+        self.resume_cursor.read().get(table).copied().unwrap_or(0)
+    }
+
+    /// ADR-0006 §4 + Q1 Path-1 — the conservative replay start for a
+    /// subscription. `replay` takes a single i64 start but
+    /// `resume_from` is per-table; mdata owns exact per-row dedup via
+    /// its own `seq` (Q1 Path-1), so chili replays from the safe lower
+    /// bound: the **min** persisted cursor across the subscribed
+    /// `topics` (`0` — full replay — if any subscribed topic was never
+    /// seeded, because a fresh table must replay from the start). An
+    /// empty `topics` (subscribe-all) mins over the whole map; an
+    /// empty map is `0`. Over-replay is bounded and harmless — mdata's
+    /// own `seq` filter drops already-seen rows.
+    pub fn resume_start_for(&self, topics: &[&str]) -> i64 {
+        let map = self.resume_cursor.read();
+        if map.is_empty() {
+            return 0;
+        }
+        if topics.is_empty() {
+            return map.values().copied().min().unwrap_or(0);
+        }
+        topics
+            .iter()
+            .map(|t| map.get(*t).copied().unwrap_or(0))
+            .min()
+            .unwrap_or(0)
+    }
+
+    // ----------------------------------------------------------------
 
     pub fn get_table_names(&self, start_with: &str) -> SpicyResult<SpicyObj> {
         let vars = self.vars.read();

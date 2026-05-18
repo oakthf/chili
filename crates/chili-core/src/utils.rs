@@ -11,7 +11,7 @@ use log::{debug, error, info};
 use polars::{frame::DataFrame, prelude::IntoColumn, series::Series};
 use regex::Regex;
 
-use crate::{ConnType, EngineState, Stack, engine_state::ReadWrite, serde6, serde9};
+use crate::{ConnType, EngineState, Stack, UpdEventCore, engine_state::ReadWrite, serde6, serde9};
 
 /// Open a `file://` path for writing: open (read+write+create, no truncate),
 /// detect `ConnType` from existing content (`New`/`File`/`Sequence`),
@@ -341,6 +341,20 @@ pub fn handle_q_conn(
     }
 }
 
+/// D-1 (ADR-0006 §1, Q2 (a)) — is this inbound the `(`upd; table; data)`
+/// message shape the subscriber-notification path intercepts?
+/// `data` being a `DataFrame` is checked at the enqueue site (here we
+/// only need the cheap head/arity test to decide whether to snapshot
+/// the pre-eval cursor).
+fn is_upd_shape(any: &SpicyObj) -> bool {
+    matches!(
+        any,
+        SpicyObj::MixedList(items)
+            if items.len() == 3
+                && matches!(&items[0], SpicyObj::Symbol(s) if s == "upd")
+    )
+}
+
 pub fn handle_chili_conn(
     rw: &mut dyn ReadWrite,
     is_local: bool,
@@ -385,7 +399,23 @@ pub fn handle_chili_conn(
         };
         debug!("eval chili IPC message: {:?}", any);
         stack.clear_vars();
+
+        // D-1 (ADR-0006 §1-3) — GIL-free outbound upd notification.
+        // Snapshot the per-handle delivery cursor *before* eval, but
+        // only when a subscriber has armed notification AND `any` is
+        // the `(`upd; table; data)` shape (Q2 (a) message-shape
+        // interception). `any` is borrowed by `eval`, not moved, so it
+        // is still inspectable afterward. NOTHING on this path touches
+        // pyo3 / `Python` / the GIL (committed-asserted, ADR-0006 §3).
+        let upd_notify = state.upd_notify();
+        let cursor_lo = if upd_notify.is_some() && is_upd_shape(&any) {
+            state.get_tick_count(handle as usize).ok()
+        } else {
+            None
+        };
+
         let res = state.eval(&mut stack, &any, &src_path);
+        let res_ok = res.is_ok();
 
         if message_type == MessageType::Sync {
             match res {
@@ -407,6 +437,31 @@ pub fn handle_chili_conn(
             }
         } else if let Err(e) = res {
             error!("{}", e);
+        }
+
+        // D-1 enqueue: a *successfully-applied async* `upd` with a
+        // subscriber armed. cursor_hi = post-eval delivery ordinal
+        // (after the pepper `upd`'s `tick[this.h; 1]`); cursor_lo =
+        // the pre-eval snapshot. Reading both empirically (not
+        // assuming a fixed +1 increment) keeps the cursor correct
+        // regardless of how `upd` ticks. Blocking enqueue =
+        // back-pressure, never drop (ADR-0006 §3).
+        if res_ok
+            && message_type != MessageType::Sync
+            && let Some(notify) = upd_notify
+            && let Some(cursor_lo) = cursor_lo
+            && let SpicyObj::MixedList(items) = &any
+            && items.len() == 3
+            && let Ok(table) = items[1].str()
+            && let SpicyObj::DataFrame(df) = &items[2]
+            && let Ok(cursor_hi) = state.get_tick_count(handle as usize)
+        {
+            notify.enqueue(UpdEventCore {
+                table: table.to_string(),
+                cursor_lo,
+                cursor_hi,
+                frame: df.clone(),
+            });
         }
     }
 

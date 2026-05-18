@@ -88,6 +88,27 @@ class ChiliEngine:
         """
         return self.engine.get_var(id)
 
+    def get_var_lazy(self, id: str) -> Any:
+        """Retrieve a variable as a ``polars.LazyFrame`` snapshot.
+
+        D-2 (Sprint 21 / ADR-0006 §5). A snapshot-clone of the
+        in-memory accumulated frame then ``.lazy()``, so further
+        ``.filter()`` / ``.select()`` push down in the lazy plan and
+        ``.collect()`` is byte-identical to :meth:`get_var`. Sound vs
+        the IPC receive thread (it mutates only under the write-lock —
+        the snapshot is stable, not a live view).
+
+        Args:
+            id: Variable name (must be a DataFrame-valued variable).
+
+        Returns:
+            A ``polars.LazyFrame``.
+
+        Raises:
+            NameError: If the variable does not exist.
+        """
+        return self.engine.get_var_lazy(id)
+
     def set_var(self, id: str, value: Any):
         """Set or overwrite a variable in the engine.
 
@@ -489,9 +510,66 @@ class ChiliEngine:
             self.is_sub_loaded = True
 
     # The socket should start with chili://hostname:port
-    def subscribe(self, tick_socket: str, topics: Optional[list[str]] = None) -> None:
+    def subscribe(
+        self,
+        tick_socket: str,
+        topics: Optional[list[str]] = None,
+        resume_from: Optional[dict[str, int]] = None,
+    ) -> None:
+        """Subscribe to a tp, optionally resuming from a persisted cursor.
+
+        Args:
+            tick_socket: ``chili://host:port`` of the tickerplant.
+            topics: Tables to subscribe to (``None``/``[]`` = all).
+            resume_from: D-3 (Sprint 21 / ADR-0006 §4) — ``{table:
+                cursor}`` last-delivered positions the caller persisted.
+                When given, replay starts from the conservative **min**
+                across subscribed topics instead of the start of the
+                tplog. chili's cursor is only a monotonic delivery
+                position; per-table gap-free / zero-dup contiguity is
+                the caller's own ``seq`` column (Q1 Path-1) — a bounded
+                over-replay is expected and deduped caller-side.
+                ``.sub.recover`` reuses the same persisted cursors on
+                reconnect (replacing the old latent ``tick[0]``).
+        """
         self.load_sub()
+        if resume_from:
+            self.engine.set_resume_cursors(resume_from)
         self.fn_call(".sub.init", [tick_socket, topics or []])
+
+    # Push-model D-1 (Sprint 21 / ADR-0006)
+    def upd_notify_fd(self) -> int:
+        """Arm GIL-free ``upd`` delivery notification; return the
+        self-pipe **read** fd.
+
+        Register it with ``loop.add_reader(fd, cb)`` (or ``kqueue``);
+        when readable, call :meth:`drain_upds`. The fd is
+        ``O_NONBLOCK`` + ``FD_CLOEXEC``; the call is idempotent (same
+        fd every time). Arm this **before** :meth:`subscribe` so no
+        applied ``upd`` goes unsignalled. Lets an mdata-style rdb/wdb
+        subscriber delete its ~10 ms poll-loop + ``_last_seen_seq``
+        dedup + parallel buffer.
+
+        The fd must not be used across ``os.fork`` without re-creation.
+        """
+        return self.engine.upd_notify_fd()
+
+    def drain_upds(self) -> list:
+        """Drain all applied-``upd`` notifications since the last call.
+
+        Non-blocking; returns ``[]`` when the queue is empty or
+        notification was never armed. Each element is an ``UpdEvent``
+        with ``table``, ``cursor_lo``/``cursor_hi`` (chili's per-handle
+        monotonic delivery ordinal — **not** mdata's per-row ``seq``;
+        per-table contiguity is the caller's own ``seq``, Q1 Path-1)
+        and ``frame`` (the raw delta as sent by the tp, Q3).
+
+        Back-pressure (ADR-0006 §3): the bounded queue blocks the
+        receive thread at capacity (never drops — the tplog is the
+        source of truth); a slow drainer back-pressures the upstream
+        tp, kdb+-like.
+        """
+        return self.engine.drain_upds()
 
     # Publisher functions (Sprint 17)
     def publish_via_handle(self, h: int, table: str, df: pl.DataFrame) -> None:
