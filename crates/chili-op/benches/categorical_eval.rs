@@ -1,8 +1,8 @@
-//! Sprint 13.5 A.2 — Categorical filter eval bench.
+//! Categorical filter eval benchmark.
 //!
-//! Forward-looking evidence for P3.4 fate (Categorical mapping cache). Two
-//! shapes drawn from the same fixture (single partition, 100 symbols ×
-//! `rows_per_symbol`):
+//! Measures the cost of filtering a partitioned table by a categorical
+//! (symbol) column. Two shapes are drawn from the same fixture (single
+//! partition, 100 symbols × `rows_per_symbol`):
 //!
 //! - **`categorical_filter_repeated`** — same query string each iteration
 //!   (`select from t where symbol=`SYM0001`). Measures the steady-state cost
@@ -12,12 +12,9 @@
 //!   parse cache still hits the same query *shape* but the literal symbol
 //!   varies, so any per-call categorical mapping rebuild surfaces here.
 //!
-//! Pre/post comparison: if `distinct` is materially slower than `repeated`,
-//! P3.4 (Categorical mapping cache) has a measurable target. If similar,
-//! the rebuild cost is already negligible and P3.4 should be deferred.
-//!
-//! Sprint 13.5 ships the bench; the fate decision lives in the Sprint 13.5
-//! retro + Sprint 14+ scope.
+//! If `distinct` is materially slower than `repeated`, a categorical mapping
+//! cache would have a measurable impact. If similar, the rebuild cost is
+//! already negligible.
 
 use std::cell::Cell;
 use std::time::Duration;

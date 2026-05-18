@@ -160,7 +160,6 @@ pub fn build_wide_hdb(
             &[],
             false,
             false,
-            None,
         )
         .unwrap();
     }
@@ -183,7 +182,6 @@ pub fn write_one_partition(
         &[],
         false,
         false,
-        None,
     )
     .unwrap();
 }

@@ -1,7 +1,6 @@
-"""Sprint 16 — `engine.add_at_time()` tests.
+"""`engine.add_at_time()` tests.
 
 Thin PyO3 binding around chili's `.job.addAtTime` registered builtin.
-Backs mdata PRD §3.2 Option A EOD timer path.
 """
 
 import time
@@ -19,7 +18,7 @@ class TestAddAtTime:
         e = ChiliEngine(pepper=True)
         e.eval("eod_handler: {[d] eod_log: d}")
         when = datetime.now(timezone.utc) + timedelta(seconds=60)
-        job_id = e.add_at_time("eod_handler", when, "Sprint-16 test")
+        job_id = e.add_at_time("eod_handler", when, "add_at_time test")
         assert isinstance(job_id, int)
         assert job_id > 0
 
@@ -48,14 +47,12 @@ class TestAddAtTime:
             if e.get_var(".test.fired") == 1:
                 break
             time.sleep(0.05)
-        assert e.get_var(".test.fired") == 1, (
-            "scheduled handler did not fire within 2s"
-        )
+        assert e.get_var(".test.fired") == 1, "scheduled handler did not fire within 2s"
 
     def test_default_description_is_empty(self):
         """description is optional; default is empty string."""
         e = ChiliEngine(pepper=True)
-        e.eval("noop: {[] 0}")  # nullary identity-ish — avoids Q2 :: bug
+        e.eval("noop: {[] 0}")
         when = datetime.now(timezone.utc) + timedelta(seconds=60)
         # No description arg — should succeed and return a valid job id.
         job_id = e.add_at_time("noop", when)

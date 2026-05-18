@@ -45,8 +45,13 @@ git apply /Users/oakadmin/code/chili/vendor/polars-core/chili-port-py-1.39.3.pat
 
 # 3. Verify by running fmt_test from the chili repo:
 cd /Users/oakadmin/code/chili
-cargo test --workspace --exclude chili-py -- fmt_test
-#    Expected: `test fmt_duration_series ... ok`
+cargo test --workspace --exclude chili-py -- fmt_duration
+#    Expected: `test fmt_duration_series ... ok` with `1 passed`.
+#    NOTE: the filter is the TEST-FUNCTION name (`fmt_duration`), NOT
+#    the file (`fmt_test.rs`). `cargo test -- fmt_test` matches ZERO
+#    test functions → runs nothing yet exits 0 / prints `test result:
+#    ok` (false-green). Always confirm `1 passed`, not just exit 0.
+#    (Sprint-20 incident: the old `-- fmt_test` survived 2 audit rounds.)
 ```
 
 **Fallback path** (if `chili-port-py-1.39.3.patch` doesn't apply cleanly — e.g.,

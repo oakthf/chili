@@ -3,7 +3,7 @@ use polars::{
     io::{
         SerReader, SerWriter,
         csv::read::{CsvParseOptions, CsvReadOptions},
-        parquet::write::{ParquetCompression, ParquetWriteOptions},
+        parquet::write::ParquetWriteOptions,
     },
     lazy::{
         dsl::col,
@@ -286,52 +286,7 @@ pub fn write_parquet(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
     }
 }
 
-/// Sprint 15 — user-controllable Parquet write options surfaced through
-/// `engine.write_partitioned_df` / `engine.overwrite_partition` kwargs and
-/// the `wpar` chili FFI. `None` on either field preserves Sprint 14
-/// (and earlier) default behavior byte-equivalently. ADR 0005 documents
-/// the default-preservation contract; future default-codec changes
-/// require mdata sign-off (golden rule 4 territory).
-#[derive(Debug, Clone, Default)]
-pub struct ParquetWriteConfig {
-    /// Compression codec. `None` = polars default (Snappy in polars 0.53).
-    pub compression: Option<ParquetCompression>,
-    /// Row group size override. `None` = auto (existing behavior:
-    /// computed from sort_columns + height when sort_columns is non-empty;
-    /// otherwise polars default 262144).
-    pub row_group_size: Option<usize>,
-}
-
-/// Map a chili-side compression name (case-insensitive) to a polars
-/// `ParquetCompression`. Returns a clear `SpicyError` on unknown names
-/// — silent fallback to default would mask user typos (Sprint 15 Part B
-/// halt criterion — audit MINOR #8).
-fn parse_compression_name(name: &str) -> SpicyResult<ParquetCompression> {
-    match name.to_ascii_lowercase().as_str() {
-        "snappy" => Ok(ParquetCompression::Snappy),
-        "zstd" => Ok(ParquetCompression::Zstd(None)),
-        "lz4_raw" | "lz4raw" | "lz4" => Ok(ParquetCompression::Lz4Raw),
-        // Intentionally no `"none"` alias — Python `None` already means
-        // "preserve default" and routes via `SpicyObj::Null`. Allowing
-        // `"none"` as a string would silently produce `Uncompressed`
-        // files when users expect default behavior (material footgun).
-        "uncompressed" => Ok(ParquetCompression::Uncompressed),
-        "gzip" => Ok(ParquetCompression::Gzip(None)),
-        "brotli" => Ok(ParquetCompression::Brotli(None)),
-        other => Err(SpicyError::Err(format!(
-            "unknown compression '{}'; expected snappy / zstd / lz4_raw / uncompressed / gzip / brotli",
-            other
-        ))),
-    }
-}
-
-// hdb_path, partition, table, df, sort_columns, rechunk, overwrite,
-// compression-name-or-null, row_group_size-or-null
-//
-// args 8 + 9 (compression / row_group_size) are positional optional with
-// Null sentinels = "preserve default." Existing pattern matches the
-// `partition` arg which accepts Date | I64 | Null. ADR 0005 documents
-// the default-preservation contract.
+// hdb_path, partition, table, df, columns, rechunk
 pub fn write_partition(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
     validate_args(
         args,
@@ -343,8 +298,6 @@ pub fn write_partition(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
             ArgType::SymOrSyms,
             ArgType::Boolean,
             ArgType::Boolean,
-            ArgType::Any, // compression name (Sym) or Null
-            ArgType::Any, // row_group_size (I64) or Null
         ],
     )?;
     let hdb_path = args[0].str().unwrap();
@@ -355,55 +308,11 @@ pub fn write_partition(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
     // rechunk | append
     let rechunk = *args[5].bool().unwrap();
     let overwrite = *args[6].bool().unwrap();
-
-    // Build ParquetWriteConfig from optional positional args 7 + 8.
-    let compression = match args[7] {
-        SpicyObj::Null => None,
-        SpicyObj::Symbol(s) => Some(parse_compression_name(s)?),
-        SpicyObj::String(s) => Some(parse_compression_name(s)?),
-        other => {
-            return Err(SpicyError::Err(format!(
-                "compression arg must be a symbol/string or null, got {}",
-                other.get_type_name()
-            )));
-        }
-    };
-    let row_group_size = match args[8] {
-        SpicyObj::Null => None,
-        SpicyObj::I64(n) if *n > 0 => Some(*n as usize),
-        SpicyObj::I64(n) => {
-            return Err(SpicyError::Err(format!(
-                "row_group_size must be a positive integer, got {}",
-                n
-            )));
-        }
-        other => {
-            return Err(SpicyError::Err(format!(
-                "row_group_size arg must be an integer or null, got {}",
-                other.get_type_name()
-            )));
-        }
-    };
-    let config = if compression.is_some() || row_group_size.is_some() {
-        Some(ParquetWriteConfig {
-            compression,
-            row_group_size,
-        })
-    } else {
-        None
-    };
-
     write_partition_native(
-        hdb_path, partition, table_name, df, &columns, rechunk, overwrite, config,
+        hdb_path, partition, table_name, df, &columns, rechunk, overwrite,
     )
 }
 
-// Sprint 15 grew this from 7 → 8 args (added `parquet_options`). The
-// alternative is a struct-shaped argument, which is the long-term
-// direction documented in ADR 0005 §6 ("Provisional aspects"). At 8
-// args we're at the edge of the clippy heuristic; if a 9th args is
-// needed (Sprint 16+), refactor to a struct first.
-#[allow(clippy::too_many_arguments)]
 pub fn write_partition_native(
     hdb_path: &str,
     partition: &SpicyObj,
@@ -412,7 +321,6 @@ pub fn write_partition_native(
     sort_columns: &[&str],
     rechunk: bool,
     overwrite: bool,
-    parquet_options: Option<ParquetWriteConfig>,
 ) -> SpicyResult<SpicyObj> {
     let sort_options = SortMultipleOptions::default();
     // Proposal O — same canonicalize cache as the public `write_partition`.
@@ -434,14 +342,7 @@ pub fn write_partition_native(
     //
     // Compute the target row_group_size based on the actual DataFrame
     // height — this gives good selectivity for partitions of any size.
-    //
-    // Sprint 15 — user override via `parquet_options.row_group_size` takes
-    // precedence over the auto-computed value; otherwise the auto path
-    // preserves Sprint 14 byte-equivalence (ADR 0005).
-    let user_override = parquet_options.as_ref().and_then(|c| c.row_group_size);
-    let row_group_size: Option<usize> = if let Some(rgs) = user_override {
-        Some(rgs)
-    } else if !sort_columns.is_empty() {
+    let row_group_size: Option<usize> = if !sort_columns.is_empty() {
         let n_rows = df.height();
         // Target ~16 row groups, with floor 1024 and ceiling 32768
         let target = (n_rows / 16).clamp(1024, 32768);
@@ -449,7 +350,6 @@ pub fn write_partition_native(
     } else {
         None
     };
-    let user_compression = parquet_options.as_ref().and_then(|c| c.compression);
 
     let mut column_names = df.get_column_names_owned();
     let mut lf = df.clone().lazy();
@@ -576,13 +476,8 @@ pub fn write_partition_native(
 
     if existing_sub_parts.is_empty() || overwrite {
         let sub_par_path = format!("{}_0000", par_path.display());
-        util::write_parquet_to_filepath_with_options(
-            &sub_par_path,
-            &df,
-            user_compression,
-            row_group_size,
-        )
-        .map(|size| SpicyObj::I64(size as i64))
+        util::write_parquet_to_filepath_with_row_group_size(&sub_par_path, &df, row_group_size)
+            .map(|size| SpicyObj::I64(size as i64))
     } else {
         let mut par = existing_sub_parts.len();
         let mut sub_par_path = format!("{}_{:04}", par_path.display(), par);
@@ -595,10 +490,9 @@ pub fn write_partition_native(
                 "Exceed maximum sub partition number 9999".to_string(),
             ))
         } else {
-            let size = util::write_parquet_to_filepath_with_options(
+            let size = util::write_parquet_to_filepath_with_row_group_size(
                 &sub_par_path,
                 &df,
-                user_compression,
                 row_group_size,
             )?;
             if rechunk {

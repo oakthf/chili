@@ -55,22 +55,24 @@ class ChiliEngine:
             lazy: ADR 0002 — when False (default), DataFrame-shaped
                   results are returned eagerly as ``polars.DataFrame``;
                   when True, results are returned as ``polars.LazyFrame``
-                  for further chained ops + ``.collect()``. Both paths
-                  release the GIL around the heavy work (golden rule 5).
+                  for further chained ops + ``.collect()`` (true
+                  cross-FFI lazy with predicate pushdown — ADR 0003,
+                  preserved through the Sprint-20 main merge). Both
+                  paths release the GIL around the heavy work
+                  (golden rule 5).
 
         Returns:
             The result of the evaluation, converted to a Python type.
-            DataFrames are auto-dequantized via registered column scales
-            (see :meth:`set_column_scale`); LazyFrames are returned
-            unmodified — call ``.collect()`` then apply scales manually
-            via :meth:`_apply_column_scales` if needed.
+            Sprint 20 / M-1: results are **no longer auto-dequantized** —
+            callers apply column scales themselves (see
+            :meth:`set_column_scale` / :meth:`_apply_column_scales`),
+            unifying the eager path with the long-standing lazy-path
+            contract. The on-disk + FFI schema stays Int64-quantized
+            (golden rule 4); M-1 only removes the read-time convenience.
         """
         if src_path is None:
             src_path = "repl.chi" if self.is_repl_use_chili_syntax() else "repl.pep"
-        result = self.engine.eval(source, src_path, lazy)
-        if isinstance(result, pl.DataFrame):
-            return self._apply_column_scales(result, source)
-        return result
+        return self.engine.eval(source, src_path, lazy)
 
     def get_var(self, id: str) -> Any:
         """Retrieve the value of a variable by name.
@@ -227,9 +229,6 @@ class ChiliEngine:
         sort_columns: Optional[list[str]] = None,
         rechunk: bool = False,
         overwrite: bool = False,
-        *,
-        compression: Optional[str] = None,
-        row_group_size: Optional[int] = None,
     ) -> int:
         """Write a DataFrame as a date-partitioned Parquet table.
 
@@ -242,15 +241,6 @@ class ChiliEngine:
             sort_columns: Optional columns to sort by before writing.
             rechunk: Re-chunk the data into a single contiguous allocation.
             overwrite: If ``True``, overwrite an existing partition.
-            compression: Optional Parquet compression codec name. One of
-                ``"snappy"`` (default if omitted), ``"zstd"``, ``"lz4_raw"``,
-                ``"uncompressed"``, ``"gzip"``, ``"brotli"``. Case-insensitive.
-                ``None`` preserves the default codec for byte-equivalence
-                with pre-Sprint-15 output (ADR 0005). Sprint 15 / 0.8.3.
-            row_group_size: Optional row group size override. ``None``
-                preserves chili's existing auto-sizing logic (auto-computed
-                clamp 1024..32768 when ``sort_columns`` is non-empty,
-                else polars default 262144). Sprint 15 / 0.8.3.
 
         Returns:
             The number of rows written.
@@ -276,8 +266,6 @@ class ChiliEngine:
                 sort_cols_arg,
                 rechunk,
                 overwrite,
-                compression,  # str | None — Sprint 15 (ADR 0005)
-                row_group_size,  # int | None — Sprint 15 (ADR 0005)
             ],
         )
 
@@ -344,42 +332,6 @@ class ChiliEngine:
             if cast_exprs:
                 df = df.with_columns(cast_exprs)
         return df
-
-    def overwrite_partition(
-        self,
-        df: pl.DataFrame,
-        hdb_path: str,
-        table: str,
-        date: str,
-        sort_columns: Optional[list[str]] = None,
-        rechunk: bool = False,
-        *,
-        compression: Optional[str] = None,
-        row_group_size: Optional[int] = None,
-    ) -> int:
-        """Overwrite a date-partitioned table on disk with new data.
-
-        Deletes all existing shard files for the given date partition, then
-        writes ``df`` as the new content. Use this for replacing a partition
-        in place (e.g., bulk corrections, dedupe replays).
-
-        Distinct from ``write_partitioned_df(overwrite=True)`` only in
-        naming — preserves the API surface mdata depends on.
-
-        ``compression`` and ``row_group_size`` mirror
-        :meth:`write_partitioned_df` (Sprint 15 / ADR 0005).
-        """
-        return self.write_partitioned_df(
-            df,
-            hdb_path,
-            table,
-            date,
-            sort_columns,
-            rechunk,
-            overwrite=True,
-            compression=compression,
-            row_group_size=row_group_size,
-        )
 
     def query_plan(self, query: str, hdb_path: Optional[str] = None) -> str:
         """Return the polars query plan for *query* without executing it.

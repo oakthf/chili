@@ -77,7 +77,7 @@ ndarray-linalg = { version = "0.18", optional = true }
 chili-core = { path = "../chili-core" }
 log = "0.4"
 num = "0.4"
-sysinfo = "0.38.2"
+sysinfo = "0.39"
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }

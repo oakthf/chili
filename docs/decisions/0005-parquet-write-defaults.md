@@ -1,9 +1,23 @@
 # ADR-0005 — Parquet write defaults + override semantics
 
 **Date:** 2026-05-09 (drafted Sprint 15).
-**Status:** Accepted.
+**Status:** **SUPERSEDED 2026-05-18 (Sprint 20).** The user-controllable
+override path (`compression=` / `row_group_size=` keyword-only kwargs on
+`write_partitioned_df`, the `ParquetWriteConfig` struct, `parse_compression_name`,
+and the 9-arg `wpar` builtin) was **removed** in the Sprint-20 `main`→`claude-2`
+merge, adopting upstream hinmeru's lean 7-arg `write_partition_native` /
+`util::write_parquet_to_filepath_with_row_group_size` pair. **The default codec
+is unchanged: ZSTD** — verified at merge time that stock `polars-io 0.53.0`
+`ParquetCompression::default()` is `Zstd(None)` (same as the py-1.39.3 fork);
+on-disk output is byte-stable across the merge. What is gone is only the
+*caller override* + the sorted-partition row-group auto-clamp heuristic
+(perf-only; mdata owns a post-merge ADR-0005 re-bench follow-up). mdata signed
+off (M-1/M-2 + item-3 resolution (ii), 2026-05-18). The empirical
+"default IS Zstd, not Snappy" finding below remains historically valid and is
+the reason the removal is codec-neutral. This ADR is retained in place (not
+historised) as the provenance for *why* dropping the kwargs is safe.
 **Cutover:** None — current default behavior is preserved byte-equivalently. Sprint 15 ships only the user-controllable override path; no on-disk format change.
-**Supersedes:** None.
+**Supersedes:** None. **Superseded by:** Sprint-20 merge (`docs/sim/sprint_20_dispatch_brief_2026-05-18.md`; `docs/sync/mdata_chili_2026-05-18_main_merge_signoff.md` item-3).
 **Related:** [Sprint 15 dispatch brief](../history/sprints/sprint_15_dispatch_brief_2026-05-09.md); [`docs/sync/load_par_df_state_audit.md`](../sync/load_par_df_state_audit.md) (covers Sprint 14 GIL-release audit; this ADR is the write-side equivalent for Sprint 15).
 
 ---

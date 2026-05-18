@@ -1129,7 +1129,7 @@ pub static BUILT_IN_FN: LazyLock<HashMap<String, Func>> = LazyLock::new(|| {
             "wpar".to_owned(),
             Func::new_built_in_fn(
                 Some(Box::new(io::write_partition)),
-                9,
+                7,
                 "wpar",
                 &[
                     "path",
@@ -1139,8 +1139,6 @@ pub static BUILT_IN_FN: LazyLock<HashMap<String, Func>> = LazyLock::new(|| {
                     "sort_columns",
                     "rechunk",
                     "overwrite",
-                    "compression",
-                    "row_group_size",
                 ],
             ),
         ),

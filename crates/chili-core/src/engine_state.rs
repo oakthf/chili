@@ -961,6 +961,37 @@ impl EngineState {
         Ok(())
     }
 
+    pub fn rotate_handle(&self, handle_num: &i64, uri: &str) -> SpicyResult<SpicyObj> {
+        match uri.split_once("://") {
+            Some(("file", path)) => {
+                let (rw, conn_type) = utils::prepare_file_writer(path)?;
+                if conn_type != ConnType::New {
+                    return Err(SpicyError::EvalErr(format!("file '{}' is not empty", path)));
+                }
+                let idx = *handle_num as usize;
+                if *handle_num < 0 || idx >= MAX_HANDLE_NUM {
+                    return Err(SpicyError::HandleOutOfRangeErr(*handle_num, MAX_HANDLE_NUM));
+                }
+                let mut tick_count = self.tick_count.write();
+                self.set_handle(
+                    Some(rw),
+                    &format!("file://{}", path),
+                    uri,
+                    false,
+                    IpcType::Chili,
+                    ConnType::New,
+                    *handle_num,
+                )?;
+                tick_count[idx] = 0;
+                Ok(SpicyObj::Null)
+            }
+            _ => Err(SpicyError::EvalErr(format!(
+                "invalid file uri format, expected 'file://path', got '{}'",
+                uri
+            ))),
+        }
+    }
+
     pub fn exists_handle(&self, handle_num: &i64) -> SpicyResult<SpicyObj> {
         Ok(SpicyObj::Boolean(
             self.handle.read().contains_key(handle_num),
@@ -1132,7 +1163,7 @@ impl EngineState {
                                 let v8 = serde6::serialize(msg)?;
                                 let v8 = if !*is_local { serde6::compress(v8) } else { v8 };
                                 if let Err(e) = utils::write_q_ipc_msg(rw, &v8, MessageType::Sync) {
-                                    self.disconnect_handle(h)?;
+                                    *conn_type = ConnType::Disconnected;
                                     return Err(SpicyError::Err(e.to_string()));
                                 }
                                 // read response
@@ -1155,7 +1186,7 @@ impl EngineState {
                                 if let Err(e) =
                                     utils::write_chili_ipc_msg(rw, &v8, MessageType::Sync)
                                 {
-                                    self.disconnect_handle(h)?;
+                                    *conn_type = ConnType::Disconnected;
                                     return Err(SpicyError::Err(e.to_string()));
                                 }
                                 let mut header = [0u8; 16];

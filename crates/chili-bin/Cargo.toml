@@ -14,12 +14,12 @@ chili-core = { path = "../chili-core" }
 chili-parser = { path = "../chili-parser" }
 mimalloc = { version = "0.1", default-features = false }
 clap = { version = "4.5", features = ["derive"] }
-log = "0.4"
 env_logger = "0.11.8"
 reedline = { version = "0.47.0", features = ["external_printer"] }
 nu-ansi-term = "0.50.3"
 chrono = { workspace = true }
 chumsky = { workspace = true }
+log = "0.4"
 
 [[bin]]
 name = "chili"

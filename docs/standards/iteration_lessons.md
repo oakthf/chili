@@ -761,3 +761,38 @@ and cross-comms reply — i.e. a bad cross-project round-trip plus
 downstream mdata mis-design built on a false premise. Conservatively
 ~2–4pp (one mdata clarification cycle) + the inherited-premise risk to
 any v1-25.2 work that consumed the wrong seq model.
+
+---
+
+## Lesson 19 — Take-main of a refactored API silently breaks every AUTO-MERGED consumer (not just the conflicted files)
+
+**Rule.** In a `main → claude-2` merge, when the decision is "take main" for an
+API whose signature/arity changed (Sprint-20 #3: drop
+`compression`/`row_group_size` → main's 7-arg `write_partition_native`), the
+conflict set (`git diff --diff-filter=U`) is NOT the work boundary. Every
+*auto-merged* file that calls/registers the OLD signature compiles into a
+silent inconsistency. Before declaring resolved, `git grep` the old
+symbol/arity across the WHOLE tree and treat the full gate (cargo
+build+clippy+test, maturin, pytest) as the authoritative enumerator — run it,
+fix what it surfaces, repeat until green. A pre-merge audit's "atomic set"
+list is a floor, not the ceiling.
+
+**Why.** Sprint-20 had **5** such cascades, none in the 16 conflicts, all
+missed by 2 audit rounds + the brief: `chili-bin`/`chili-op` `Cargo.toml`
+move-vs-keep duplicate keys; the `io.rs`→`util.rs`→`benches/common` chain;
+`partition_filter_test.rs` 8-arg call; `built_in_fn.rs` 9-arg `wpar`
+registration (this one manifested as a *false* "query_plan regression" — the
+fixture's write silently misbehaved). Each was caught only by compiling/testing
+the merged tree, never by static review (see memories
+`verifier-must-be-executed`, `no-unblocked-stops`).
+
+**Apply where.** Every `main → claude-2` merge that adopts an upstream API
+refactor. Add to the dispatch brief: "grep old-signature callers tree-wide;
+the gate is the enumerator." Also: a test failure in a *preserved* surface
+after an API take-main is presumptively an auto-merged-consumer cascade, not a
+regression in the preserved surface — diagnose the data path before
+"fixing"/deleting the test.
+
+**Cost saved.** ~3–6pp of mis-attributed debugging per merge (the Sprint-20
+"query_plan regression" red herring alone) + prevents shipping a silently
+broken write path.

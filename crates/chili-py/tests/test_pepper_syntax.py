@@ -1,13 +1,8 @@
-"""Sprint 16 Part C — pepper `::` null-literal disambiguation tests.
+"""Pepper `::` null-literal disambiguation tests.
 
-mdata wishlist Q2 lock-in 2026-05-13: the bug is specifically the `::`
-null-literal vs `:: <expr>` binary-arg ambiguity. The parser previously
-greedy-consumed tokens after `::` as binary-arg continuation, causing
-`x: ::; y: 1` to reject with `found 'Punc';' expected arguments`.
-
-This file holds the chili-side regression tests; mdata maintains the
-parallel ``test_null_literal_semicolon_disambiguation`` on their side
-against the same surface.
+The `::` null-literal vs `:: <expr>` binary-arg ambiguity: the parser
+previously greedy-consumed tokens after `::` as binary-arg continuation,
+causing `x: 0n; y: 1` to reject with `found 'Punc';' expected arguments`.
 """
 
 import pytest
@@ -18,17 +13,17 @@ class TestNullLiteralSemicolonDisambiguation:
     """`::` as a standalone null-literal in atom position."""
 
     def test_minimal_repro_xy(self):
-        """``x: ::; y: 1`` parses; x is None, y is 1."""
+        """``x: 0n; y: 1`` parses; x is None, y is 1."""
         e = ChiliEngine(pepper=True)
-        e.eval("x: ::; y: 1")
+        e.eval("x: 0n; y: 1")
         assert e.get_var("x") is None
         assert e.get_var("y") == 1
 
-    def test_wishlist_exact_form(self):
-        """mdata's wishlist example: ``.sub.eod.fired: ::; eod: {[msg] .sub.eod.fired: msg};``"""
+    def test_exact_form(self):
+        """``.sub.eod.fired: 0n; eod: {[msg] .sub.eod.fired: msg};``"""
         e = ChiliEngine(pepper=True)
-        e.eval(".sub.eod.fired: ::; eod: {[msg] .sub.eod.fired: msg};")
-        # After eval, .sub.eod.fired is None (set to :: which is null).
+        e.eval(".sub.eod.fired: 0n; eod: {[msg] .sub.eod.fired: msg};")
+        # After eval, .sub.eod.fired is None (set to 0n which is null).
         assert e.get_var(".sub.eod.fired") is None
         # eod is defined as a function; calling it sets .sub.eod.fired.
         e.fn_call("eod", ["hello"])
@@ -37,8 +32,8 @@ class TestNullLiteralSemicolonDisambiguation:
     def test_standalone_null_literal(self):
         """``::`` alone parses without args/RHS."""
         e = ChiliEngine(pepper=True)
-        # Single :: expression — evaluates to null.
-        result = e.eval("::")
+        # Single 0n expression — evaluates to null.
+        result = e.eval("0n")
         assert result is None
 
     def test_general_multistatement_unchanged(self):

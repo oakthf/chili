@@ -1,30 +1,26 @@
 """Concurrent throughput bench for chili-py.
 
-Sprint 13.5 measurement infra. Produces evidence for Sprint 14 readiness gate
-(P3.2b — release GIL on `load_par_df` FFI). Outputs JSON-line per shape × N.
+Measures GIL-release effectiveness across concurrent workloads.
+Outputs JSON-line per shape × N.
 
 Shapes:
 
 - ``concurrent_eval``        — N threads call ``engine.eval(query)``. eval()
-                               already releases the GIL (lib.rs:362). Sprint 14
-                               reference: should scale near-linearly with N.
+                               releases the GIL. Should scale near-linearly
+                               with N.
 - ``concurrent_load``        — N threads call ``engine.load_partitioned_df``.
                                Python wrapper routes through ``fn_call`` which
-                               releases the GIL (lib.rs:527).
+                               releases the GIL.
 - ``concurrent_load_direct`` — N threads call ``engine.engine.load_par_df``
-                               (the FFI binding directly). This path does NOT
-                               release the GIL (lib.rs:532-536). This is
-                               Sprint 14 P3.2b's literal target.
-- ``single_eval``            — 1 thread, same eval workload. GIL-release-cost
-                               reference for the single-thread path.
+                               (the FFI binding directly). This path releases
+                               the GIL as well.
+- ``single_eval``            — 1 thread, same eval workload. Baseline reference
+                               for the single-thread path.
 
 Usage::
 
     python bench_concurrent.py                      # full sweep, JSON-line stdout
     python bench_concurrent.py --shape concurrent_load --workers 4 --duration 30
-
-The full-sweep form is what Part B (baseline capture) consumes. The single-shape
-form with explicit ``--workers --duration`` is what Part C (samply profile) wraps.
 """
 
 from __future__ import annotations
