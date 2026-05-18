@@ -8,11 +8,15 @@
 **Replaces:** mdata's running 0.8.6 IPC-superset wheel (mdata-cited sha `8878907…`)
 **Thread:** push-model `docs/sync/mdata_push_model_proposal_2026-05-17.md`
 
-> **⚠ DELIVERY GATE — not yet sent.** This wheel + doc are built and
-> staged. Per the Sprint-20 signoff, the *delivery* (the cross-comms
-> send) is gated on mdata's explicit **(ii) + 0.8.7-only** nod. The
-> Sprint itself is ratified; this artifact is ready; the send awaits
-> mdata's confirmation and the chili principal's go-ahead.
+> **✅ GATE CLEARED 2026-05-19.** mdata's **(ii) + 0.8.7-only** nod
+> received — both YES, no caveats ((ii) accepted, kwarg-drop already
+> landed mdata `b8f279a`; 0.8.7-only accepted; recorded mdata
+> `fc4c800`). Sprint 21 ratified; wheel built + sha-verified. The only
+> remaining step is the cross-comms send itself, pending the chili
+> principal's final go-ahead. **On receipt mdata will:** sha-verify the
+> wheel == `1608317e23fc33f0ad2f5765fa46c495099ab15661e29fccb2c8ea5848636482`,
+> bump the pin, then run the 769-suite + D-1/D-2/D-3 acceptance + the
+> ADR-0005 row-group re-bench.
 
 ---
 
