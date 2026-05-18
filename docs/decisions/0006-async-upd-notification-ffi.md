@@ -1,0 +1,55 @@
+# ADR-0006 — Async upd-notification FFI contract (mdata push-model D-1/D-3)
+
+**Date:** 2026-05-18 (Sprint 21).
+**Status:** **Accepted** (committed before implementation, per Sprint-21 audit BLOCKER-2 — the queue capacity, `UpdEvent` schema, and back-pressure/escalation contract must be fixed before impl + acceptance tests).
+**Cutover:** None for existing surface — purely additive (`upd_notify_fd`/`drain_upds`/`UpdEvent`/`subscribe(resume_from=)`/`get_var_lazy`). No on-disk or wire-format change. tplog remains the source of truth.
+**Supersedes:** None.
+**Related:** `docs/sync/mdata_push_model_proposal_2026-05-17.md` (evaluation + 3-agent audit + mirrored mdata Q1–Q5); ADR-0001 (pub/sub canonical — this is the *subscriber-side delivery notification*, not a new pub/sub channel); ADR-0002/0003 (true-lazy — `get_var_lazy` reuses, unaffected); Sprint-21 dispatch brief + audit appendix.
+
+---
+
+## Context
+
+mdata's rdb/wdb subscribers poll `engine.get_var(table)` every ~10 ms + diff a `_last_seen_seq` watermark + keep a parallel buffer — solely because chili's pure-Rust IPC receive thread (`handle_chili_conn`, `utils.rs:344`) applies `upd` but never tells Python. This ADR fixes the contract for an outbound GIL-free notification so that workaround layer is deletable. mdata's gate answers are locked (Q1 Path-1, Q2 (a), Q3 raw-as-sent, Q4 per-drain-ack, Q5 no-fork+close-on-exec).
+
+## Decision
+
+### 1. Notification primitive — POSIX self-pipe (NOT `eventfd`)
+
+`eventfd(2)` is Linux-only; chili dev + the delivered wheel target macOS (darwin). The notification fd is a **POSIX self-pipe** (`libc::pipe` + `O_NONBLOCK` on the read end), portable to linux+darwin. `libc` is added to `chili-py` deps. Step-0 POC (2026-05-18) confirmed self-pipe + `asyncio.loop.add_reader` + `FD_CLOEXEC` works on darwin. A `#[cfg(target_os="linux")] eventfd` fast-path is explicitly **out of scope** (self-pipe is sufficient; one byte per wakeup, coalesced).
+
+Both pipe ends are created **`FD_CLOEXEC`** (Q5: mdata uses `multiprocessing`; the fd must not survive `exec`/leak into children). `check_fork()` (`lib.rs:288`) still guards method calls; the close-on-exec is the defensive belt mdata requested. Contract: **the notify fd must not be used across `os.fork` without re-creation** — committed-tested.
+
+### 2. `UpdEvent` schema (Python-visible `#[pyclass]`)
+
+```
+UpdEvent { table: str, cursor_lo: int, cursor_hi: int, frame: pl.DataFrame }
+```
+
+- `cursor_lo`/`cursor_hi` = chili's **per-handle `tick_count` delivery ordinal** (value before/after the batch's `tick[this.h;1]`). **NOT** mdata's per-row `seq`. Q1 Path-1: per-table contiguity is the caller's own `seq` column; chili's cursor is only a monotonic delivery position. Field names are deliberately `cursor_*` (not `seq_*`) to prevent the documented seq-collision confusion (Sprint-21 audit#2 C6).
+- `frame` = the **raw delta as sent by the tp** (Q3), delivered as a Polars `DataFrame` Arc-shallow-clone of the inbound `serde9` MixedList payload — **no re-serialize / no re-decode** (not literally zero-copy: `DataFrame::clone()` is a shallow Arc-clone of column buffers). mdata's accumulation is unkeyed so raw == post-`upsert`; pinned raw-as-sent to keep mdata's `seq` authoritative.
+
+### 3. Bounded queue + back-pressure
+
+- Bounded **`crossbeam_channel::bounded(N)`** with **`N = 4096`** (crossbeam 0.8.4 already in `Cargo.lock`). `N` is a fixed constant this sprint; tunability is a future-sprint concern (documented, not built).
+- The IPC receive thread (`handle_chili_conn`, a dedicated `std::thread`) does **enqueue + 1-byte self-pipe `write` only**, GIL-free (no `Py`/`Python::with_gil` anywhere on this path — committed-asserted). `drain_upds()` runs on the Python caller thread (distinct thread) and takes the GIL only there.
+- **Back-pressure = blocking send, never drop.** At capacity the receive thread **blocks** in `send`, which back-pressures the upstream tp's blocking write (kdb+-like). The tplog is the source of truth; Python catches up. There is **no drop path**.
+- **Escalation contract (Sprint-21 audit new halt-trigger 2b):** if blocking back-pressure ever holds long enough that the upstream tp times out / drops the chili connection, that is a *contract* tension, not a code bug. Resolving it (adding a timeout/drop-mode) is a **user-sign-off decision** — it would weaken the tplog-is-source-of-truth invariant and must not be added silently. Until such a decision, blocking-never-drop stands; recovery from any disconnect is via §4 replay-from-cursor.
+
+### 4. Resumable subscription (D-3) + cursor persistence
+
+- `subscribe(tick_socket, topics, resume_from: dict[str,int] | None = None)`. The replay *mechanism* is pre-built (`replay_chili_msgs_log` `engine_state.rs:605` takes `start`, skips `i < start`).
+- **Cursor storage model (audit MAJOR-3 — the genuinely-new surface):** the per-table resume cursor is held in **engine state** — a new `EngineState` field `resume_cursor: RwLock<HashMap<String,i64>>` (table → last-delivered cursor), seeded from `subscribe(resume_from=)`. `.sub.init` (sub.pep:10, currently `replay[info[0]; 0; …]`) and `.sub.recover` (sub.pep:18, currently `tick[0]`) both consult this map via a new accessor builtin rather than the hardcoded `0`/`tick[0]`. The reconnecting-handle index is passed explicitly (do not inherit `.sub.recover`'s hardcoded handle-0).
+- Q4 durability: the caller persists its durable position as **mdata's own row-`seq`**; "kill -9 loses nothing past last drained" = recovered via this replay-from-cursor, NOT in-flight-queue durability. No disk-backed queue.
+
+### 5. D-2 lazy accessor (independent)
+
+`get_var_lazy(id) -> pl.LazyFrame` = snapshot-clone under `vars.read()` then `.lazy()` (sound: receive thread mutates under the write-lock; no live view). Acceptance: projection/predicate pushdown appears in the lazy plan over the in-memory frame (NOT "reaches the scan"); `.collect()` byte-identical to `get_var`.
+
+## Consequences
+
+- mdata deletes its poll-loop + `_last_seen_seq` dedup + dual-buffer; no safeguard relocates into pepper.
+- New `EngineState` fields (`upd_notify`, `resume_cursor`) must be `Send + Sync` and must not introduce lock-order inversion vs `vars` / `tick_count` / the Sprint-18 handle write-lock (committed cross-thread review).
+- chili-py gains a `libc` dependency.
+- Delivered as a single **0.8.7** wheel cut from claude-2 HEAD *after* Sprint-21 ratifies (Sprint-20 G2 single-delivery model); no intermediate wheel.
+- ADR-0001 unaffected (this is subscriber-side delivery notification, orthogonal to the pub/sub broadcast path).
