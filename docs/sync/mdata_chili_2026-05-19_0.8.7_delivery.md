@@ -6,7 +6,7 @@
 **Wheel:** `dist/chili_sauce-0.8.7-cp310-abi3-macosx_11_0_arm64.whl`
 **sha256:** `1608317e23fc33f0ad2f5765fa46c495099ab15661e29fccb2c8ea5848636482`
 **Replaces:** mdata's running 0.8.6 IPC-superset wheel (mdata-cited sha `8878907…`)
-**Thread:** push-model `docs/sync/mdata_push_model_proposal_2026-05-17.md`
+**Thread:** push-model `docs/history/sync/mdata_push_model_proposal_2026-05-17.md`
 
 > **✅ GATE CLEARED 2026-05-19.** mdata's **(ii) + 0.8.7-only** nod
 > received — both YES, no caveats ((ii) accepted, kwarg-drop already
@@ -126,7 +126,7 @@ only under the write-lock — no live view).
 ## Breaking vs your running wheel (Sprint-20 — you already signed off)
 
 These landed in Sprint 20 (you acked M-1/M-2/(ii) in
-`docs/sync/mdata_chili_2026-05-18_main_merge_signoff.md`), restated
+`docs/history/sync/mdata_chili_2026-05-18_main_merge_signoff.md`), restated
 here because 0.8.7 is the wheel that actually delivers them to you:
 
 1. **M-1 — eager `eval()` no longer auto-dequantizes.** Results are
@@ -190,12 +190,12 @@ from `crates/chili-py` at `claude-2` HEAD.
 ## Cross-references
 
 - Push-model proposal + chili evaluation + 3-agent audit + mirrored
-  Q1–Q5: `docs/sync/mdata_push_model_proposal_2026-05-17.md`
+  Q1–Q5: `docs/history/sync/mdata_push_model_proposal_2026-05-17.md`
 - ADR-0006 (async upd-notification FFI contract):
   `docs/decisions/0006-async-upd-notification-ffi.md`
 - Sprint 21 brief + retro: `docs/history/sprints/sprint_21_dispatch_brief_2026-05-18.md`,
   `docs/sim/sprint_21_retro.md`
 - Sprint-20 merge signoff (M-1/M-2/(ii) + 0.8.7 build-base):
-  `docs/sync/mdata_chili_2026-05-18_main_merge_signoff.md`
-- Prior delivery: `docs/sync/mdata_chili_2026-05-16_0.8.6_delivery.md`
+  `docs/history/sync/mdata_chili_2026-05-18_main_merge_signoff.md`
+- Prior delivery: `docs/history/sync/mdata_chili_2026-05-16_0.8.6_delivery.md`
   (0.8.7 supersedes for mdata)
