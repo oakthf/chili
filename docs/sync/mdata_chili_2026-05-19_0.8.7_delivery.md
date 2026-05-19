@@ -77,10 +77,23 @@ events = engine.drain_upds()       # -> list[UpdEvent]; non-blocking; [] if unar
 ### D-3 — resumable subscription
 
 ```python
-engine.subscribe(tick_socket, topics, resume_from={"trade": last_seq})
-#   or, lower-level: engine.set_resume_cursors({"trade": last_seq}) then subscribe
+# resume_from value = the last-drained UpdEvent.cursor_hi (chili's
+# per-handle DELIVERY ORDINAL) — NOT your per-row seq.
+engine.subscribe(tick_socket, topics, resume_from={"trade": last_cursor_hi})
+#   or, lower-level: engine.set_resume_cursors({"trade": last_cursor_hi}) then subscribe
 ```
 
+- **CONTRACT (corrected 2026-05-19, your v1-26.2 finding — thank you):**
+  the `resume_from[table]` value is **`UpdEvent.cursor_hi`**, chili's
+  per-handle delivery ordinal — the *same* coordinate as `replay`'s
+  message-skip `start`. It is **NOT** your per-row `seq`. Your row-`seq`
+  is your *separate* anchor (dedup / eviction / de-overlap /
+  durability), per the §2 / Q1 Path-1 split — never passed as
+  `resume_from`. Passing row-`seq` (a 50-row batch = +50 seq but 1
+  message) is misread as a 50-message skip → silent total loss. ADR-0006
+  §4 wording was internally contradictory here and is now fixed; the
+  **code was always correct** (`cursor_hi` flows unchanged into
+  `replay`'s `start`).
 - `resume_from` seeds an engine-held per-table cursor map.
   `.sub.init` / `.sub.recover` replay from the **conservative min**
   across subscribed topics (0 ⇒ full replay for any never-seen table)
@@ -90,8 +103,12 @@ engine.subscribe(tick_socket, topics, resume_from={"trade": last_seq})
   filter makes it exactly per-table contiguous. This is by design —
   over-replay is harmless, gap-loss is not.
 - **kill -9 (Q4):** nothing past last-drained is lost — recovered via
-  this replay-from-persisted-cursor (no disk-backed in-flight queue).
-  You persist your durable position as your own row-`seq`.
+  replay from the last-drained `cursor_hi` (no disk-backed in-flight
+  queue). A recent-window consumer (rdb cache) resumes from the
+  post-cursor tail and does **not** re-replay the pre-cursor backlog
+  (`i < start` is skipped); the durability tier recovers all rows by
+  resuming from `cursor_hi = 0` / its own cross-shard `seq` dedup over
+  the full replay. Intended Q4 behaviour, not a gap.
 
 ### D-2 — lazy state accessor
 
