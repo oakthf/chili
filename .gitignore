@@ -32,3 +32,6 @@ crates/chili-py/uv.lock
 # Bus runtime state (per vantage's onboarding_runbook Path B)
 .cross_comms/
 *.token
+
+# Claude Code internal session lock (transient; not part of peer state)
+.claude/scheduled_tasks.lock
