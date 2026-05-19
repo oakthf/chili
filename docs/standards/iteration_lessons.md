@@ -796,3 +796,46 @@ regression in the preserved surface — diagnose the data path before
 **Cost saved.** ~3–6pp of mis-attributed debugging per merge (the Sprint-20
 "query_plan regression" red herring alone) + prevents shipping a silently
 broken write path.
+
+## Lesson 20 — Cross-read a doc's normative lines against each other; a test that uses the correct value by luck does not validate the prose contract
+
+**Rule.** When a contract doc (ADR / delivery doc / brief) states the same
+quantity in more than one place, explicitly cross-read those lines against
+each other for internal contradiction *before* it is ratified/delivered —
+this is a 2-minute check. Two further binds: (1) a passing test that happens
+to use a correct-coordinate value does **not** validate the doc's
+literally-stated procedure — a green test exercises the *code's* behaviour,
+not the *prose's* contract; to validate a contract you must test the
+doc's stated steps verbatim (here: actually pass the value the doc says to
+pass). (2) An audit that *names* a risk class ("inherited-wrong-premise")
+must then verify that specific risk did not materialise in the artifact —
+naming ≠ closing.
+
+**Why.** ADR-0006 §4-L43 ("caller persists its durable position as mdata's
+own row-`seq`") directly contradicted §2-L29 ("cursor_* NOT row-`seq`") and
+§4-L41 ("replay skips `i < start`" — a message ordinal). Following §4-L43
+(row-`seq` is monotone across rows; a 50-row batch = +50 seq but 1 message)
+feeds a 50-message skip → silent total data loss. It survived the brief, the
+3-agent pre-impl audit, ADR drafting, implementation, post-ratification,
+**and** the committed D-3 pytest guards — whose `resume_from` values
+(`{"trade":99}`, `=3`) were message-ordinals by luck, so they passed without
+ever exercising the row-`seq` path the prose prescribed. The push-model audit
+had *explicitly predicted* this exact failure mode (proposal doc line 188,
+citing chili 2026-05-09) and it materialised anyway because the prediction
+was named, not closed. Caught only by mdata's first-hand empirical test on
+the delivered 0.8.7 wheel (`resume_from={ohlcv:25}` on a 5-msg tplog → 0
+rows). chili **code was always correct**; only the normative line was wrong.
+
+**Apply where.** Every ADR / delivery doc / dispatch brief with ≥ 2 normative
+statements about one quantity, especially a resume/cursor/seq/offset
+coordinate or any "persist X, recover via Y" durability clause. Add to the
+self-audit checklist: "list every line that names the load-bearing
+quantity; assert they agree." When an audit cites a prior incident as the
+risk, the audit must then show the check that closes it, not just the name.
+
+**Cost saved.** Prevents shipping a silent-total-data-loss clause in a
+delivered, ratified contract; here the downstream consumer absorbed the
+catch (first-hand wheel test) — the cost would have been a production
+data-loss incident in mdata's recovery path. Pairs with the
+`verify-before-claim` memory (this is its highest-survival-count instance:
+6 review layers).
