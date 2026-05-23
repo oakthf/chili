@@ -8,7 +8,7 @@ use std::sync::LazyLock;
 use std::time::Instant;
 
 use crate::errors::{SpicyError, SpicyResult};
-use crate::eval::{eval_call, eval_fn_call, eval_for_console, eval_for_ide, eval_op};
+use crate::eval::{eval_call, eval_fn_call, eval_for_console, eval_for_ide, eval_op, eval_str};
 use crate::func::Func;
 use crate::utils::convert_list_to_df;
 use crate::{ArgType, EngineState, SpicyObj, Stack, eval_query, job, validate_args};
@@ -536,6 +536,18 @@ pub static SIDE_EFFECT_FN: LazyLock<HashMap<String, Func>> = LazyLock::new(|| {
                 2,
                 "evali",
                 &["string", "limit_num"],
+            ),
+        ),
+        (
+            // Sprint 22 W1 — pepper-source-string eval returning raw SpicyObj
+            // (no stringification, no row limit). For mdata chili-IPC qcon.
+            // Accepts Str | Sym (chili-py converts Python str → Symbol over FFI).
+            "eval_str".to_owned(),
+            Func::new_side_effect_built_in_fn(
+                Some(Box::new(eval_str)),
+                1,
+                "eval_str",
+                &["str_or_sym"],
             ),
         ),
         (

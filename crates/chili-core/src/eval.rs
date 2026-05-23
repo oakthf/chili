@@ -541,6 +541,28 @@ pub fn eval_for_ide(
     }
 }
 
+// Sprint 22 W1 — mdata wishlist 2026-05-23. Same parse + eval path as
+// `eval_for_console`/`eval_for_ide`, but returns the raw SpicyObj instead of
+// stringifying / row-limiting. Designed for `sync(h, (Symbol("eval_str"),
+// "<pepper source>"))` remote-eval round-trip from mdata's chili-IPC qcon.
+// Accepts `Str | Sym` because chili-py converts every Python `str` to
+// `SpicyObj::Symbol` at the FFI boundary (see crates/chili-py/src/lib.rs:111
+// `// | str | Symbol |`); the remote-eval call shape therefore arrives with
+// a Symbol source arg, not a String. `obj.str()` already returns `Ok(...)`
+// for both variants (obj.rs:399).
+pub fn eval_str(
+    state: &EngineState,
+    _stack: &mut Stack,
+    args: &[&SpicyObj],
+) -> SpicyResult<SpicyObj> {
+    validate_args(args, &[ArgType::StrOrSym])?;
+    let src = args[0].str()?;
+    let ast = state
+        .parse("", src)
+        .map_err(|e| SpicyError::EvalErr(e.to_string()))?;
+    state.eval_ast(ast, "", src)
+}
+
 pub fn eval_call(
     state: &EngineState,
     stack: &mut Stack,
