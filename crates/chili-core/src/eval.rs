@@ -545,11 +545,19 @@ pub fn eval_for_ide(
 // `eval_for_console`/`eval_for_ide`, but returns the raw SpicyObj instead of
 // stringifying / row-limiting. Designed for `sync(h, (Symbol("eval_str"),
 // "<pepper source>"))` remote-eval round-trip from mdata's chili-IPC qcon.
+//
+// NOTE (turn-9 wishlist finding, 2026-05-23): mdata self-discovered that
+// `sync(h, b"<pepper>")` (bytes-form) ALSO routes through chili's IPC
+// receive as an arbitrary pepper-eval — same end result. `eval_str` is the
+// named-tuple-form alias, shipped for API symmetry / discoverability;
+// both paths are documented in chili-py's `engine.py::sync` docstring.
+//
 // Accepts `Str | Sym` because chili-py converts every Python `str` to
-// `SpicyObj::Symbol` at the FFI boundary (see crates/chili-py/src/lib.rs:111
-// `// | str | Symbol |`); the remote-eval call shape therefore arrives with
-// a Symbol source arg, not a String. `obj.str()` already returns `Ok(...)`
-// for both variants (obj.rs:399).
+// `SpicyObj::Symbol` at the FFI boundary (see crates/chili-py/src/lib.rs
+// header comment around L11 + the actual `extract_pyobject_to_spicy` arm at
+// `crates/chili-py/src/lib.rs:111`); the remote-eval call shape therefore
+// arrives with a Symbol source arg, not a String. `obj.str()` already
+// returns `Ok(...)` for both variants (obj.rs:399).
 pub fn eval_str(
     state: &EngineState,
     _stack: &mut Stack,

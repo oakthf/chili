@@ -648,11 +648,49 @@ class ChiliEngine:
         return self.fn_call(".handle.open", [socket])
 
     def sync(self, handle_num: int, query: Any) -> Any:
-        # Adapted for claude-2 (Sprint 19): upstream's `sync` called
-        # `self.eval("pyHandle", [query])`, but claude-2's `eval()` 2nd
-        # positional is `src_path` (ADR 0002 lazy/src_path divergence),
-        # not apply-args. Route via `fn_call` instead — 606d1cc's own
-        # `fn_call` I64 arm (engine_state.rs) → `eval_call` I64 arm
-        # (eval.rs) → `state.sync(h, query)` is the claude-2 path.
+        """Send a synchronous query over a remote handle and return the result.
+
+        The receiver's behaviour is **three-way polymorphic on the Python
+        type of ``query``** (Sprint 22 W1, mdata wishlist 2026-05-23
+        turn-9 finding) — please pick the most appropriate form:
+
+        ============ =========================== ===================================== ==========================
+        ``query``    Receiver behaviour          Example                                Returns
+        ============ =========================== ===================================== ==========================
+        ``str``      Variable-name LOOKUP        ``sync(h, "myvar")``                   value of ``myvar``
+        ``bytes``    Arbitrary pepper EVAL       ``sync(h, b"1 + 2")``                  evaluated SpicyObj (3)
+        ``tuple`` /  Named-function INVOCATION   ``sync(h, ("eval_str", "1 + 2"))``     return value of the call
+        ``list``                                 ``sync(h, (".myfn", 5))``
+        ============ =========================== ===================================== ==========================
+
+        Two cleanly-equivalent ways to do arbitrary remote pepper-eval
+        (both route through chili-side parse + ``eval_ast`` and return the
+        raw ``SpicyObj`` — no stringification, no row limit):
+
+        * ``sync(h, b"1 + 2")`` — bytes-form. Works in chili 0.8.7+;
+          lower ceremony.
+        * ``sync(h, ("eval_str", "1 + 2"))`` — named-tuple form (chili
+          0.8.8+, via the ``eval_str`` SIDE_EFFECT_FN builtin added in
+          Sprint 22). Useful when the caller already builds tuple-shaped
+          IPC messages.
+
+        Errors propagate as :class:`ChiliError` (never a Rust panic).
+        ``bytearray`` is **NOT** supported (the chili FFI does not
+        register a converter — raises ``ChiliError``).
+
+        Args:
+            handle_num: Integer handle id returned by :meth:`open_handle`.
+            query: Python str / bytes / tuple / list (see polymorphism above).
+
+        Returns:
+            The receiver's evaluated result, converted to a Python value.
+
+        Implementation note: adapted for claude-2 (Sprint 19). Upstream's
+        ``sync`` called ``self.eval("pyHandle", [query])`` but claude-2's
+        ``eval()`` 2nd positional is ``src_path`` (ADR 0002 lazy/src_path
+        divergence), not apply-args. Routes via ``fn_call`` — ``606d1cc``'s
+        own ``fn_call`` I64 arm (engine_state.rs) → ``eval_call`` I64 arm
+        (eval.rs) → ``state.sync(h, query)`` is the claude-2 path.
+        """
         self.fn_call("set", ["pyHandle", handle_num])
         return self.fn_call("pyHandle", [query])
