@@ -35,3 +35,7 @@ crates/chili-py/uv.lock
 
 # Claude Code internal session lock (transient; not part of peer state)
 .claude/scheduled_tasks.lock
+
+# Vantage's bus module runs from ~/team/oak/vantage (launchd WorkingDirectory).
+# Any chili-side bus/* snapshot is dead-on-arrival — gitignore so accidental cps don't pollute.
+/bus/
