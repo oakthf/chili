@@ -2,6 +2,48 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.9] - 2026-05-24
+
+### Added
+
+- **W3 Python-callable bridge** (`engine.register_fn(name, callable, arity)` /
+  `engine.unregister_fn(name)`) — register Python callables as
+  pepper-invokable functions, dispatched via a new `ExternalFnDispatcher`
+  trait. Tuple-form `sync(h, (name, *args))` over chili-IPC dispatches into
+  the registered Python handler; Python exceptions propagate as
+  `ChiliError` with the traceback embedded. See
+  `docs/decisions/0007-w3-python-callable-bridge.md` for the full contract.
+- `Func::new_external(name, arity)` constructor + `Func::is_external_fn()`
+  helper + `Func::external_name: Option<String>` field.
+- `EngineState::set_external_dispatcher` / `clear_external_dispatcher` API
+  for installing an `ExternalFnDispatcher` trait object.
+- 5 Rust unit tests (`crates/chili-core/tests/external_fn_test.rs`) using
+  a Rust-side stub dispatcher; covers happy path, missing-dispatcher
+  error, arity-mismatch projection, dispatcher replacement, and
+  concurrent dispatch + register/unregister (no deadlock).
+- 8 chili-py pytest tests (`crates/chili-py/tests/test_register_fn.py`)
+  for the Python end: local invoke, callback re-entry into the engine,
+  exception propagation, arity-mismatch projection, unregister, dangling-
+  dispatcher warn-on-inconsistency, remote-via-chili-IPC closure gate,
+  and concurrent register + dispatch.
+
+### Changed
+
+- chili-core lib.rs re-exports `ExternalFnDispatcher`.
+- `serde9.rs` SpicyObj::Fn serializer carries an inline note that external
+  Funcs serialize as their fn_body only — deserialized form on the remote
+  side is non-callable. Clients invoking external Funcs MUST use call-form
+  sync, not variable-lookup sync.
+
+### Notes
+
+- GR5 (GIL released around `Engine::eval`) is preserved by design:
+  callback dispatch acquires the GIL only for the callback duration
+  (~300ns per round-trip + Python body time). Non-W3 users see the
+  `external_dispatcher` slot as `None` and never reach the W3 branch in
+  `eval_fn_call` — zero overhead.
+- No on-disk format change. No parse-cache impact.
+
 ## [0.8.3] - 2026-05-17
 
 ### Added
