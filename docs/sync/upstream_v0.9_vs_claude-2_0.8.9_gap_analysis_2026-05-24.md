@@ -12,7 +12,7 @@
 We compared `main` (v0.9.0, commit `fb4455d`) against `claude-2` (0.8.9, commit `46d5679`) file-by-file. Headline numbers: **123 commits on claude-2 not on main; 7 commits on main not on claude-2**.
 
 - **claude-2 carries 9 features main lacks**, all driven by mdata's production needs (rdb/wdb tick subscribers, gateway, EOD bookkeeping, kill-9 durability, v1-36 attach-socket retirement). Eight of these have shipped to mdata via 0.8.1 → 0.8.9 wheels and are in active production use; one (W3 Python-callable bridge) shipped today and is awaiting mdata acceptance.
-- **main carries 3 features claude-2 lacks** (async_/execute, eval_op inline string-eval, py.typed marker) plus the GitHub-hosted `polars-core-patch` URL — all clean additions that claude-2 should forward-port.
+- **main carries 3 features claude-2 lacks** (async\_/execute, eval_op inline string-eval, py.typed marker) plus the GitHub-hosted `polars-core-patch` URL — all clean additions that claude-2 should forward-port.
 - **2 features look like duplicates but have different semantics:** `eval_str` (claude-2 SIDE_EFFECT_FN builtin) vs `eval_op` inline parse (main); `roll_tick` (claude-2 native atomic cutover) vs `roll_tick_log` (main pepper-script rotate). Both pairs converge on the same user-visible behavior for the primary case, but the claude-2 versions carry stronger correctness contracts (atomic cutover; arity-typed builtin).
 - **Polars-fork strategies have diverged.** main patches only `polars-core` via `github.com/hinmeru/polars-core-patch.git`; claude-2 patches 25 polars-family crates against a local `/tmp/polars-py-1.39.3/...` clone to satisfy ADR 0003 (true-lazy via py-1.39.3 fork + chili-side q-style fmt patch). If we forward-port main's `polars-core-patch` URL, we need to verify it carries our q-style fmt patch.
 
@@ -65,6 +65,8 @@ Each section gives: **what it is**, **why mdata needs it**, **chili-core surface
 
 ### 3.1. Push-model D-1 — `upd_notify_fd` + `drain_upds` + `UpdEvent` (Sprint 21)
 
+> upd shouldn't notify fd, fd should always push async update to engine. Even for sync updates, fd only needs to know if the upd is written to the TCP socket.
+
 - **What:** chili-core's IPC receive thread enqueues each inbound `upd` into a bounded crossbeam_channel(4096) and writes 1 byte to a POSIX self-pipe (macOS-portable; not `eventfd`). Python subscribers call `engine.upd_notify_fd()` to get the read-end FD, register it with `asyncio.loop.add_reader(...)`, then `engine.drain_upds() -> list[UpdEvent]` on wake. `UpdEvent { table, cursor_lo, cursor_hi, frame: pl.DataFrame }` — Polars frame is an Arc-shallow-clone of the inbound serde9 payload (no re-decode).
 - **Why mdata needs it:** before D-1, mdata's rdb/wdb subscribers polled `engine.get_var(table)` every ~10 ms and diffed a `_last_seen_seq` watermark — burning CPU on the Python side AND paying chili-lock contention on every poll. A-033 (the EOD-cutover latency incident in v1-32) was rooted in that contention. D-1 is event-driven, GIL-free on the chili side (zero pyo3 on the receive path), blocking-never-drop (back-pressure to tp; tplog is the source of truth).
 - **chili-core deps added:** `crossbeam-channel = "0.5"`, `libc = "0.2"` (the self-pipe + `fcntl` for `FD_CLOEXEC`).
@@ -76,6 +78,8 @@ Each section gives: **what it is**, **why mdata needs it**, **chili-core surface
 
 ### 3.2. Push-model D-2 — `get_var_lazy(id)` (Sprint 21)
 
+> I don't see why have to force a lazy frame. User can always call .lazy() by themselves on the result.
+
 - **What:** snapshot-clone the `SpicyObj::DataFrame` under the `vars` read-lock, return `.lazy()`. Same byte content as `get_var(id)` on `.collect()`, but the lazy plan is pushdown-capable across the FFI boundary.
 - **Why mdata needs it:** mdata's gateway composes lazy plans over per-table accumulators before collecting. Without D-2, `get_var(table)` returns an eager DataFrame that has to be re-`.lazy()`-wrapped on the Python side — no pushdown.
 - **chili-core surface:** +12 lines on `EngineState::get_var_lazy`.
@@ -86,6 +90,8 @@ Each section gives: **what it is**, **why mdata needs it**, **chili-core surface
 
 ### 3.3. Push-model D-3 — `subscribe(resume_from=…)` + `resume_cursor` field (Sprint 21)
 
+> Engine has a builtin reconnect logic and replay lost tp log, no need to take care by using new subscribe api.
+
 - **What:** new `subscribe(tick_socket, topics, resume_from: dict[str,int] | None = None)` signature. `EngineState.resume_cursor: RwLock<HashMap<String, i64>>` (table → last-delivered `cursor_hi`); the existing `.sub.init` / `.sub.recover` pepper scripts consult this map via a new accessor builtin rather than hardcoded `0` / `tick[0]`.
 - **Why mdata needs it:** cold-restart of an rdb after a kill-9 must resume from the last-drained `cursor_hi` per topic so that the tplog replay starts at the correct message ordinal. Without D-3, mdata reverts to per-row `_last_seen_seq` dedup over the full replay — works but costs O(replay-size) per restart, and the per-row seq is a separate anchor with its own correctness concerns (Q1 Path-1).
 - **chili-core surface:** +30 lines on `EngineState::set_resume_cursor` + `resume_start_for` + the new `resume_cursor` builtin in side_effect_fn.rs.
@@ -93,6 +99,8 @@ Each section gives: **what it is**, **why mdata needs it**, **chili-core surface
 - **Adoption:** mdata v1-26.2. The doc-bug was found by mdata's first-hand empirical test on 0.8.7; corrected in claude-2 commit `a50cec9`.
 
 ### 3.4. `flush_tplog()` (Sprint 16)
+
+> mdata shouldn't need this at all, it should be taken care by chili file system. mdata should be focus on get data. The tp log after all is for recovering data. The tick plant is a light process, which doesn't keep data, and should not be killed by kill -9.
 
 - **What:** Python-callable method that flushes the in-memory tplog write buffer to disk via `fsync` on the underlying file handle. Targets `.tick.msgHandle` (set by `.tick.createLog` during `init_tick`).
 - **Why mdata needs it:** PRD §5.1 part-2 specifies kill-9 durability — a hard-kill of the tp process must lose at most one in-flight message. The OS file-system buffer doesn't fsync on every write (would cost too much); mdata's tp daemon calls `flush_tplog()` at checkpoint-aligned moments (after a batch of N publishes, or every M ms) to bound the loss window.
@@ -103,13 +111,17 @@ Each section gives: **what it is**, **why mdata needs it**, **chili-core surface
 
 ### 3.5. `publish_via_handle(h, table, df)` (Sprint 19, mdata 2b)
 
-- **What:** outbound `sync(h, (`upd; table; df))` shaped helper that validates the handle is `ConnType::Outgoing` before publishing, eliminating the lock-acquisition + handle-lookup pattern mdata had to write at every call site.
+> Should never use this, just use publish, which is a defined chili function for publishing data.
+
+- **What:** outbound `sync(h, (`upd; table; df))`shaped helper that validates the handle is`ConnType::Outgoing` before publishing, eliminating the lock-acquisition + handle-lookup pattern mdata had to write at every call site.
 - **Why mdata needs it:** gateway code emits ~10-50 per-table publishes per EOD cycle; without the helper, each call site re-implements the validation + the upd-message construction.
 - **chili-core surface:** +30 lines on `EngineState::publish_via_handle` (with the explicit early-drop of the read lock so `sync()`'s internal write lock doesn't deadlock against the same-thread read lock — `parking_lot::RwLock` is not reentrant).
 - **Deps:** none new.
 - **Adoption:** mdata gateway since 2026-05-13 (0.8.4).
 
 ### 3.6. `roll_tick(log_dir, segment_label)` — atomic native cutover (Sprint 18)
+
+> This function apparently used some functions that are not actually internal chili functions. Should just use roll_tick_log. The new function is `.handle.rotate` for atomic cutover.
 
 - **What:** native Rust implementation that holds the handle write-lock across **open-next → swap-writer (same handle id) → fsync+close-old**. Any concurrent inbound `.tick.upd` is serviced by exactly one valid handle and lands wholly in the old segment OR wholly in the new — never dropped, never split.
 - **Why mdata needs it:** UHF (ultra-high-frequency) tplog rotation. mdata's daily-rotation cutover happens while publishes may still be in flight; the old `engine.eod(d)` + `init_tick(.., d+1)` pair had a brief window where a publish could land in the wrong file. At ~thousands of ticks/sec, the data-loss probability over a full year of cutovers is non-trivial.
@@ -119,6 +131,8 @@ Each section gives: **what it is**, **why mdata needs it**, **chili-core surface
 - **Adoption:** mdata tp daemon since 2026-05-13.
 
 ### 3.7. GR4 quantization helpers — `set_column_scale` / `clear_column_scales` (various sprints)
+
+> This is mdata specific requirement, which should be built on top of chili engine, not part of chili engine.
 
 - **What:** Python-callable helpers to register a column's quantization factor (e.g., "this column is Int64-quantized at scale=10000; dequant by dividing by 10000 on read"). chili reads quantized columns as Int64 from disk; the dequant happens at the user-facing Python boundary, not in chili-core.
 - **Why mdata needs it:** mdata's storage schema is Int64-quantized for all price columns (golden rule 4 in chili's CLAUDE.md). Compression + cache efficiency benefit. The dequant convention is a user-side concern, but having chili expose the scale registry as part of the engine state lets the same engine serve both quantized and unquantized callers consistently.
@@ -133,6 +147,8 @@ See §3.7 — the test guard codifies the contract; the code change is the expli
 
 ### 3.9. W3 Python-callable bridge — `register_fn` / `unregister_fn` / `ExternalFnDispatcher` (Sprint 23, shipped 2026-05-24)
 
+> To call any function, should just define function using pepper syntax, calling a python function is making things complicated, and it is not efficient.
+
 - **What:** chili-py method `engine.register_fn(name, callable, arity)` stores a Python callable in a `PyExternalDispatcher: RwLock<HashMap<String, Py<PyAny>>>` registry; chili-core's `eval_fn_call` gains a new branch that routes via `ExternalFnDispatcher::dispatch(name, args)` when the target `Func` has `external_name: Some(_)`. The dispatcher trait is generic — a future R/Julia/JS dispatcher can install side-by-side.
 - **Why mdata needs it:** mdata operates 3 control verbs that require Python-side daemon bookkeeping — `.mdata.eod.fire[date]` (drain a Polars buffer + broadcast EOD), `.mdata.wdb.finalize[date]` (finalize idb partition), `.mdata.hdb.reload[]` (reload partition cache). Today these dispatch via a bespoke attach-socket Unix protocol → Python handler. mdata's v1-36 sprint retires the attach socket; W3 is the chili-native replacement.
 - **The "adds dependencies to chili" concern — empirically false:** chili-core adds ZERO new dependencies for W3. The trait (`ExternalFnDispatcher`) is in chili-core but pyo3-agnostic. The Python adapter (`PyExternalDispatcher`) lives entirely in chili-py. We measured the chili-core surface delta: +43 lines (`external_fn.rs` trait) + 1 `Option<String>` field on `Func` + 1 `RwLock<Option<Arc<dyn ExternalFnDispatcher>>>` slot on `EngineState` + 1 new branch in `eval_fn_call` (15 lines). The full chili-core diff is in commit `ae5668b`.
@@ -145,17 +161,17 @@ See §3.7 — the test guard codifies the contract; the code change is the expli
 
 ### Summary table
 
-| # | Feature | Sprint | Wheel adopted | mdata version | chili-core deps added |
-|---|---|---|---|---|---|
-| 1 | upd_notify_fd / drain_upds / UpdEvent | 21 (D-1) | 0.8.7 | v1-26.2 | crossbeam-channel, libc |
-| 2 | get_var_lazy | 21 (D-2) | 0.8.7 | v1-26 | none |
-| 3 | subscribe(resume_from=) / resume_cursor | 21 (D-3) | 0.8.7 | v1-26.2 | none |
-| 4 | flush_tplog | 16 | 0.8.4 | v1-22 | none |
-| 5 | publish_via_handle | 19 | 0.8.4 | v1-22 | none |
-| 6 | roll_tick atomic | 18 | 0.8.4 | v1-25 | none |
-| 7 | set_column_scale / GR4 | various | 0.8.x | v1-24+ | none |
-| 8 | M-1 invariant + guard | 20 | 0.8.7 | v1-26 | none |
-| 9 | W3 register_fn / ExternalFnDispatcher | 23 | 0.8.9 | pending acceptance | none |
+| #   | Feature                                 | Sprint   | Wheel adopted | mdata version      | chili-core deps added   |
+| --- | --------------------------------------- | -------- | ------------- | ------------------ | ----------------------- |
+| 1   | upd_notify_fd / drain_upds / UpdEvent   | 21 (D-1) | 0.8.7         | v1-26.2            | crossbeam-channel, libc |
+| 2   | get_var_lazy                            | 21 (D-2) | 0.8.7         | v1-26              | none                    |
+| 3   | subscribe(resume_from=) / resume_cursor | 21 (D-3) | 0.8.7         | v1-26.2            | none                    |
+| 4   | flush_tplog                             | 16       | 0.8.4         | v1-22              | none                    |
+| 5   | publish_via_handle                      | 19       | 0.8.4         | v1-22              | none                    |
+| 6   | roll_tick atomic                        | 18       | 0.8.4         | v1-25              | none                    |
+| 7   | set_column_scale / GR4                  | various  | 0.8.x         | v1-24+             | none                    |
+| 8   | M-1 invariant + guard                   | 20       | 0.8.7         | v1-26              | none                    |
+| 9   | W3 register_fn / ExternalFnDispatcher   | 23       | 0.8.9         | pending acceptance | none                    |
 
 **Total chili-core dep additions across all 9 features: 2 (crossbeam-channel, libc — both stdlib-adjacent and tiny).**
 
@@ -167,7 +183,7 @@ See §3.7 — the test guard codifies the contract; the code change is the expli
 
 - **What:** new `EngineState::async_` (sends an IPC message with `MessageType::Async` — fire-and-forget) and `EngineState::execute(h, msg)` which routes positive `h` → `sync`, negative `h` → `async_`. Same semantic shape as kdb+'s positive/negative handle convention.
 - **What it solves:** caller-side async send. Useful for fan-out publishes where the caller doesn't want to block on every recipient's ack.
-- **Relationship to claude-2's push-model:** orthogonal. Push-model is RECEIVER-side event-driven; async_ is SENDER-side non-blocking. mdata could use both simultaneously.
+- **Relationship to claude-2's push-model:** orthogonal. Push-model is RECEIVER-side event-driven; async\_ is SENDER-side non-blocking. mdata could use both simultaneously.
 - **claude-2 forward-port:** clean. No conflict with our additions. ~50 lines in chili-core + minor chili-py wrapper.
 - **Recommendation:** forward-port to claude-2.
 
@@ -218,13 +234,14 @@ If claude-2 forward-ports, the `init_tick` param rename is a breaking change for
 
 ## 6. Test coverage delta
 
-| Suite | claude-2 | main |
-|---|---|---|
-| Rust workspace tests (excl chili-py) | **215** passed | ~67 (estimated from `crates/chili-core/tests/*.rs` file count) |
-| chili-py pytest | **108** passed | ~59 (test_engine.py def count) |
-| Bench harnesses | parse_cache + concurrent_eval (4 shapes) + categorical_eval criterion + post-pivot baseline doc | parse_cache + categorical_eval criterion |
+| Suite                                | claude-2                                                                                        | main                                                           |
+| ------------------------------------ | ----------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| Rust workspace tests (excl chili-py) | **215** passed                                                                                  | ~67 (estimated from `crates/chili-core/tests/*.rs` file count) |
+| chili-py pytest                      | **108** passed                                                                                  | ~59 (test_engine.py def count)                                 |
+| Bench harnesses                      | parse_cache + concurrent_eval (4 shapes) + categorical_eval criterion + post-pivot baseline doc | parse_cache + categorical_eval criterion                       |
 
 The Rust delta (215 vs ~67) is dominated by claude-2-added test files for the features in §3:
+
 - `external_fn_test.rs` (5 tests, W3)
 - `upd_notify_test.rs` (~6 tests, push-model)
 - `flush_handle_test.rs` (Sprint 16)
