@@ -1,78 +1,175 @@
-# mdata → chili — architecture handoff for chili-team review
+# mdata → chili — architecture handoff for chili-team review (**Revision A**)
 
-**Date:** 2026-05-24
-**From:** mdata project (claude branch, post-v1-35 pre-soak; 24h Pipeline X soak in flight on chili 0.8.8)
-**To:** chili-team — for discussion with the chili original author about what chili could refactor or enhance to better support mdata's setup.
-**Status:** Snapshot of mdata as of 2026-05-24. chili 0.8.8 in production; 0.8.9 (W3) install pending post-soak (Task #186).
-**Mirror:** `~/code/chili/docs/sync/mdata_architecture_handoff_2026-05-24.md` (identical content).
+**Date:** 2026-05-24 (revised same day after chili-author feedback)
+**From:** mdata project (`claude` branch, `~/code/mdata`)
+**To:** chili-team and the chili original author — to inform chili 0.9.x design
+**Mirror:** `~/code/chili/docs/sync/mdata_architecture_handoff_2026-05-24.md` (identical content)
+
+## Revision history
+
+- **v1** (commits `b3774ae` / `b124400`; `1ee7c94` / `f2041a8`, 2026-05-24): initial draft. Framed mdata as orchestrating chili — drain loops, periodic flushers, EOD shims wired through Python.
+- **The chili author pushed back** (relayed 2026-05-24): *"The data shall go one direction… Python needs a pointer to the data in chili, not polling. get_var is for this purpose… set up a tp and rdb using subscribe and publish from the Chili Engine. If this doesn't work, I will add whatever that is missing. You should not trying to take over something that is done in chili syntax… The flush_tp_logs and upd_notify_fd_ready make things unnecessarily complicated. You should be a 'user' of chili-sauce and setup data pipelines instead."*
+- **Revision A (this commit)** — wholesale rewrite. mdata's architecture re-grounded in the canonical **kdb+tick / TorQ tickerplant pattern**. Branch comparison `main` (chili 0.9.0) vs `claude-2` (mdata-driven extensions) with **verdict per claude-2 feature**: which mdata genuinely needs, which is over-engineering on mdata's side, which is a wishlist item.
 
 ## TL;DR for the chili author
 
-mdata is a production-grade multi-asset time-series data warehouse built on chili Rust as the in-process pepper engine + cross-process IPC bus. As of v1-35, mdata runs **9 long-running Python daemons**; **7 of them embed `chili.ChiliEngine`** (4 with `pepper=True`); **6 publish a query surface via AF_UNIX attach-socket** wrapping chili pepper eval.
+You are right. mdata's current implementation has been **taking over chili's job** in several places. After re-grounding in chili main 0.9.0's public API + canonical kdb+tick patterns:
 
-**All three open wishlist items shipped on chili's side within ~24h** (W1+W2 in 0.8.8, W3 in 0.8.9 same day). What's left open:
+- **~600 LOC of mdata code is over-engineering** and can be removed: drain-loop, cursor-store, A-034 EOD shim, `_after_drain` hooks, parts of periodic_flush.
+- **chili main 0.9.0 already covers ~85% of mdata's actual needs.** Including EOD — `test_subscriber_eod_dispatch.py` on `main` is the exact pattern A-034 was reinventing.
+- **Genuine wishlist: ONE primitive** — configurable auto-flush in `init_tick` for PRD §5.1 part-2 durability SLA (within 10 ms of publish; main relies on OS page-cache, ~30 s default flush).
+- **Two claude-2 features need confirmation, not assumed over-engineering**: `publish_via_handle` (fh→tp wire transfer ergonomics) and `roll_tick` atomicity (vs main's `roll_tick_log` pepper wrapper). Either keep in claude-2, port to main, or replace with a documented main-side workaround.
 
-1. **Async surface** (`flush_tplog_async`, reader-fairness under sustained writer load) — `docs/sync/chili_wishlist_2026-05-22_async-surface.md`. mdata mitigated A-033 (asyncio loop saturation under 6944 msg/sec) with mdata-side executor dispatch (F1-F9 fix arc) but the underlying chili-side limitations remain.
-2. **Producer-side fsync-before-broadcast seam** — `docs/sync/chili_note_2026-05-19_tplog_fsync_broadcast_seam.md`. Non-blocking; closes the cross-machine-survivor durability edge.
-3. **IPC cutover possibility** — now that W3 ships `register_fn`/`unregister_fn`, mdata is planning (v1-36+) to retire its custom AF_UNIX attach-socket layer in favor of chili-IPC end-to-end. Proposal at `docs/proposals/ipc_cutover_remove_unix_socket_2026-05-24.md`. This handoff doc is also intended to surface architectural patterns the chili author might suggest changes to.
+Everything else (`drain_upds`, `upd_notify_fd`, `subscribe(resume_from=)`, `flush_tplog` called from Python, custom EOD shim plumbing, register_fn-based pepper dispatch from Python) is **mdata-side over-engineering** and will be removed in a v1-36 architecture-cleanup sprint.
 
-The rest of this doc is the architectural snapshot the chili author may want to see before suggesting refactors.
+The proof point you asked for — *"claude needs to set up a test case, make sure it works"* — lands as the first commit of that cleanup sprint: `tests/integration/test_chili_user_pattern.py` exercising mdata's schemas through `init_tick + publish + subscribe + get_var + eod()` only.
 
 ---
 
-## 1. Daemon topology
+## 1. Canonical pattern — kdb+tick / TorQ alignment
 
-mdata is a per-pipeline tickerplant architecture. A *pipeline* is one configuration of `(asset_class, vendor_set, machine, capture_cadence)`. Examples: Pipeline E (equity, Massive vendor, mid-day capture), Pipeline X (crypto, ccxt vendors, 24/7 capture), Pipeline A (private accounts, IB+nxcar, mid-day), Pipeline P (private accounts variant).
+mdata is a multi-asset time-series warehouse modelled on the kdb+tick / TorQ tickerplant pattern. The invariants of that pattern are:
 
-Within one pipeline, **9 daemons** cooperate. 8 of them are core data-path; `mon` is observability.
+| kdb+tick invariant | chili main 0.9.0 mechanism |
+|---|---|
+| Data flows ONE direction: feed → tp → subscribers | `tp.publish(table, df)`; chili-IPC carries to subscribers; subscriber's chili engine applies the upd to its own table memory |
+| Subscribers are passive recipients; tp owns the canonical write | `subscriber.subscribe(uri, topics)` once; chili internally calls `.tick.upd` on subscriber side |
+| Subscriber-side `upd` is a row-applier; no orchestration in user code | chili pepper `.tick.upd` handler is registered by `subscribe`; user code does NOT touch it |
+| Subscribers query via natural q `select` — data is already there | `subscriber.get_var("trade")` returns the current state; or `subscriber.eval("select ...")` |
+| No subscriber "drain" or "poll" in the data path | Just `get_var()` on demand (or via pepper `eval`) |
+| EOD: tp `.u.end[date]` broadcasts; subscriber `.u.end` handles | `pub.eod(date)` broadcasts; subscriber pre-defines pepper `eod: {[msg] ...}` handler |
+| Full replay on restart from tplog is accepted | `subscribe()` triggers replay; no resume cursor needed |
+| tplog is source of truth; flush is automatic/configured | Configurable in chili (today via `flush_tplog` from Python; wishlist: chili-side auto-flush config) |
+| Gateway routes queries; doesn't orchestrate ingest/flush | `gw` engine opens handles to rdb/wdb via `open_handle`; queries via `sync(h, "select ...")` |
 
-| Daemon | Module | Role | ChiliEngine? | attach-socket? | Cross-process IPC? |
-|---|---|---|---|---|---|
-| **tp** (tickerplant) | `src/mdata/tp/__main__.py` | Canonical writer — ingests publishes, appends tplog, broadcasts updates | YES (writes RDB partition) | YES (query surface) | **chili IPC** (TCP listener; receives `publish_via_handle` from fh) |
-| **fh** (feed handler) | `src/mdata/fh/__main__.py` | Vendor adapter — subscribes vendor WS/REST, normalizes, publishes to tp | NO (RemoteTpClient) | NO | **chili IPC client** (calls `publish_via_handle` cross-process to tp) |
-| **rdb** (real-time DB) | `src/mdata/rdb/__main__.py` | Recent-table reader — subscribes tplog via push-model, serves intra-day queries | YES (`pepper=True`) | YES (query surface) | AF_UNIX attach-socket today |
-| **wdb** (write DB / pepper hot-table) | `src/mdata/wdb/__main__.py` | Per-partition mid-day Parquet flush + EOD finalize | YES (`pepper=True`) | YES (query surface) | AF_UNIX attach-socket today |
-| **hdb** (historical DB) | `src/mdata/hdb/__main__.py` | Historical Parquet scan service | YES (`pepper=True`) | YES (query surface) | AF_UNIX attach-socket today |
-| **gw** (gateway) | `src/mdata/gw/__main__.py` | Query facade — routes queries to rdb/wdb/hdb, fans out, merges | YES (StorageEngine wraps ChiliEngine for direct hdb Parquet reads) | YES (client-facing query surface) | AF_UNIX attach-socket (to rdb/wdb); in-process chili for hdb |
-| **dis** (discovery) | `src/mdata/dis/__main__.py` | Liveness registry — daemons register, mon reads | NO | NO | TCP (custom protocol) |
-| **mon** (monitor) | `src/mdata/mon/__main__.py` | Probe loop + alert dispatch — reads dis, runs invariants | NO | NO | reads dis, writes JSONL |
-| (sub) | shared library | Subscription manager — embedded library, not a separate daemon | N/A | N/A | N/A |
+mdata's current code **diverges from this in 5 places**, all on mdata's side, not chili's:
 
-**Verified counts (chili API surface in mdata source):**
-- 9 `ChiliEngine(...)` constructor callsites across `src/mdata/`.
-- 4 of them use `pepper=True` (rdb, wdb, hdb subscribers — engines that need pepper variable lookup at query time).
-- 10 cross-process `publish_via_handle(h, table, df)` callsites — exclusively fh→tp.
-- 0 `register_fn`/`unregister_fn` callsites today (0.8.9 not yet installed).
+1. **Drain-loop polling.** `src/mdata/common/drain_loop.py` (530 LOC) arms `upd_notify_fd` and pumps `drain_upds` events. The chili author explicitly called this out as "unnecessarily complicated".
+2. **Cursor persistence.** `src/mdata/common/cursor_store.py` persists chili's per-handle delivery ordinal to disk for `subscribe(resume_from=...)`. kdb+tick canonical pattern just replays the day on restart.
+3. **A-034 EOD shim (just shipped v1-35.1).** `src/mdata/wdb/wdb_subscriber.py` reimplements the pepper `eod: {[msg] ...}` handler pattern but wires it through `_after_drain`. main's `test_subscriber_eod_dispatch.py` shows this is a 5-line subscriber-side `eval(...)` — no drain hook needed.
+4. **Python-driven tplog flush.** `src/mdata/tp/periodic_flush.py` calls `engine.flush_tplog()` every 100 ms for the §5.1 part-2 durability SLA. Should be a chili-side `init_tick(..., auto_flush_ms=100)` config.
+5. **`_after_drain` hooks (rdb + wdb).** Coupling EOD detection + watermark republish to the drain loop. Without the drain loop, these become simple periodic timers or pepper shims.
 
-### Mermaid: per-pipeline data-flow topology
+---
+
+## 2. chili main 0.9.0 — the "user" surface
+
+The full public API surface in `git show main:crates/chili-py/chili/engine.py` is **38 public methods**. The subset mdata actually needs for a true-user-of-chili architecture is **8 methods**:
+
+| Method | Signature | mdata daemon that uses it |
+|---|---|---|
+| `init_tick(schema, log_dir, date)` | tp boot | tp |
+| `publish(table, df)` | local publish | tp (locally) |
+| `start_tcp_listener(port)` | IPC listener | tp (so subscribers can connect) |
+| `subscribe(tick_socket, topics)` | subscriber connect | rdb, wdb |
+| `get_var(name)` | read current state | gw → rdb/wdb (via remote sync); rdb/wdb internally (EOD sentinel) |
+| `set_var(name, value)` + `eval("...")` | define pepper shims | rdb, wdb (EOD shim definition at boot) |
+| `eod(date)` | EOD trigger (broadcast) | tp |
+| `open_handle(uri)` + `sync(h, query)` | remote query | gw → rdb/wdb/hdb; fh → tp (if not using `publish_via_handle`) |
+
+That is the **entire chili surface mdata's daemons should touch**. Everything beyond this list is either chili-internal or mdata over-engineering.
+
+### Canonical pub/sub (verbatim from `test_tick_sub.py` on main)
+
+```python
+# Publisher (tp)
+t = ChiliEngine(pepper=True)
+t.init_tick(schema={"trade": trade_schema}, log_dir=log_dir + "/", date=date.today())
+t.start_tcp_listener(port)
+t.publish("trade", data1)
+
+# Subscriber (rdb / wdb)
+s = ChiliEngine(pepper=True)
+s.subscribe(f"chili://127.0.0.1:{port}", ["trade"])
+# chili's internal Rust receive thread applies the upd to s's "trade" table.
+# Subscriber reads on demand — NO polling, NO drain, NO notify_fd:
+sub_trade = s.get_var("trade")
+```
+
+That is the **entire** subscriber pattern. The first 30 lines of `test_tick_sub.py` are what every mdata subscriber should look like.
+
+### Canonical EOD (verbatim from `test_subscriber_eod_dispatch.py` on main)
+
+```python
+# Subscriber pre-defines the eod shim BEFORE subscribe
+sub.eval(".sub.eod.fired: 0n")               # sentinel = pepper null
+sub.eval("eod: {[msg] .sub.eod.fired: msg}") # handler
+sub.subscribe(f"chili://127.0.0.1:{port}", ["trade"])
+
+# Publisher fires EOD — routes: pub → .broker.eod → signal_eod → sync(h, (`eod; date))
+pub.eod(date.today())
+
+# Subscriber detects via the sentinel
+for _ in range(100):
+    if sub.has_var(".sub.eod.fired"):
+        got = sub.get_var(".sub.eod.fired")
+        if got is not None:
+            eod_msg = got
+            break
+    time.sleep(0.05)
+```
+
+**A-034 in mdata's wdb_subscriber.py is a more complex version of this.** The pepper shim definition is identical; mdata adds `_check_eod`, `_eod_safety_loop`, `_after_drain` wiring. All of that is unnecessary — the canonical pattern is the 5-line `eval` block + a simple polling timer.
+
+---
+
+## 3. main vs claude-2 — per-feature verdict
+
+`git diff --stat main..claude-2 -- crates/chili-py/` shows engine.py +315 LOC + 7 new test files. Verdict on each claude-2 addition, classified by what mdata actually needs:
+
+| claude-2 feature | mdata current use | main equivalent | Verdict |
+|---|---|---|---|
+| `flush_tplog()` (Sprint 16) | `tp/periodic_flush.py` calls every 100 ms for PRD §5.1 part-2 (kill-9 durability) | None — main relies on OS page-cache flush (~30 s default) | **WISHLIST W1** — request chili-side configurable auto-flush: `init_tick(..., auto_flush_ms=100, auto_flush_bytes=1_048_576)`. mdata removes Python-side flush calls; chili owns flush cadence per config. |
+| `upd_notify_fd()` + `drain_upds()` (Sprint 21, D-1) | `common/drain_loop.py` + RdbSubscriber + WdbSubscriber (530 LOC) for cursor advance + cache eviction + EOD trigger | `subscribe()` applies upds internally to subscriber engine memory; user reads via `get_var()` on demand | **OVER-ENGINEERING — DROP.** mdata's three uses all dissolve: cursor advance → drop (full-day replay on restart); cache eviction → don't evict (rdb accumulates intraday; HDB rolls at EOD); EOD trigger → use main's `eod()` + pepper shim. |
+| `subscribe(resume_from=dict)` (Sprint 21, D-3) | rdb/wdb restart fast resume (skip already-applied rows) | `subscribe()` alone replays full day | **OVER-ENGINEERING — DROP.** kdb+tick canonical: full-day replay on restart. mdata's load (6944 msg/sec at 6h cumulative) replays in seconds. Accept it. Removes `common/cursor_store.py` entirely. |
+| `publish_via_handle(h, table, df)` (Sprint 17) | `fh/remote_client.py` — feed handler → remote tp publish | `open_handle()` + `sync(h, str)` — but no clean way to marshal a Polars DataFrame inline as pepper source | **NEEDS-CLAUDE-2 OR PORT TO MAIN.** Real ergonomic gap: marshalling a DataFrame over the wire from Python. Options: (a) keep `publish_via_handle` in main; (b) chili adds a registered-fn-based publish pattern documented as the canonical fh→tp wire transfer; (c) mdata routes fh→tp via tplog file + tp tail-reads (slower; not real-time). Author's call. |
+| `roll_tick(log_dir, label)` atomic (Sprint 18) | `tp/tickerplant.py` daily rollover (14 callsites) | `roll_tick_log(log_dir, filename)` in main — pepper-shim wrapper around `.tick.rollLog` | **NEEDS VERIFICATION.** main has `roll_tick_log`; claude-2's `roll_tick` claims atomic under concurrent publishes. If main's `.tick.rollLog` is already atomic via chili's internal write-lock, mdata uses `roll_tick_log` — done. If not, please confirm atomicity story for main and either: (a) make it atomic, or (b) document the unsafe case so mdata can guard. |
+| `sync()` polymorphic (bytes/tuple form, Sprint 22 W1 + W3) | `common/attach_socket.py` + `sync_rpc.py` — gw → rdb/wdb queries via pepper source | main `sync(h, str)` — and per 0.9.0 CHANGELOG: *"String literals in eval_op/eval_call are parsed and evaluated as Chili/Pepper query source (inline eval_str behavior)"* | **MAIN-ENOUGH** for the bytes-form/inline-eval need. The tuple-form (`sync(h, (".fn", arg1, arg2))` for W3) is the `register_fn` dispatch pattern — only needed if mdata keeps W3 callbacks, which (under the user-of-chili reframe) it doesn't need. |
+| `register_fn` / `unregister_fn` (Sprint 23, W3) | **ZERO mdata callsites** (0.8.9 install pending; we asked for this thinking the IPC cutover needed it) | `fn_call(name, args)` for local-engine functions; pepper `eval` for arbitrary remote eval | **OVER-ENGINEERING — WE WERE WRONG TO REQUEST.** Under the user-of-chili reframe, mdata has no need for Python-callback dispatch over IPC. The IPC cutover proposal (`docs/proposals/ipc_cutover_remove_unix_socket_2026-05-24.md`) Option A' is moot. **Recommended: chili can drop W3 from 0.9.x scope.** |
+| `eval_str` (W1, Sprint 22) | **ZERO mdata callsites** (we self-discovered bytes-form `sync(h, b"...")` instead) | per 0.9.0 CHANGELOG, inline string-eval in main covers this | **MAIN-ENOUGH** — W1 was redundant with main's evolution. |
+| `get_var_lazy()` (Sprint 20) | **ZERO mdata callsites** | `get_var().lazy()` | **MAIN-ENOUGH** |
+| `set_column_scale()` / `clear_column_scales()` (Sprint 20, M-1) | **ZERO mdata callsites** | manual cast/divide | **MAIN-ENOUGH** |
+
+**Summary of verdicts:**
+
+- **WISHLIST (1):** auto-flush configuration in `init_tick` (W1)
+- **NEEDS-CLAUDE-2 OR PORT-TO-MAIN (2):** `publish_via_handle` ergonomics, `roll_tick` atomicity verification
+- **OVER-ENGINEERING — DROP (5):** drain-loop, cursor_store, `subscribe(resume_from=)`, W3 `register_fn`, A-034-shape EOD wiring
+- **MAIN-ENOUGH (4):** sync polymorphism (inline-eval covered), `eval_str`, `get_var_lazy`, `set_column_scale`
+
+---
+
+## 4. Architecture — redrawn under the user-of-chili reframe
+
+### Chart 1: Per-pipeline topology (one-direction data flow)
 
 ```mermaid
 flowchart LR
     classDef chiliEng fill:#fff4d6,stroke:#d4a017,stroke-width:2px
-    classDef chiliIpc stroke:#0066cc,stroke-width:2px
-    classDef attachSock stroke:#cc3300,stroke-width:2px,stroke-dasharray:5
+    classDef store fill:#e8f4ff,stroke:#0066cc
 
-    Vendor["Vendor WS/REST<br/>(ccxt: Binance/Bybit/Bitget/HL;<br/>IB; Massive; nxcar)"]
-    FH[fh daemon<br/>vendor normalize]
-    TP[tp daemon<br/>ChiliEngine + tplog]:::chiliEng
-    RDB[rdb daemon<br/>ChiliEngine pepper=True]:::chiliEng
-    WDB[wdb daemon<br/>ChiliEngine pepper=True]:::chiliEng
-    HDB[hdb daemon<br/>ChiliEngine pepper=True]:::chiliEng
-    GW[gw daemon<br/>StorageEngine + attach-socket server]:::chiliEng
-    Client[Client app<br/>or downstream pipeline]
-    DIS[dis daemon<br/>liveness registry]
-    MON[mon daemon<br/>probes + alerts]
+    Vendor["Vendor WS/REST"]
+    FH[fh<br/>vendor normalize]
+    TP[tp ChiliEngine<br/>init_tick + publish + eod]:::chiliEng
+    RDB[rdb ChiliEngine<br/>subscribe + get_var]:::chiliEng
+    WDB[wdb ChiliEngine<br/>subscribe + get_var<br/>+ write_partitioned_df at eod]:::chiliEng
+    HDB[hdb ChiliEngine<br/>load_partitioned_df + eval]:::chiliEng
+    HdbStore[(HDB Parquet<br/>partition_date=YYYY-MM-DD)]:::store
+    GW[gw ChiliEngine<br/>open_handle + sync]:::chiliEng
+    Client[Client]
+    DIS[dis<br/>liveness registry]
+    MON[mon<br/>probes + alerts]
 
-    Vendor -->|WS subscribe| FH
-    FH -->|publish_via_handle<br/>chili IPC TCP| TP:::chiliIpc
-    TP -->|tplog append + upd_notify_fd<br/>push-model 0.8.7| RDB
-    TP -->|tplog append + upd_notify_fd<br/>push-model 0.8.7| WDB
-    WDB -->|periodic Parquet flush<br/>+ EOD finalize| HDBStore[(HDB Parquet<br/>partitioned tables)]
-    HDB -->|reads| HDBStore
-    Client -->|attach-socket pepper query| GW:::attachSock
-    GW -->|attach-socket| RDB:::attachSock
-    GW -->|attach-socket| WDB:::attachSock
-    GW -->|in-process ChiliEngine read| HDBStore
+    Vendor -->|tick msg| FH
+    FH -->|publish over handle<br/>chili IPC TCP| TP
+    TP -->|chili applies upd to subscriber memory<br/>no Python in the data path| RDB
+    TP -->|chili applies upd to subscriber memory| WDB
+    WDB -->|on eod: write_partitioned_df| HdbStore
+    HDB -->|reads on boot / refresh| HdbStore
+    Client -->|sync select query| GW
+    GW -->|sync select| RDB
+    GW -->|sync select| WDB
+    GW -->|local hdb eval| HdbStore
     TP -.register.-> DIS
     FH -.register.-> DIS
     RDB -.register.-> DIS
@@ -82,353 +179,208 @@ flowchart LR
     MON -.reads.-> DIS
 ```
 
-**Color/style key:** yellow box = daemon embeds `chili.ChiliEngine`; blue solid = chili IPC (TCP); red dashed = AF_UNIX attach-socket (mdata's custom wrapper around chili pepper eval); dotted = liveness/observability.
+Differences from v1:
+- **No `upd_notify_fd` / `drain_upds` arrows.** The arrow `TP → RDB` (and `TP → WDB`) carries "chili applies upd to subscriber memory" — that's chili's internal Rust receive thread, no Python involvement.
+- **No mention of `attach_socket`.** Client / gw queries go via main's `sync(h, "select …")` over chili IPC.
+- **EOD path explicit.** WDB writes Parquet at EOD only (via `pub.eod(date)` broadcast); during the day, WDB accumulates in memory like a kdb+tick rdb.
 
-The **write path is already chili-IPC end-to-end** (fh → tp). The **query path is attach-socket** (Client → gw → rdb/wdb), with one exception: gw → hdb is in-process chili because gw embeds a ChiliEngine for direct Parquet reads. The IPC cutover proposal would unify the query path on chili-IPC.
-
-### Hot publish path — sequence diagram (zoom)
-
-The single most-exercised chili interaction in mdata. Every vendor tick travels this path:
+### Chart 2: Hot publish path (clean one-direction sequence)
 
 ```mermaid
 sequenceDiagram
-  participant V as Vendor WS/REST
+  participant V as Vendor
   participant FH as fh daemon
   participant TP as tp ChiliEngine
-  participant FS as tplog file
-  participant RDB as rdb subscriber
-  participant WDB as wdb subscriber
+  participant RDB as rdb ChiliEngine<br/>(subscribed)
+  participant WDB as wdb ChiliEngine<br/>(subscribed)
 
-  V->>FH: trade / quote msg
-  Note over FH: normalize per schema<br/>(audit cols: seq, ingest_ts,<br/>schema_version)
-  FH->>TP: publish_via_handle(h, table, df)<br/>chili IPC TCP
-  TP->>FS: append rows to tplog
-  TP-->>FH: ack (synchronous return)
-  TP->>RDB: upd_notify_fd ready<br/>(edge-triggered)
-  TP->>WDB: upd_notify_fd ready<br/>(edge-triggered)
-  par push-model drain
-    RDB->>TP: drain_upds() until EAGAIN
-    TP-->>RDB: new rows
-  and
-    WDB->>TP: drain_upds() until EAGAIN
-    TP-->>WDB: new rows
-  end
-  Note over RDB,WDB: row visible to queries<br/>within < 1 drain interval
+  V->>FH: tick msg
+  Note over FH: normalize per schema<br/>(audit cols: seq, ingest_ts)
+  FH->>TP: publish over chili IPC<br/>(fh has open_handle to tp)
+  Note over TP: init_tick previously called;<br/>publish appends to tplog +<br/>broadcasts to subscriber handles
+  TP-->>RDB: chili Rust thread applies upd<br/>to rdb's "trade" table memory
+  TP-->>WDB: chili Rust thread applies upd<br/>to wdb's "trade" table memory
+  Note over RDB,WDB: NO Python in the data path.<br/>Subscriber Python code never touches each row.<br/>Queries read via get_var or pepper select.
 ```
 
-This is the path that hit A-033 under sustained 6944 msg/sec load — the `flush_tplog` call from tp's periodic-flusher was blocking the event loop. mdata's F8 fix dispatches flush via `asyncio.to_thread`; an async surface in chili would obviate this.
+**Compare to v1's chart** which depicted `TP -->> RDB: upd_notify_fd ready` — that arrow was wrong. tp doesn't signal subscriber notify_fds; chili's subscriber-side receive thread is what notifies (when armed). And under this reframe, subscribers don't arm notify_fds at all — they let chili apply and read via get_var on demand.
 
----
-
-## 2. chili API surface in production today
-
-Concrete inventory of chili APIs invoked by mdata source (chili 0.8.8 as of 2026-05-24):
-
-| chili API | mdata callsites | Used for |
-|---|---|---|
-| `ChiliEngine(...)` | 9 constructor sites | One per daemon (tp/rdb/wdb/hdb) + 2 StorageEngine wraps (gw/wdb writer) + 2 RemoteTpClient fallback + 1 default-engine fallback |
-| `ChiliEngine(pepper=True)` | 4 sites | rdb / wdb / hdb subscribers — need pepper variable lookup at query time |
-| `engine.publish_via_handle(h, table, df)` | 10 sites | fh → tp cross-process publish (the canonical write path) |
-| `engine.subscribe(socket, topics, resume_from={...})` | 1 site (`common/drain_loop.py`) | rdb/wdb subscribe to tp's tplog with cursor resume on restart |
-| `engine.upd_notify_fd()` + `drain_upds()` | wired in `common/drain_loop.py` | **Push-model (chili 0.8.7 W4)** — event-driven subscriber wake; replaces poll loop |
-| `engine.get_var(name)` / `set_var(name, value)` | many (no count) | Pepper variable read/write — primary in-engine state mechanism (e.g., `.tick.upd`, `.tick.eod`) |
-| `engine.eval_str(...)` (**W1, 0.8.8**) | 0 active mdata uses yet | Self-discovered bytes-form `sync(h, b"<src>")` covered our W1 need; eval_str builtin is staged but unconsumed |
-| `chili.attach_socket` / `engine.attach_socket(...)` | 6 sites (tp/rdb/wdb/hdb + gw server + gw client) | mdata's custom query surface (AF_UNIX wrapping pepper eval) — graceful TCP shipped in **0.8.8 W2** |
-| `engine.register_fn(name, callable, arity)` (**W3, 0.8.9**) | **0** | Python-callable bridge — to be adopted post-soak; enables IPC cutover |
-| `engine.unregister_fn(name)` (**W3, 0.8.9**) | **0** | Same as above |
-| Tuple-form `sync(h, (name, *args))` (**W3, 0.8.9**) | **0** | Remote dispatch of registered Python callable |
-
-### Sub-engine pattern
-
-Four daemons (rdb, wdb, hdb, gw) construct their engine with `pepper=True` because they need to evaluate user-supplied pepper queries (e.g., `select * from quote where seq within (s1; s2)`). tp uses `pepper=False` because it only writes via `publish_via_handle`.
-
-**`StorageEngine` wrapper (mdata-internal, `src/mdata/db/storage.py`):** when an mdata daemon needs to read/write Parquet under its own pepper engine, it wraps `ChiliEngine` in `StorageEngine` which adds (a) partition-aware Parquet load helpers, (b) schema enforcement on write, (c) integration with mdata's audit columns (`seq`, `ingest_ts`, `schema_version`). gw wraps for hdb reads; wdb wraps for periodic-flush writes.
-
-### Push-model (chili 0.8.7 W4) — load-bearing for mdata
-
-`upd_notify_fd()` + `drain_upds()` replaced mdata's earlier poll-loop subscriber and is now load-bearing. Key invariants exercised in production:
-
-- **Resume-from cursor.** `engine.subscribe(resume_from={...})` lets rdb/wdb restart and replay missed updates from the last durable position. Cursor stored in `src/mdata/common/cursor_store.py`.
-- **No silent drops.** `drain_upds()` returns all updates appended since last drain; rdb's `RdbSubscriber` invariant is "every published row appears in cache within drain interval".
-
-mdata's recovery scenarios (in `tests/recovery/`) exercise tp restart / rdb restart / wdb restart / fh restart with no row loss. These tests are the primary signal that the push-model is working correctly.
-
-### Per-daemon chili API matrix (visual)
-
-Same information as the table above, but laid out as a daemon→API bipartite graph for visual scan:
+### Chart 3: EOD via main's `eod()` + pepper shim
 
 ```mermaid
-flowchart LR
-  classDef api fill:#e6f0ff,stroke:#0066cc,color:#000
-  classDef daemon fill:#fff4d6,stroke:#d4a017,color:#000
-  classDef nochili fill:#f0f0f0,stroke:#888,color:#666
+sequenceDiagram
+  participant TP as tp ChiliEngine
+  participant CHILI as chili IPC<br/>(internal)
+  participant WDB as wdb ChiliEngine<br/>(subscribed; pepper eod shim defined at boot)
+  participant HDB as HDB Parquet
 
-  subgraph APIs["chili API surface"]
-    direction TB
-    A1[ChiliEngine constructor]:::api
-    A2[publish_via_handle]:::api
-    A3[subscribe + drain_upds<br/>+ resume_from cursor]:::api
-    A4[get/set_var pepper]:::api
-    A5[attach_socket<br/>+ sync bytes-form]:::api
-    A6[eval_str W1 — staged<br/>0.8.8]:::api
-    A7[register_fn / unregister_fn<br/>W3 — post-soak 0.8.9]:::api
-  end
+  Note over WDB: At boot, before subscribe:<br/>wdb.eval(".sub.eod.fired: 0n")<br/>wdb.eval("eod: {[msg] .sub.eod.fired: msg}")<br/>wdb.subscribe(tp_uri, topics)
 
-  tp[tp]:::daemon --> A1
-  tp --> A2
-  tp --> A5
-  fh[fh]:::daemon --> A2
-  rdb[rdb]:::daemon --> A1
-  rdb --> A3
-  rdb --> A4
-  rdb --> A5
-  wdb[wdb]:::daemon --> A1
-  wdb --> A3
-  wdb --> A4
-  wdb --> A5
-  hdb[hdb]:::daemon --> A1
-  hdb --> A4
-  hdb --> A5
-  gw[gw]:::daemon --> A1
-  gw --> A4
-  gw --> A5
-  dis[dis no chili]:::nochili
-  mon[mon no chili]:::nochili
+  Note over TP: At market close:<br/>tp.eod(date.today())
+  TP->>CHILI: signal_eod broadcast
+  CHILI->>WDB: sync(h, (`eod; date)) on subscriber handle
+  Note over WDB: pepper eod shim fires:<br/>.sub.eod.fired := date
+
+  Note over WDB: A simple polling timer (every 1s) checks:<br/>if wdb.get_var(".sub.eod.fired") is not None: finalize_eod()
+  WDB->>HDB: wdb.write_partitioned_df(<br/>get_var("trade"), hdb_path, "trade", date)
+  WDB->>HDB: ... per table ...
+  Note over WDB: wdb clears its in-memory tables<br/>(del_var or set_var to empty)<br/>and resets .sub.eod.fired for next day
 ```
 
-Key takeaways from the matrix: (a) `ChiliEngine` is the most-shared API (5 of 7 chili-using daemons); (b) `attach_socket` is used by every daemon that exposes a query surface (5 of 7); (c) `register_fn` (W3) currently has zero consumers — that's the IPC-cutover opportunity; (d) `eval_str` (W1) also has zero active mdata uses because the bytes-form `sync(h, b"...")` self-discovery in 0.8.7 covered our need before the W1 builtin shipped.
+This is `test_subscriber_eod_dispatch.py` from main, plus the wdb-side Parquet finalize. Total wdb-side Python code: ~30 LOC. A-034 + `_check_eod` + `_eod_safety_loop` + `_after_drain` (~250 LOC) all go away.
 
----
-
-## 3. Cross-process call shape (chili IPC vs AF_UNIX attach-socket)
-
-mdata uses **two distinct cross-process transports** today:
-
-### Write path — chili IPC (TCP listener on tp)
-
-- tp starts a chili IPC TCP listener (`engine.start_tcp_listener(port=...)`).
-- fh connects via `RemoteTpClient(args.tp_url)` (`src/mdata/tp/remote_client.py:127`) → calls `publish_via_handle(h, table, df)` over chili IPC.
-- This is the **canonical chili usage pattern** and works well. Throughput sustained at 6944 msg/sec aggregate during v1-32 6h soak (12/12 rc=0).
-
-### Query path — AF_UNIX attach-socket (mdata's custom wrapper around pepper eval)
-
-- rdb/wdb/hdb each start an AF_UNIX socket server (`src/mdata/common/attach_socket.py`).
-- Client connects, sends pepper source text, server evaluates via `engine.sync(h, b"<src>")` (the W1 self-discovered bytes-form), returns serialized result.
-- gw embeds a client-side `RemoteRdbClient` / `RemoteWdbClient` (`src/mdata/common/remote_client.py`) — wraps the AF_UNIX socket protocol.
-- **MultiRdbRouter** (`src/mdata/common/remote_client.py:225`) — gw's HA router for multi-rdb-instance fanout (per gw multi-instance work, v1-33).
-
-This second transport exists for two historical reasons:
-
-1. **Pre-0.8.8 chili IPC was TCP-only**, and mdata wanted AF_UNIX for within-machine performance.
-2. **Pre-0.8.9 chili had no Python-callable bridge**, so to evaluate arbitrary pepper from a remote client we had to either (a) push the query as a bytes literal, or (b) build our own dispatch layer. We chose AF_UNIX with bytes-form pepper eval.
-
-W2 (graceful bare-TCP in 0.8.8) + W3 (register_fn in 0.8.9) together remove both reasons. The **IPC cutover proposal** (`docs/proposals/ipc_cutover_remove_unix_socket_2026-05-24.md`) Option A' migrates all 6 attach-socket surfaces to chili-IPC.
-
-### Mermaid: today vs post-cutover
-
-```mermaid
-flowchart TB
-    subgraph Today["Today (chili 0.8.8, 2026-05-24)"]
-        direction LR
-        FH1[fh] -->|chili IPC TCP| TP1[tp]
-        Client1[Client] -->|AF_UNIX attach-socket| GW1[gw]
-        GW1 -->|AF_UNIX attach-socket| RDB1[rdb]
-        GW1 -->|AF_UNIX attach-socket| WDB1[wdb]
-    end
-    subgraph Future["After IPC cutover (post-0.8.9 install + v1-36+)"]
-        direction LR
-        FH2[fh] -->|chili IPC| TP2[tp]
-        Client2[Client] -->|chili IPC| GW2[gw]
-        GW2 -->|chili IPC<br/>register_fn dispatch| RDB2[rdb]
-        GW2 -->|chili IPC<br/>register_fn dispatch| WDB2[wdb]
-    end
-```
-
-The cutover removes ~600 LOC of attach-socket plumbing (`attach_socket.py` + `remote_client.py` + per-daemon server boot). The trade-off is that mdata becomes more deeply coupled to chili-IPC semantics — which is fine *if* chili-IPC continues to evolve in ways that meet mdata's needs.
-
-### Query fanout — sequence diagram (today, with post-cutover annotation)
-
-The other most-exercised chili interaction: a client query landing at gw and fanning out across rdb instances + hdb. Highlights what `register_fn` (W3) would change:
+### Chart 4: Query fanout (gw using main's `sync`)
 
 ```mermaid
 sequenceDiagram
   participant C as Client
-  participant GW as gw daemon
-  participant MR as MultiRdbRouter
-  participant R1 as rdb-1
-  participant R2 as rdb-2
-  participant HDB as in-process hdb engine
+  participant GW as gw ChiliEngine
+  participant R1 as rdb-1 ChiliEngine
+  participant R2 as rdb-2 ChiliEngine
+  participant HDB as HDB Parquet (gw-local)
 
-  C->>GW: query(table, seq within [s1, s2])
-  GW->>MR: pick instance(s)
-  Note over MR: selector: round-robin or<br/>least-outstanding-requests<br/>(gw multi-instance, v1-33)
+  Note over GW: At boot:<br/>h1 = gw.open_handle("chili://rdb-1:40001")<br/>h2 = gw.open_handle("chili://rdb-2:40002")<br/>gw.load_partitioned_df(hdb_path)
 
-  rect rgb(255,235,235)
-    Note over GW,R2: TODAY — AF_UNIX attach-socket<br/>(mdata custom layer wrapping pepper eval)
-    par fanout
-      GW->>R1: send bytes-form pepper source
-      R1-->>GW: serialized rows (custom wire format)
-    and
-      GW->>R2: send bytes-form pepper source
-      R2-->>GW: serialized rows (custom wire format)
-    end
+  C->>GW: query("select * from trade where seq within [s1,s2]")
+  Note over GW: Selector picks instance(s)<br/>(round-robin or least-outstanding-requests)
+  par fanout
+    GW->>R1: sync(h1, "select * from trade where seq within (s1; s2)")
+    R1-->>GW: rows shard A
+  and
+    GW->>R2: sync(h2, "select * from trade where seq within (s1; s2)")
+    R2-->>GW: rows shard B
   end
-
-  GW->>HDB: in-process ChiliEngine read<br/>(StorageEngine + Parquet partition)
+  GW->>HDB: gw.eval("select * from hdb_trade where ...") locally
   HDB-->>GW: historical rows
-  GW->>GW: merge shards (Polars LazyFrame)
+  GW->>GW: merge shards
   GW-->>C: merged result
-
-  rect rgb(220,240,220)
-    Note over GW,R2: POST-CUTOVER (v1-36+, on chili 0.8.9 W3)<br/>same flow; attach-socket replaced by:<br/>sync(h, ("mdata_query_recent", table, s1, s2))<br/>over chili IPC + register_fn dispatch
-  end
 ```
 
-Red rectangle = today's attach-socket path; green annotation = how W3 register_fn would replace it. Same call shape from the client's perspective; the gw → rdb leg changes transport + dispatch primitive.
-
-### 3.1 EOD finalize state machine — multi-daemon coordination
-
-End-of-day finalize is the most chili-semantics-sensitive flow in mdata because it crosses 3 daemons (tp → wdb → hdb), uses pepper variables for the handshake (`set_var(".tick.eod", ...)`), and must be idempotent / restart-safe. v1-35 added the wdb pepper shim (A-034) to make this autonomous; before, finalize was orchestrated by an external script.
-
-```mermaid
-stateDiagram-v2
-  [*] --> Capturing: market open<br/>(fh publishing via tp; rdb + wdb on push-model)
-  Capturing --> Capturing: vendor ticks<br/>(thousands/sec)
-
-  Capturing --> EodSignal: tp set_var(".tick.eod", <ts>)<br/>(broadcast to subscribers)
-
-  EodSignal --> WdbShimSees: wdb pepper shim (A-034)<br/>get_var(".tick.eod") handler fires
-  WdbShimSees --> WdbDraining: wdb forces final drain_upds()
-
-  WdbDraining --> PeriodicFlush: WdbPeriodicFlusher runs<br/>(time + memory triggers per PRD §3.3)
-  PeriodicFlush --> FinalShardWritten: zstd Parquet to staging dir
-  FinalShardWritten --> HdbPartitionRenamed: atomic rename<br/>staging → HDB partition_date=YYYY-MM-DD
-  HdbPartitionRenamed --> EodSentinelCleared: mon probe sees clean state<br/>set_var(".sub.eod.fired", true)
-  EodSentinelCleared --> [*]: market closed for the day
-
-  WdbDraining --> SafetyTimeout: _eod_safety_loop fallback<br/>(if shim race or hang)
-  SafetyTimeout --> WdbDraining: retry drain
-```
-
-Chili-semantics dependencies this flow exposes:
-
-1. **`set_var` broadcast must be visible to all subscribers before next `drain_upds`.** If tp sets `.tick.eod` and wdb's next drain doesn't see it, the shim handler never fires and the safety-loop fallback (slow, polling) is what saves us.
-2. **Final drain must be exhaustive.** `drain_upds()` must yield every row appended since the previous drain, including the EOD-marker row itself.
-3. **Atomic Parquet rename is mdata-side, not chili** — but it depends on wdb's chili engine being quiesced (no in-flight writes) at rename time. If chili's writer holds an internal buffer past `flush_tplog`, the rename can race.
-
-The state machine is *also* the reason the async-surface wishlist matters: under load, the `PeriodicFlush → FinalShardWritten` transition can stall the event loop (A-033 root cause). F8 (executor dispatch) mitigates today; native async `flush_tplog_async` would remove the workaround.
+No `attach_socket`, no `RemoteRdbClient` custom layer, no `MultiRdbRouter` over Unix sockets. Just `open_handle` + `sync` per chili main.
 
 ---
 
-## 4. Wishlist status — what shipped, what's open
+## 5. mdata cleanup — what gets removed
 
-### Delivered (closed)
+Concrete file-level cleanup for the v1-36 architecture sprint:
 
-| Wishlist | mdata doc | chili delivery | chili version |
+| Path | LOC | What it does today | Replacement |
 |---|---|---|---|
-| **W1** — arbitrary pepper-eval over IPC | `chili_wishlist_2026-05-23_remote-eval-surface.md` | bytes-form `sync(h, b"...")` self-discovered; `eval_str` builtin in 0.8.8 | 0.8.8 |
-| **W2** — graceful bare-TCP on `start_tcp_listener` (clean shutdown / restart) | Same doc | Shipped | 0.8.8 |
-| **W3** — Python-callable bridge (`register_fn` + `unregister_fn` + tuple-form `sync(h, (name, *args))`) | Same doc | Shipped — wheel `chili_sauce-0.8.9-cp310-abi3-macosx_11_0_arm64.whl` | 0.8.9 |
-| **W4** — Push-model (`upd_notify_fd` + `drain_upds`) — older wishlist | `chili_wishlist_2026-05-17_push-model.md` | Shipped, replaces poll loop | 0.8.7 |
+| `src/mdata/common/drain_loop.py` | ~530 | Arms `upd_notify_fd`, drives `drain_upds` event pump, dispatches per_table_handler + cursor_recorder + after_drain | **DELETE** — subscribers use `subscribe()` + `get_var()` on demand |
+| `src/mdata/common/cursor_store.py` | ~270 | Persists chili `cursor_hi` per table for `subscribe(resume_from=)` | **DELETE** — accept full-day replay on restart |
+| `src/mdata/wdb/wdb_subscriber.py` (A-034 additions) | ~90 (just shipped v1-35.1) | `_EOD_SHIM_DEFINE`, `_check_eod`, `_eod_safety_loop`, `_dispatch_eod` | **REPLACE** with 5-line pepper shim + simple periodic timer per `test_subscriber_eod_dispatch.py` |
+| `src/mdata/rdb/subscriber.py` (after_drain wiring) | ~80 | `_after_drain` ride-the-drain EOD detection + cursor advance | **DELETE** that wiring; keep only the boot-time pepper shim definition |
+| `src/mdata/tp/periodic_flush.py` | ~120 | Calls `engine.flush_tplog()` every 100 ms | **DELETE** if chili 0.9.x ships W1 (auto-flush config); otherwise keep until W1 lands |
+| `src/mdata/common/attach_socket.py` | ~250 | AF_UNIX wrapping bytes-form pepper eval | **DELETE** — gw uses main's `sync(h, "select …")` directly |
+| `src/mdata/common/remote_client.py` (RemoteRdbClient, MultiRdbRouter, etc.) | ~600 | Custom RPC over attach-socket | **REWRITE** as thin wrapper around `open_handle + sync`; keep MultiRdbRouter's selector logic (round-robin / LOR) but drop the transport layer |
+| `tests/spikes/test_chili_register_fn_w3.py` | ~150 | W3 acceptance skeleton (skipped on 0.8.8) | **DELETE** — W3 not needed under the user-of-chili reframe |
+| `docs/proposals/ipc_cutover_remove_unix_socket_2026-05-24.md` | ~500 | IPC cutover Option A' (via W3) | **SUPERSEDE** by this doc; the actual cutover becomes "switch from attach-socket to main `sync`" — no W3 needed |
 
-### Open (not blocking, but on radar)
-
-1. **Async surface** — `docs/sync/chili_wishlist_2026-05-22_async-surface.md`
-   - **W1 (async).** `flush_tplog_async()` — currently `flush_tplog()` is sync, holds GIL, blocks the event loop. mdata mitigates by dispatching to `asyncio.to_thread` executor (A-033 fix F8) but native async would be cleaner.
-   - **W2 (async).** Reader fairness under sustained writer load. mdata observed RwLock reader starvation during A-033 (6944 msg/sec writer); mitigated mdata-side with executor-bounded `__ping__` fast path (F7).
-2. **Producer-side fsync-before-broadcast seam** — `docs/sync/chili_note_2026-05-19_tplog_fsync_broadcast_seam.md`
-   - Closes the cross-machine-survivor durability edge per ADR-0009. Non-blocking; mdata's bounded-durability SLA (≤ 250 ms machine-failure loss) is met without it. Filed for future consideration.
-3. **IPC cutover acceptance from chili side** — not a code ask, more a *design conversation*. mdata's current plan (Option A' in the IPC cutover proposal) leans heavily on `register_fn` + tuple-form `sync`. If the chili author sees a cleaner way for an embedding application to expose a pepper query surface to remote clients, we'd want to hear it before locking the design.
-
-### Suggested topics for the chili-author discussion
-
-Listed in priority order based on mdata's current pressure points:
-
-1. **IPC cutover design review.** Before mdata commits ~10pp of v1-36+ to retiring attach-socket, is `register_fn` + tuple-form dispatch the right primitive, or should chili-IPC have a higher-level "remote pepper eval" surface? mdata's current use is mostly "evaluate this bytes source string, give me the result back" — that's what attach-socket does today via raw bytes-form sync.
-2. **Async surface roadmap.** Even though mdata routed around the sync limitations with executor dispatch, the A-033 fix-arc (F1-F9, 8 commits) cost ~12pp. An async surface in chili would make future similar issues 1pp instead.
-3. **Reader-writer fairness defaults.** mdata observed reader starvation in A-033 at sustained 6944 msg/sec writer load. Tunable? Default-fair? Was the v1-32 mitigation (executor-dispatch + `__ping__` fast-path) the right shape, or is there a chili-side knob we missed?
-4. **Pepper query-result serialization.** mdata serializes pepper results manually over attach-socket today (custom protocol in `attach_socket.py`). With register_fn, can chili-IPC carry the result directly? If so, what's the wire format?
-5. **`StorageEngine` wrap pattern.** mdata's `src/mdata/db/storage.py` adds partition-aware Parquet helpers + schema enforcement on top of ChiliEngine. Is this a pattern other embedding apps would want? Worth upstreaming a subset to chili?
+**Net reduction:** ~1700 LOC across `src/` (plus removed/superseded docs). Not counted: ADR-0006 updates (D-1, D-2, D-3 sections become "deprecated; superseded by tickerplant-canonical pattern").
 
 ---
 
-## 5. Key invariants the chili-team should be aware of
+## 6. Genuine wishlist for chili 0.9.x
 
-These are the load-bearing invariants mdata relies on chili to preserve. If chili changes in a way that breaks any of these, mdata breaks.
+After the cleanup above, mdata's wishlist for chili reduces to **one strict ask + two confirmations**.
 
-1. **`subscribe(resume_from={...})` is exact.** If mdata stores cursor `c` and restarts, replay from `c+1` must yield exactly the rows tp appended after `c`. No duplicates, no gaps. Tested in `tests/recovery/test_recovery_scenarios.py`.
-2. **`publish_via_handle` is atomic at the row level.** A successful return means the row is durably appended to tplog and visible to subscribers on next `drain_upds`.
-3. **`upd_notify_fd()` is edge-triggered.** mdata's drain loop relies on EAGAIN semantics; we read until empty after every fd ready event.
-4. **Pepper variables persist across `sync` calls within one engine.** mdata uses `set_var`/`get_var` for inter-call state (e.g., `.tick.eod`, `.tick.upd`, `.sub.eod.fired`).
-5. **`pepper=True` engines evaluate q/pepper expressions identically to standalone chili.** mdata tests rely on q-equivalence (full pepper grammar).
-6. **`attach_socket` (W2 graceful) survives `SIGTERM` mid-flight without orphaning client connections.** Verified by v1-34 chaos scenarios.
+### W1 — configurable auto-flush in `init_tick` (strict ask)
 
-ADR-0006 (DSS envelope) is mostly an mdata concern but interacts with chili via `publish_via_handle` of the envelope rows.
+**Need:** PRD §5.1 part-2 — kill-9 cold-restart must not lose durable rows. Default OS page-cache flush (~30 s) is too lax for our SLA (within 10 ms / 1 MB).
 
-ADR-0009 (Bounded Durability SLA) is the contract mdata advertises to its users; it's met today by chili's tplog + page-cache, modulo the cross-machine-survivor edge that chili note 2026-05-19 addresses.
+**Proposed API:**
+
+```python
+engine.init_tick(
+    schema={...},
+    log_dir="/path/",
+    date=date.today(),
+    auto_flush_ms=100,         # NEW — fsync every N ms (default: OS-managed)
+    auto_flush_bytes=1_048_576, # NEW — fsync every N bytes since last flush (default: OS-managed)
+)
+```
+
+chili owns the flush cadence; Python no longer calls `flush_tplog` explicitly. Removes `src/mdata/tp/periodic_flush.py` (~120 LOC + a background asyncio task).
+
+### Confirmation C1 — `publish_via_handle` ergonomics
+
+**Question for the author:** under `main`, what's the canonical way for fh (a separate Python process) to publish a Polars DataFrame to a remote tp? Options:
+
+- (a) Keep `publish_via_handle(h, table, df)` in main (currently claude-2 only)
+- (b) Document a `sync(h, "...")` + DataFrame-marshalling recipe
+- (c) Add a registered-fn pattern as the canonical wire transfer
+
+mdata can adapt to whichever the author prefers, but main has no documented marshalling path today. fh→tp is the most-exercised cross-process call in mdata (10 callsites; load-bearing on the hot publish path).
+
+### Confirmation C2 — `roll_tick_log` atomicity under concurrent publish
+
+**Question for the author:** is main's `roll_tick_log(log_dir, filename)` atomic under concurrent `publish()` calls (no row dropped, no row mis-placed across segment boundary)? claude-2's `roll_tick(log_dir, label)` claims explicit atomicity via chili's internal write-lock; main's `roll_tick_log` is a pepper-shim wrapper around `.tick.rollLog`. If the pepper-shim version is already atomic, mdata uses it — done. If not, please document the unsafe case so mdata can guard (or port the atomic variant to main).
 
 ---
 
-## 6. Pipeline-level shape (for context)
+## 7. Implications for mdata sprints (re-plan pending)
 
-mdata runs **4 pipelines** in production (per ADR-0007):
+This doc precedes a sprint re-plan; the principal's direction is to fix the doc first, then re-plan v1-36/v1-37 in light of it. Sketch only:
 
-| Pipeline | Asset class | Vendors | Capture cadence | Status |
-|---|---|---|---|---|
-| **E** | Equity | Massive (REST + WS) | mid-day + EOD | v1-30 91-min soak ✅ |
-| **X** | Crypto | ccxt (Binance/Bybit/Bitget/HL) | 24/7 streaming | v1-32 6h soak ✅; v1-35 24h soak IN FLIGHT |
-| **A** | Private accounts | IB + nxcar | mid-day | Phase A shipped |
-| **P** | Private accounts variant | IB + LTP (planned v1-37) | mid-day | LTP adapter design v4 |
+- **v1-36 first sub-sprint: architecture cleanup (~5-8 pp).**
+  - Deliverable #1: `tests/integration/test_chili_user_pattern.py` exercising mdata's schemas via init_tick + publish + start_tcp_listener + subscribe + get_var + eod() against chili main 0.9.0 (the proof point the chili author asked for).
+  - Deliverable #2: remove ~1700 LOC per §5.
+  - Deliverable #3: chili pin bump 0.8.8 → 0.9.0 (NOT 0.8.9, which we requested under wrong premises).
+  - Deliverable #4: revised ADR-0006 (deprecate D-1/D-2/D-3 push-model sections; canonicalize tickerplant-pattern).
+- **v1-36 second sub-sprint: mock-prod cutover (~10-15 pp).** Same scope as v1-36 was, but on the cleaned codebase.
+- **v1-37 LTP RapidX broker adapter unchanged (~24-34 pp)** — broker adapter, no chili coupling, design at `docs/proposals/ltp_adapter_2026-05-24.md` v4 unaffected.
 
-All pipelines share the same daemon shape (the 9 daemons in §1) but with different `fh` adapters per vendor and different `gw` query routing tables. **chili usage is identical across pipelines** — the framework doesn't care about asset class.
-
-Within one pipeline, chili is the engine layer (in-process pepper) AND the IPC bus (cross-process publish). mdata's user-visible API (Polars LazyFrame over gw) is built on top of chili's pepper query surface plus mdata's Parquet partitioning + Polars conversion.
+The chili-author may want to ship 0.9.x with or without W1. mdata's adoption order:
+1. Confirm main 0.9.0 covers the §6 confirmations (C1, C2). If not, surface concrete blocker.
+2. Adopt main 0.9.0 with Python-side periodic_flush retained.
+3. When W1 lands (chili 0.9.x), drop periodic_flush.
 
 ---
 
-## 7. Cross-references for the chili author
+## 8. What I'm asking the chili author
 
-Existing mdata ↔ chili docs that may be useful pre-reading:
+In priority order:
+
+1. **Read §3 verdict table** — confirm or correct each verdict. Especially: are the OVER-ENGINEERING-DROP verdicts (drain-loop, cursor-store, A-034 wiring, W3, resume_from) actually right? Or are there subtleties I'm missing?
+2. **Answer §6 confirmations** — `publish_via_handle` ergonomics + `roll_tick_log` atomicity.
+3. **Decide W1** — willing to add `init_tick(auto_flush_ms=N, auto_flush_bytes=N)` to chili 0.9.x? mdata's PRD §5.1 SLA depends on durability semantics either way; we need to know whether to wishlist it or document a relaxed SLA.
+4. **0.9.x scope** — given the verdicts above, does the W3 register_fn surface still need to ship? Under the user-of-chili reframe, mdata has no need for it. (Other chili users may; not for me to say.)
+5. **Anything else** — if mdata is still over-engineering in some way I haven't seen, please name it. The bigger the cleanup, the better for both projects.
+
+---
+
+## 9. Cross-references
 
 | Doc | Topic |
 |---|---|
-| `docs/sync/chili_wishlist_2026-05-17_push-model.md` | W4 push-model wishlist (delivered 0.8.7) |
-| `docs/sync/chili_wishlist_2026-05-22_async-surface.md` | Async-surface wishlist (open) |
-| `docs/sync/chili_wishlist_2026-05-23_remote-eval-surface.md` | W1+W2+W3 wishlist (all delivered) |
-| `docs/sync/chili_note_2026-05-19_tplog_fsync_broadcast_seam.md` | Fsync-broadcast seam note (open, non-blocking) |
-| `docs/proposals/ipc_cutover_remove_unix_socket_2026-05-24.md` | IPC cutover design (Option A' planned v1-36+) |
-| `docs/sync/v1_32_a033_step1_findings_2026-05-21.md` | A-033 root cause + F1-F9 fix arc |
-| `docs/decisions/0006-decision-stream-sink-envelope.md` | ADR-0006 DSS envelope contract |
-| `docs/decisions/0007-deployment-topology.md` | ADR-0007 4-pipeline / 3-machine topology |
-| `docs/decisions/0009-bounded-durability-sla.md` | ADR-0009 durability SLA chili interacts with |
-| `docs/standards/chili_capability_inventory.md` | mdata's catalogue of chili APIs we depend on |
+| `docs/sync/chili_wishlist_2026-05-17_push-model.md` | W4 push-model — SHOULD BE RETROACTIVELY DEPRECATED under reframe |
+| `docs/sync/chili_wishlist_2026-05-22_async-surface.md` | Async surface — RECONSIDER; A-033 root cause was Python-side orchestration, not chili sync API |
+| `docs/sync/chili_wishlist_2026-05-23_remote-eval-surface.md` | W1+W2+W3 — W1 redundant (main inline-eval); W3 over-engineering; W2 (graceful TCP) genuinely useful |
+| `docs/sync/chili_note_2026-05-19_tplog_fsync_broadcast_seam.md` | Cross-machine fsync seam — STILL VALID for the cross-machine-survivor edge |
+| `docs/proposals/ipc_cutover_remove_unix_socket_2026-05-24.md` | IPC cutover Option A' — SUPERSEDED; the right cutover is attach-socket → main `sync` (no W3 needed) |
+| `docs/sync/v1_32_a033_step1_findings_2026-05-21.md` | A-033 fix arc — root-cause reframe: Python orchestrating chili's job, not chili limitations |
+| `docs/decisions/0006-decision-stream-sink-envelope.md` | ADR-0006 — D-1/D-2/D-3 push-model sections to be DEPRECATED |
+| `docs/standards/chili_capability_inventory.md` | Catalogue of chili APIs mdata depends on — REWRITE under new reframe |
 
-chili-side mirror docs already in place (mdata user can read them via `~/code/chili/docs/sync/`):
+### chili-side mirror docs (already published)
 
 | Doc | Topic |
 |---|---|
-| `mdata_chili_2026-05-19_0.8.7_delivery.md` | chili-side W4 delivery record |
-| `mdata_chili_2026-05-23_0.8.8_delivery.md` | chili-side W1+W2 delivery record |
-| `mdata_chili_2026-05-24_0.8.9_delivery.md` | chili-side W3 delivery record |
-| `upstream_v0.9_vs_claude-2_0.8.9_gap_analysis_2026-05-24.md` | chili's own forward-looking gap analysis |
-
----
-
-## 8. Requested response shape
-
-Not load-bearing — just what would be most useful to mdata when the chili author has time to respond:
-
-1. **Sanity-check the topology.** Is mdata using chili the way the author intended? Or have we built around an API surface in a way that suggests a missing primitive?
-2. **IPC cutover blessing or redirect.** Option A' (register_fn-based attach-socket replacement) is mdata's current plan. If there's a cleaner way to do "remote pepper eval over chili IPC", we'd rather know before v1-36 starts than after.
-3. **Async-surface priority.** Is `flush_tplog_async` on the chili roadmap? If yes, when? If no, mdata stays with executor-dispatch (A-033 mitigation pattern) indefinitely — fine, just want to know.
-4. **Anything we're not asking about that we should be.** mdata's view of chili is necessarily mdata-shaped. The chili author may see refactor opportunities we don't.
-
-No deadline. Soak completes ~09:00 local Monday 2026-05-25; chili 0.8.9 install + W3 acceptance test follows; then v1-36 mock-prod cutover OR v1-37 LTP adapter (principal's call). IPC cutover (v1-36+) is the first sprint that would benefit from the chili author's input.
+| `~/code/chili/docs/sync/mdata_chili_2026-05-19_0.8.7_delivery.md` | W4 push-model delivery — retroactively deprecated by mdata reframe |
+| `~/code/chili/docs/sync/mdata_chili_2026-05-23_0.8.8_delivery.md` | W1+W2 delivery — W1 redundant, W2 useful |
+| `~/code/chili/docs/sync/mdata_chili_2026-05-24_0.8.9_delivery.md` | W3 delivery — over-engineering on mdata's request side |
+| `~/code/chili/docs/sync/upstream_v0.9_vs_claude-2_0.8.9_gap_analysis_2026-05-24.md` | chili-team's own forward-looking gap analysis |
 
 ---
 
 ## Document provenance
 
-**Drafted by:** mdata-side Claude (claude branch, `~/code/mdata`), 2026-05-24 evening (mid-soak; docs-only work safe).
-**Verification:** every callsite count + version pin + cross-reference was grepped or read at draft time (per `~/.claude/rules/verify-before-claim.md`). One Explore-subagent audit pass over current source surfaced the figures in §1-§3.
-**No changes to `src/mdata/`** while soak runs. This doc + chili-side mirror are the only artifacts.
+- **v1 (commits `b3774ae` / `b124400`, `1ee7c94` / `f2041a8`, 2026-05-24)** — initial draft framing mdata as orchestrating chili; the chili author corrected this with the "user of chili-sauce" reframe.
+- **Revision A (this commit)** — wholesale rewrite. Verified against:
+  - `git show main:crates/chili-py/chili/engine.py` (38 public methods on main 0.9.0)
+  - `git show main:crates/chili-py/tests/test_tick_sub.py` (canonical pub/sub)
+  - `git show main:crates/chili-py/tests/test_subscriber_eod_dispatch.py` (canonical EOD)
+  - `git diff --stat main..claude-2 -- crates/chili-py/` (claude-2 deltas)
+  - mdata source: `src/mdata/common/drain_loop.py`, `src/mdata/wdb/wdb_subscriber.py`, `src/mdata/tp/periodic_flush.py`
+- **Mid-soak constraint** — 24h Pipeline X soak still in flight on chili 0.8.8 (chaude-2 era); doc-only commit; no `src/` changes; no pytest run.
+- **Next step after this doc lands** — sprint re-plan (v1-36 architecture cleanup; v1-37 LTP unchanged).
