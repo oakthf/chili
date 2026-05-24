@@ -29,17 +29,21 @@
 //! reduction was not worth process-level interop breakage. See
 //! `docs/sync/mdata_chili_2026-05-08_pyarrow_response.md`.
 
+mod external_dispatcher;
+
 use std::process;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use chili_core::constant::{NS_IN_DAY, UNIX_EPOCH_DAY};
-use chili_core::{EngineState, SpicyObj, Stack, UpdEventCore};
+use chili_core::{EngineState, ExternalFnDispatcher, Func, SpicyObj, Stack, UpdEventCore};
 use chili_op::{BUILT_IN_FN, LOG_FN};
+
+use crate::external_dispatcher::PyExternalDispatcher;
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Timelike, Utc};
 use indexmap::IndexMap;
 use polars::frame::DataFrame;
 use polars::prelude::IntoLazy;
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{
     PyBool, PyBytes, PyDate, PyDateTime, PyDelta, PyDict, PyFloat, PyInt, PyList, PyString, PyTime,
@@ -311,6 +315,15 @@ impl UpdEvent {
 struct PyEngineState {
     inner: Arc<EngineState>,
     init_pid: u32,
+    /// ADR-0007 (Sprint 23) — W3 Python-callable bridge. Lazily created
+    /// on the first `register_fn` call; non-W3 engines never allocate
+    /// the dispatcher and never reach the W3 branch in
+    /// `eval_fn_call` (chili-core sees `external_dispatcher = None`).
+    /// The Mutex protects the Option only, not the dispatcher itself;
+    /// once initialized, the dispatcher's internal `callables` RwLock
+    /// handles all subsequent register/unregister/dispatch concurrency
+    /// (see external_dispatcher.rs).
+    w3_dispatcher: Mutex<Option<Arc<PyExternalDispatcher>>>,
 }
 
 impl PyEngineState {
@@ -368,7 +381,152 @@ impl PyEngineState {
         Ok(Self {
             inner: arc,
             init_pid: process::id(),
+            w3_dispatcher: Mutex::new(None),
         })
+    }
+
+    /// ADR-0007 (Sprint 23) — register a Python callable as a
+    /// pepper-invokable function.
+    ///
+    /// The function becomes callable from pepper source via
+    /// tuple-dispatch:
+    ///
+    /// * ``client.sync(h, (name, *args))`` over chili-IPC (the typical
+    ///   shape for mdata's control verbs).
+    /// * ``engine.fn_call(name, args)`` for a local invocation.
+    /// * ``name[arg1; arg2; ...]`` in pepper source (e.g. inside a
+    ///   pepper script that the engine has already loaded).
+    ///
+    /// Arguments
+    /// ---------
+    /// ``name`` :  pepper function name. Any valid identifier; mdata
+    ///             convention uses dotted names like
+    ///             ``".mdata.eod.fire"``.
+    /// ``callable``: a Python callable. Arg + return types are bridged
+    ///             via the existing chili type system (primitives,
+    ///             dates, lists, dicts, DataFrames). Unsupported types
+    ///             raise ``ChiliError`` at the boundary.
+    /// ``arity`` : number of positional arguments the callable expects.
+    ///             Mismatch at the call site produces a partial-applied
+    ///             function (matches existing pepper user-fn behavior).
+    ///
+    /// Concurrency
+    /// -----------
+    /// Callbacks dispatch on the chili-IPC thread that received the
+    /// call. The dispatcher acquires the GIL for the call duration
+    /// (~300 ns overhead per round-trip, measured); the callable is
+    /// responsible for any internal thread-safety. Re-entry into engine
+    /// methods (``engine.fn_call`` / ``engine.set_var`` /
+    /// ``engine.get_var``) from within the callback is safe — chili-core
+    /// holds zero ``vars`` locks across function-dispatch boundaries.
+    ///
+    /// Shadowing
+    /// ---------
+    /// Calling ``engine.set_var(name, ...)`` AFTER ``register_fn(name,
+    /// ...)`` silently overwrites the Func placeholder; subsequent
+    /// pepper calls to ``name`` will follow normal var dispatch (will
+    /// error since ``name`` is no longer a Fn). To re-register, call
+    /// ``register_fn`` again. The internal callable in the dispatcher
+    /// is left in place until ``unregister_fn`` is called.
+    ///
+    /// Wire serialization
+    /// ------------------
+    /// External Funcs over the wire deliver their name only. Clients
+    /// invoking external Funcs MUST use call-form sync
+    /// (``sync(h, (name, *args))``), NOT variable-lookup sync
+    /// (``sync(h, name)`` str-form). The Func is resolved + invoked on
+    /// the server side; only the result travels over the wire.
+    ///
+    /// Exceptions
+    /// ----------
+    /// Exceptions raised by the Python callable propagate as
+    /// ``ChiliError`` on the caller side with the original
+    /// ``ExcType: msg`` and the Python traceback embedded.
+    #[pyo3(signature = (name, callable, arity))]
+    fn register_fn(
+        &self,
+        name: &str,
+        callable: Bound<'_, PyAny>,
+        arity: usize,
+    ) -> PyResult<()> {
+        self.check_fork()?;
+        if !callable.is_callable() {
+            return Err(PyTypeError::new_err(format!(
+                "register_fn: 'callable' must be callable, got {}",
+                callable
+                    .get_type()
+                    .name()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|_| "?".to_string())
+            )));
+        }
+        // Lazy-init the W3 dispatcher + install it on the chili-core
+        // EngineState. After this branch runs once, the EngineState's
+        // `external_dispatcher` slot is wired up for the engine's
+        // lifetime.
+        let dispatcher = {
+            let mut slot = self.w3_dispatcher.lock().expect("w3_dispatcher Mutex");
+            if slot.is_none() {
+                let d = Arc::new(PyExternalDispatcher::new());
+                self.inner
+                    .set_external_dispatcher(Arc::clone(&d) as Arc<dyn ExternalFnDispatcher>);
+                *slot = Some(Arc::clone(&d));
+                d
+            } else {
+                Arc::clone(slot.as_ref().unwrap())
+            }
+        };
+        dispatcher.register(name, callable.unbind());
+        // Install the Func placeholder so pepper var lookup finds it.
+        let placeholder = Func::new_external(name, arity);
+        map_spicy_error(self.inner.set_var(name, SpicyObj::Fn(placeholder)))?;
+        Ok(())
+    }
+
+    /// ADR-0007 (Sprint 23) — unregister a previously registered
+    /// Python callable.
+    ///
+    /// Returns ``True`` if a callable was removed from the dispatcher,
+    /// ``False`` if no such name was registered. If the Func
+    /// placeholder in ``vars`` was already cleared by the user
+    /// (e.g. via ``engine.del_var(name)`` or ``engine.set_var(name,
+    /// ...)`` shadowing), emits ``warnings.warn(...)`` so the
+    /// inconsistency surfaces in logs (per audit MC-13). The unregister
+    /// itself still succeeds — the callable IS removed from the
+    /// dispatcher even if the placeholder was missing.
+    fn unregister_fn(&self, py: Python<'_>, name: &str) -> PyResult<bool> {
+        self.check_fork()?;
+        let removed = {
+            let slot = self.w3_dispatcher.lock().expect("w3_dispatcher Mutex");
+            match slot.as_ref() {
+                Some(d) => d.unregister(name),
+                None => false,
+            }
+        };
+        if removed {
+            // Best-effort: drop the Func placeholder. Emit a UserWarning
+            // if it was already gone, instead of silently ignoring.
+            // chili-core's `del_var` always succeeds (returns Null for
+            // missing) — so we probe `has_var` first to detect the
+            // inconsistency. There's a benign race here: a concurrent
+            // thread could clear the var between `has_var` and `del_var`,
+            // producing a spurious warning. That's acceptable for a
+            // diagnostic.
+            let placeholder_existed = self.inner.has_var(name).unwrap_or(false);
+            let _ = self.inner.del_var(name);
+            if !placeholder_existed {
+                let warnings = py.import("warnings")?;
+                warnings.call_method1(
+                    "warn",
+                    (format!(
+                        "unregister_fn: external Func placeholder '{}' was already cleared from vars; \
+                         callable removed from dispatcher but no placeholder Func was present.",
+                        name
+                    ),),
+                )?;
+            }
+        }
+        Ok(removed)
     }
 
     /// Evaluate a Chili or Pepper expression string (same as the REPL).
