@@ -86,6 +86,38 @@ flowchart LR
 
 The **write path is already chili-IPC end-to-end** (fh → tp). The **query path is attach-socket** (Client → gw → rdb/wdb), with one exception: gw → hdb is in-process chili because gw embeds a ChiliEngine for direct Parquet reads. The IPC cutover proposal would unify the query path on chili-IPC.
 
+### Hot publish path — sequence diagram (zoom)
+
+The single most-exercised chili interaction in mdata. Every vendor tick travels this path:
+
+```mermaid
+sequenceDiagram
+  participant V as Vendor WS/REST
+  participant FH as fh daemon
+  participant TP as tp ChiliEngine
+  participant FS as tplog file
+  participant RDB as rdb subscriber
+  participant WDB as wdb subscriber
+
+  V->>FH: trade / quote msg
+  Note over FH: normalize per schema<br/>(audit cols: seq, ingest_ts,<br/>schema_version)
+  FH->>TP: publish_via_handle(h, table, df)<br/>chili IPC TCP
+  TP->>FS: append rows to tplog
+  TP-->>FH: ack (synchronous return)
+  TP->>RDB: upd_notify_fd ready<br/>(edge-triggered)
+  TP->>WDB: upd_notify_fd ready<br/>(edge-triggered)
+  par push-model drain
+    RDB->>TP: drain_upds() until EAGAIN
+    TP-->>RDB: new rows
+  and
+    WDB->>TP: drain_upds() until EAGAIN
+    TP-->>WDB: new rows
+  end
+  Note over RDB,WDB: row visible to queries<br/>within < 1 drain interval
+```
+
+This is the path that hit A-033 under sustained 6944 msg/sec load — the `flush_tplog` call from tp's periodic-flusher was blocking the event loop. mdata's F8 fix dispatches flush via `asyncio.to_thread`; an async surface in chili would obviate this.
+
 ---
 
 ## 2. chili API surface in production today
@@ -120,6 +152,51 @@ Four daemons (rdb, wdb, hdb, gw) construct their engine with `pepper=True` becau
 - **No silent drops.** `drain_upds()` returns all updates appended since last drain; rdb's `RdbSubscriber` invariant is "every published row appears in cache within drain interval".
 
 mdata's recovery scenarios (in `tests/recovery/`) exercise tp restart / rdb restart / wdb restart / fh restart with no row loss. These tests are the primary signal that the push-model is working correctly.
+
+### Per-daemon chili API matrix (visual)
+
+Same information as the table above, but laid out as a daemon→API bipartite graph for visual scan:
+
+```mermaid
+flowchart LR
+  classDef api fill:#e6f0ff,stroke:#0066cc,color:#000
+  classDef daemon fill:#fff4d6,stroke:#d4a017,color:#000
+  classDef nochili fill:#f0f0f0,stroke:#888,color:#666
+
+  subgraph APIs["chili API surface"]
+    direction TB
+    A1[ChiliEngine constructor]:::api
+    A2[publish_via_handle]:::api
+    A3[subscribe + drain_upds<br/>+ resume_from cursor]:::api
+    A4[get/set_var pepper]:::api
+    A5[attach_socket<br/>+ sync bytes-form]:::api
+    A6[eval_str W1 — staged<br/>0.8.8]:::api
+    A7[register_fn / unregister_fn<br/>W3 — post-soak 0.8.9]:::api
+  end
+
+  tp[tp]:::daemon --> A1
+  tp --> A2
+  tp --> A5
+  fh[fh]:::daemon --> A2
+  rdb[rdb]:::daemon --> A1
+  rdb --> A3
+  rdb --> A4
+  rdb --> A5
+  wdb[wdb]:::daemon --> A1
+  wdb --> A3
+  wdb --> A4
+  wdb --> A5
+  hdb[hdb]:::daemon --> A1
+  hdb --> A4
+  hdb --> A5
+  gw[gw]:::daemon --> A1
+  gw --> A4
+  gw --> A5
+  dis[dis no chili]:::nochili
+  mon[mon no chili]:::nochili
+```
+
+Key takeaways from the matrix: (a) `ChiliEngine` is the most-shared API (5 of 7 chili-using daemons); (b) `attach_socket` is used by every daemon that exposes a query surface (5 of 7); (c) `register_fn` (W3) currently has zero consumers — that's the IPC-cutover opportunity; (d) `eval_str` (W1) also has zero active mdata uses because the bytes-form `sync(h, b"...")` self-discovery in 0.8.7 covered our need before the W1 builtin shipped.
 
 ---
 
@@ -168,6 +245,78 @@ flowchart TB
 ```
 
 The cutover removes ~600 LOC of attach-socket plumbing (`attach_socket.py` + `remote_client.py` + per-daemon server boot). The trade-off is that mdata becomes more deeply coupled to chili-IPC semantics — which is fine *if* chili-IPC continues to evolve in ways that meet mdata's needs.
+
+### Query fanout — sequence diagram (today, with post-cutover annotation)
+
+The other most-exercised chili interaction: a client query landing at gw and fanning out across rdb instances + hdb. Highlights what `register_fn` (W3) would change:
+
+```mermaid
+sequenceDiagram
+  participant C as Client
+  participant GW as gw daemon
+  participant MR as MultiRdbRouter
+  participant R1 as rdb-1
+  participant R2 as rdb-2
+  participant HDB as in-process hdb engine
+
+  C->>GW: query(table, seq within [s1, s2])
+  GW->>MR: pick instance(s)
+  Note over MR: selector: round-robin or<br/>least-outstanding-requests<br/>(gw multi-instance, v1-33)
+
+  rect rgb(255,235,235)
+    Note over GW,R2: TODAY — AF_UNIX attach-socket<br/>(mdata custom layer wrapping pepper eval)
+    par fanout
+      GW->>R1: send bytes-form pepper source
+      R1-->>GW: serialized rows (custom wire format)
+    and
+      GW->>R2: send bytes-form pepper source
+      R2-->>GW: serialized rows (custom wire format)
+    end
+  end
+
+  GW->>HDB: in-process ChiliEngine read<br/>(StorageEngine + Parquet partition)
+  HDB-->>GW: historical rows
+  GW->>GW: merge shards (Polars LazyFrame)
+  GW-->>C: merged result
+
+  rect rgb(220,240,220)
+    Note over GW,R2: POST-CUTOVER (v1-36+, on chili 0.8.9 W3)<br/>same flow; attach-socket replaced by:<br/>sync(h, ("mdata_query_recent", table, s1, s2))<br/>over chili IPC + register_fn dispatch
+  end
+```
+
+Red rectangle = today's attach-socket path; green annotation = how W3 register_fn would replace it. Same call shape from the client's perspective; the gw → rdb leg changes transport + dispatch primitive.
+
+### 3.1 EOD finalize state machine — multi-daemon coordination
+
+End-of-day finalize is the most chili-semantics-sensitive flow in mdata because it crosses 3 daemons (tp → wdb → hdb), uses pepper variables for the handshake (`set_var(".tick.eod", ...)`), and must be idempotent / restart-safe. v1-35 added the wdb pepper shim (A-034) to make this autonomous; before, finalize was orchestrated by an external script.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Capturing: market open<br/>(fh publishing via tp; rdb + wdb on push-model)
+  Capturing --> Capturing: vendor ticks<br/>(thousands/sec)
+
+  Capturing --> EodSignal: tp set_var(".tick.eod", <ts>)<br/>(broadcast to subscribers)
+
+  EodSignal --> WdbShimSees: wdb pepper shim (A-034)<br/>get_var(".tick.eod") handler fires
+  WdbShimSees --> WdbDraining: wdb forces final drain_upds()
+
+  WdbDraining --> PeriodicFlush: WdbPeriodicFlusher runs<br/>(time + memory triggers per PRD §3.3)
+  PeriodicFlush --> FinalShardWritten: zstd Parquet to staging dir
+  FinalShardWritten --> HdbPartitionRenamed: atomic rename<br/>staging → HDB partition_date=YYYY-MM-DD
+  HdbPartitionRenamed --> EodSentinelCleared: mon probe sees clean state<br/>set_var(".sub.eod.fired", true)
+  EodSentinelCleared --> [*]: market closed for the day
+
+  WdbDraining --> SafetyTimeout: _eod_safety_loop fallback<br/>(if shim race or hang)
+  SafetyTimeout --> WdbDraining: retry drain
+```
+
+Chili-semantics dependencies this flow exposes:
+
+1. **`set_var` broadcast must be visible to all subscribers before next `drain_upds`.** If tp sets `.tick.eod` and wdb's next drain doesn't see it, the shim handler never fires and the safety-loop fallback (slow, polling) is what saves us.
+2. **Final drain must be exhaustive.** `drain_upds()` must yield every row appended since the previous drain, including the EOD-marker row itself.
+3. **Atomic Parquet rename is mdata-side, not chili** — but it depends on wdb's chili engine being quiesced (no in-flight writes) at rename time. If chili's writer holds an internal buffer past `flush_tplog`, the rename can race.
+
+The state machine is *also* the reason the async-surface wishlist matters: under load, the `PeriodicFlush → FinalShardWritten` transition can stall the event loop (A-033 root cause). F8 (executor dispatch) mitigates today; native async `flush_tplog_async` would remove the workaround.
 
 ---
 
