@@ -67,6 +67,8 @@ Each section gives: **what it is**, **why mdata needs it**, **chili-core surface
 
 > upd shouldn't notify fd, fd should always push async update to engine. Even for sync updates, fd only needs to know if the upd is written to the TCP socket.
 
+**Reply (chili-team, 2026-05-25):** there's a mental-model mismatch here. The fd in D-1 is **NOT** an outbound TCP socket fd — it's a POSIX self-pipe used as a *receiver-side* wake-up signal for the Python asyncio loop. When chili's IPC receive thread accepts an inbound `upd`, it (a) applies the upd to `vars` and (b) writes 1 byte to the self-pipe. A Python subscriber that's `await`-ing in `asyncio.loop.add_reader(fd)` then wakes up and calls `drain_upds()` to retrieve the new events. Without this, the Python subscriber would have to poll `get_var(table)` every ~10ms to detect new data (which is what mdata did pre-Sprint-21 and what caused the A-033 contention incident). The fd is internal to the same process — there is no TCP socket between chili-core and the Python subscriber when they're embedded in the same daemon. See ADR-0006 §1-2 for the full primitive choice rationale.
+
 - **What:** chili-core's IPC receive thread enqueues each inbound `upd` into a bounded crossbeam_channel(4096) and writes 1 byte to a POSIX self-pipe (macOS-portable; not `eventfd`). Python subscribers call `engine.upd_notify_fd()` to get the read-end FD, register it with `asyncio.loop.add_reader(...)`, then `engine.drain_upds() -> list[UpdEvent]` on wake. `UpdEvent { table, cursor_lo, cursor_hi, frame: pl.DataFrame }` — Polars frame is an Arc-shallow-clone of the inbound serde9 payload (no re-decode).
 - **Why mdata needs it:** before D-1, mdata's rdb/wdb subscribers polled `engine.get_var(table)` every ~10 ms and diffed a `_last_seen_seq` watermark — burning CPU on the Python side AND paying chili-lock contention on every poll. A-033 (the EOD-cutover latency incident in v1-32) was rooted in that contention. D-1 is event-driven, GIL-free on the chili side (zero pyo3 on the receive path), blocking-never-drop (back-pressure to tp; tplog is the source of truth).
 - **chili-core deps added:** `crossbeam-channel = "0.5"`, `libc = "0.2"` (the self-pipe + `fcntl` for `FD_CLOEXEC`).
@@ -80,6 +82,8 @@ Each section gives: **what it is**, **why mdata needs it**, **chili-core surface
 
 > I don't see why have to force a lazy frame. User can always call .lazy() by themselves on the result.
 
+**Reply (chili-team, 2026-05-25):** **conceded — you are correct.** We re-read both bodies. `get_var_lazy` does `df.clone().lazy()` server-side; `engine.get_var(id).lazy()` does the same on the Python side. Both produce a single-node `DslPlan::DataFrameScan` over an in-memory frame; neither enables actual scan-pushdown (ADR-0006 §5 even acknowledges this — pushdown happens "over the in-memory frame," not at the scan). The FFI marshalling cost is roughly the same (PyDataFrame and PyLazyFrame both wrap Arc'd internals). The API is gratuitous surface. **claude-2 will deprecate `get_var_lazy` in the next sprint** — mdata can migrate to `engine.get_var(id).lazy()` with no functional change.
+
 - **What:** snapshot-clone the `SpicyObj::DataFrame` under the `vars` read-lock, return `.lazy()`. Same byte content as `get_var(id)` on `.collect()`, but the lazy plan is pushdown-capable across the FFI boundary.
 - **Why mdata needs it:** mdata's gateway composes lazy plans over per-table accumulators before collecting. Without D-2, `get_var(table)` returns an eager DataFrame that has to be re-`.lazy()`-wrapped on the Python side — no pushdown.
 - **chili-core surface:** +12 lines on `EngineState::get_var_lazy`.
@@ -92,6 +96,8 @@ Each section gives: **what it is**, **why mdata needs it**, **chili-core surface
 
 > Engine has a builtin reconnect logic and replay lost tp log, no need to take care by using new subscribe api.
 
+**Reply (chili-team, 2026-05-25):** the existing `.sub.recover` does replay-from-`tick[0]` (current count) — for a process that has been running, that's correct; for a COLD-RESTART (process was killed, comes back with `tick[0]=0`), it implicitly means "replay nothing past current," which would skip messages already drained-and-acked by the consumer. mdata's actual deployment: rdb consumes ~10M rows/day; tplog accumulates to ~50-100 GB over the rolling window. After kill-9 + restart, the consumer needs to resume from the LAST-DRAINED cursor per-table, not from 0 (which would re-process everything) and not from `tick[0]` (which would skip everything already in tplog ahead of cursor). The `resume_cursor` map is small (one i64 per table) and lives in EngineState; the consumer persists its cursor durably (out-of-band). Without D-3, mdata reverts to per-row `_last_seen_seq` dedup over a full replay — works but is O(replay-size) per restart and the per-row seq is a separate anchor (Q1 Path-1 in ADR-0006 §4). For UHF + multi-day retention, the cursor matters. For typical short-replay scenarios, the existing reconnect logic is adequate.
+
 - **What:** new `subscribe(tick_socket, topics, resume_from: dict[str,int] | None = None)` signature. `EngineState.resume_cursor: RwLock<HashMap<String, i64>>` (table → last-delivered `cursor_hi`); the existing `.sub.init` / `.sub.recover` pepper scripts consult this map via a new accessor builtin rather than hardcoded `0` / `tick[0]`.
 - **Why mdata needs it:** cold-restart of an rdb after a kill-9 must resume from the last-drained `cursor_hi` per topic so that the tplog replay starts at the correct message ordinal. Without D-3, mdata reverts to per-row `_last_seen_seq` dedup over the full replay — works but costs O(replay-size) per restart, and the per-row seq is a separate anchor with its own correctness concerns (Q1 Path-1).
 - **chili-core surface:** +30 lines on `EngineState::set_resume_cursor` + `resume_start_for` + the new `resume_cursor` builtin in side_effect_fn.rs.
@@ -101,6 +107,8 @@ Each section gives: **what it is**, **why mdata needs it**, **chili-core surface
 ### 3.4. `flush_tplog()` (Sprint 16)
 
 > mdata shouldn't need this at all, it should be taken care by chili file system. mdata should be focus on get data. The tp log after all is for recovering data. The tick plant is a light process, which doesn't keep data, and should not be killed by kill -9.
+
+**Reply (chili-team, 2026-05-25):** the disagreement is about whether "don't kill -9" is an enforceable contract. mdata's production reality is that it's not — OOM kills happen, container orchestrators (k8s/nomad) hard-kill on liveness-probe failure, and ops occasionally `kill -9` by hand during incident response. mdata's PRD §5.1 part-2 treats kill-9 durability as a hard requirement; the contract is "at most one in-flight message lost." The OS file-system buffer doesn't satisfy that on its own — without an explicit `fsync` at checkpoint-aligned moments, a kill-9 can lose seconds of writes. **Counter-proposal:** rather than expose the tplog-specific `flush_tplog()`, expose a generic `engine.fsync_handle(h)` (any handle, not just `.tick.msgHandle`). That puts the durability primitive at the file-system layer (where you suggest it belongs), is opt-in (user calls it at the cadence they need), and lets mdata + any other downstream user implement their own durability policy. We're happy to refactor in that direction.
 
 - **What:** Python-callable method that flushes the in-memory tplog write buffer to disk via `fsync` on the underlying file handle. Targets `.tick.msgHandle` (set by `.tick.createLog` during `init_tick`).
 - **Why mdata needs it:** PRD §5.1 part-2 specifies kill-9 durability — a hard-kill of the tp process must lose at most one in-flight message. The OS file-system buffer doesn't fsync on every write (would cost too much); mdata's tp daemon calls `flush_tplog()` at checkpoint-aligned moments (after a batch of N publishes, or every M ms) to bound the loss window.
@@ -113,6 +121,8 @@ Each section gives: **what it is**, **why mdata needs it**, **chili-core surface
 
 > Should never use this, just use publish, which is a defined chili function for publishing data.
 
+**Reply (chili-team, 2026-05-25):** **partially conceded.** You're right that `publish_via_handle(h, table, df)` is sugar over `sync(h, ("upd", table, df))` with one guard (validates the handle is `Outgoing`). The use case it addresses is "publish to a SPECIFIC handle" (point-to-point) vs `publish(table, data)`'s "broadcast to all subscribers of `table`" — different semantics, but the point-to-point case can be expressed directly via `sync(h, ...)`. **claude-2 will deprecate `publish_via_handle` in the next sprint**; mdata's call sites migrate to the direct sync form. The handle-type guard becomes a one-time assertion at the call site (or a defensive check inside mdata's own publisher wrapper). Net: −30 lines from chili-core.
+
 - **What:** outbound `sync(h, (`upd; table; df))`shaped helper that validates the handle is`ConnType::Outgoing` before publishing, eliminating the lock-acquisition + handle-lookup pattern mdata had to write at every call site.
 - **Why mdata needs it:** gateway code emits ~10-50 per-table publishes per EOD cycle; without the helper, each call site re-implements the validation + the upd-message construction.
 - **chili-core surface:** +30 lines on `EngineState::publish_via_handle` (with the explicit early-drop of the read lock so `sync()`'s internal write lock doesn't deadlock against the same-thread read lock — `parking_lot::RwLock` is not reentrant).
@@ -122,6 +132,17 @@ Each section gives: **what it is**, **why mdata needs it**, **chili-core surface
 ### 3.6. `roll_tick(log_dir, segment_label)` — atomic native cutover (Sprint 18)
 
 > This function apparently used some functions that are not actually internal chili functions. Should just use roll_tick_log. The new function is `.handle.rotate` for atomic cutover.
+
+**Reply (chili-team, 2026-05-25):** we re-read `EngineState::rotate_handle` (`engine_state.rs:754` on main, the impl behind `.handle.rotate`) and compared to `EngineState::roll_tick` (`engine_state.rs:931` on claude-2). They are **not equivalent** for the crash-recovery case mdata cares about. Four concrete differences:
+
+1. **`rotate_handle` refuses non-empty target files** (`if conn_type != ConnType::New { return Err("file is not empty") }`). After a crash mid-roll, the next segment may already exist as a partial file — `rotate_handle` can't recover from that state. `roll_tick` runs `.broker.validateSeq` first to walk the seq tail and truncate any torn record via `set_len`.
+2. **`rotate_handle` does NOT fsync the OLD writer before swapping.** `roll_tick` calls `old.flush() + old.sync_all()` under the handle write-lock, so the old segment is durable before it stops being the live writer.
+3. **`rotate_handle` has no idempotent short-circuit.** A retry of `roll_tick` on the same target is a cheap no-op (checks `entry.uri == next_uri` first); `rotate_handle` would error on retry because the target now exists.
+4. **`roll_tick` calls `validateSeq` OUTSIDE the handle write-lock**, keeping the lock window minimal — important under concurrent `.tick.upd` traffic.
+
+The "non-chili-internal functions" your comment flags are `.broker.validateSeq` (a pepper-side builtin in `broker.pep`) and `prepare_file_writer` (a `utils.rs` helper introduced Sprint 17 for `rotate_handle` itself). Both ARE internal chili functions; `validateSeq` ships in chili's bundled `broker.pep`. Happy to send pointer-references if useful.
+
+For mdata's daily-rotation use case at quiescent traffic, `roll_tick_log` is adequate. For UHF + crash-recovery, the explicit atomicity contract matters. We'd ask you to consider keeping `roll_tick_log` as the simple-case API + `roll_tick` (or an equivalent crash-safe variant) as the production-grade one.
 
 - **What:** native Rust implementation that holds the handle write-lock across **open-next → swap-writer (same handle id) → fsync+close-old**. Any concurrent inbound `.tick.upd` is serviced by exactly one valid handle and lands wholly in the old segment OR wholly in the new — never dropped, never split.
 - **Why mdata needs it:** UHF (ultra-high-frequency) tplog rotation. mdata's daily-rotation cutover happens while publishes may still be in flight; the old `engine.eod(d)` + `init_tick(.., d+1)` pair had a brief window where a publish could land in the wrong file. At ~thousands of ticks/sec, the data-loss probability over a full year of cutovers is non-trivial.
@@ -133,6 +154,8 @@ Each section gives: **what it is**, **why mdata needs it**, **chili-core surface
 ### 3.7. GR4 quantization helpers — `set_column_scale` / `clear_column_scales` (various sprints)
 
 > This is mdata specific requirement, which should be built on top of chili engine, not part of chili engine.
+
+**Reply (chili-team, 2026-05-25):** **conceded.** You're right that `set_column_scale` / `clear_column_scales` are opinionated about "what columns mean" — that's user-side semantics, not engine semantics. A pure-Python facade can hold the column-scale registry + apply dequant at the user-facing boundary; nothing chili-side needs to know about scales. **claude-2 will lift these helpers OUT of chili-core into a pure-Python `chili.scale` module in the next sprint.** The M-1 invariant (eager-eval does NOT auto-dequant; preserves on-disk dtype) stays as a chili-side property — that's about engine honesty, not about quantization specifically.
 
 - **What:** Python-callable helpers to register a column's quantization factor (e.g., "this column is Int64-quantized at scale=10000; dequant by dividing by 10000 on read"). chili reads quantized columns as Int64 from disk; the dequant happens at the user-facing Python boundary, not in chili-core.
 - **Why mdata needs it:** mdata's storage schema is Int64-quantized for all price columns (golden rule 4 in chili's CLAUDE.md). Compression + cache efficiency benefit. The dequant convention is a user-side concern, but having chili expose the scale registry as part of the engine state lets the same engine serve both quantized and unquantized callers consistently.
@@ -148,6 +171,18 @@ See §3.7 — the test guard codifies the contract; the code change is the expli
 ### 3.9. W3 Python-callable bridge — `register_fn` / `unregister_fn` / `ExternalFnDispatcher` (Sprint 23, shipped 2026-05-24)
 
 > To call any function, should just define function using pepper syntax, calling a python function is making things complicated, and it is not efficient.
+
+**Reply (chili-team, 2026-05-25):** this is where the architectural-model mismatch is sharpest — see §9 below. The pepper-only stance assumes the function bodies CAN be expressed in pepper. mdata's 3 control verbs cannot:
+
+- `.mdata.eod.fire[date]`: drains a Polars-managed in-memory buffer, atomically renames the partial parquet to its final EOD path, broadcasts EOD to downstream daemons via mdata's own pub/sub mesh (not chili's), updates a partition-index file via pyarrow. **None of these primitives exist in pepper.** Polars LazyFrame manipulation, pyarrow IPC, `os.rename` + `os.fsync` of arbitrary paths, mdata-pub/sub — these are Python ecosystem features.
+- `.mdata.wdb.finalize[date]`: writes the idb partition to disk via pyarrow, validates schema parity with hdb, atomically transitions the partition into the hdb table tree.
+- `.mdata.hdb.reload[]`: drops chili's partition cache (via `engine.clear_partitioned_df()`), reloads via pyarrow scans, invalidates mdata's own per-process query cache.
+
+"Efficiency" framing: at the per-call level, W3 adds ~300ns/round-trip (measured against `get_var/set_var` `py.detach+with_gil` paths). mdata's 3 verbs fire at most ~3 times/day per daemon. Total annual W3-overhead per daemon: ~10µs. Not a hot path.
+
+"Complicated" framing: chili-core surface delta is +43 lines (`external_fn.rs` trait) + 1 `Option<String>` field on `Func` + 1 slot on `EngineState` + 1 dispatch branch in `eval_fn_call` (15 lines). Zero new chili-core dependencies. The Python adapter lives entirely in chili-py. We'd argue this is structurally simple — but agree the conceptual coupling (chili-core knows about an "external dispatcher" trait) is novel.
+
+**The deeper question is positioning** (§9): if chili is positioned as a self-contained pepper-first system, W3 doesn't belong. If chili is positioned as an embedded analytics engine inside a Python (or future R / Julia) host, W3 is the standard FFI-extension primitive that every embedded runtime offers (kdb+'s `dlopen`/foreign-fn registration, Lua's `lua_register`, Python's C-extension API, etc.). For mdata, the embedded model is non-negotiable — we can't move the buffer-management and pyarrow logic into pepper. So claude-2 keeps W3 even if upstream rejects it.
 
 - **What:** chili-py method `engine.register_fn(name, callable, arity)` stores a Python callable in a `PyExternalDispatcher: RwLock<HashMap<String, Py<PyAny>>>` registry; chili-core's `eval_fn_call` gains a new branch that routes via `ExternalFnDispatcher::dispatch(name, args)` when the target `Func` has `external_name: Some(_)`. The dispatcher trait is generic — a future R/Julia/JS dispatcher can install side-by-side.
 - **Why mdata needs it:** mdata operates 3 control verbs that require Python-side daemon bookkeeping — `.mdata.eod.fire[date]` (drain a Polars buffer + broadcast EOD), `.mdata.wdb.finalize[date]` (finalize idb partition), `.mdata.hdb.reload[]` (reload partition cache). Today these dispatch via a bespoke attach-socket Unix protocol → Python handler. mdata's v1-36 sprint retires the attach socket; W3 is the chili-native replacement.
@@ -268,21 +303,66 @@ Honest assessment, not deflection:
 
 ## 8. Recommendations / asks
 
-In rough priority order:
+**Revised 2026-05-25 after chili-author's inline comments.** Three of our 9 claude-2-only features become **claude-2-side refactors** (we agree with you); four remain **upstream-evaluation asks**; one is **technical correction** (we believe your comment was based on incorrect information); §9 below frames the underlying architectural question.
+
+### claude-2-side refactors (we conceded to your comments — work happens on our side, no upstream impact)
 
 1. **Forward-port to claude-2:** `async_` + `execute` + `polars-core-patch` URL (verify q-style fmt patch first) + `py.typed`. ~1pp work; no mdata-side coordination needed.
-2. **Coordinate the eval_op inline-String refactor adoption.** We remove our `eval_str` SIDE_EFFECT_FN; mdata confirms they use bytes-form exclusively. Single delivery.
-3. **Coordinate the `init_tick` rename window** (`date` → `filename`) with mdata before adopting.
-4. **For upstream evaluation (your call):** the 9 mdata-driven features in §3. Five of them add zero chili-core dependencies and ~30-60 lines each; they're not invasive. The 2 that add deps (crossbeam-channel + libc, both for push-model D-1) bring a 2-month-track-record of mdata production use. We'd value your evaluation on:
-   - **D-1/D-2/D-3 push-model** — the largest single piece, ADR-0006 in our tree.
-   - **roll_tick atomic vs roll_tick_log pepper** — would you accept a Rust-side atomic cutover as the production-grade variant, with `roll_tick_log` kept as a convenience alias?
-   - **flush_tplog** — would a generic `engine.fsync_handle(h)` (instead of the tplog-specific `flush_tplog()`) be more acceptable upstream? We'd happily refactor.
-   - **W3 (Python-callable bridge)** — our concrete impl is +43 lines + 1 trait + 1 Func field + 1 EngineState slot. Zero chili-core deps. Awaiting mdata acceptance evidence (~2 weeks). Re-evaluate after that data lands.
-5. **Cross-link mdata wishlist + delivery docs** in your dev notes so future v0.X cuts can check downstream-shipped features before claiming feature-parity. We're happy to maintain a wishlist + delivery index page if that helps.
+2. **Deprecate `get_var_lazy`** (D-2). Conceded per §3.2 reply. Sprint 24 work; mdata migrates to `engine.get_var(id).lazy()`.
+3. **Deprecate `publish_via_handle`** (mdata 2b). Conceded per §3.5 reply. Sprint 24 work; mdata migrates to `engine.sync(h, ("upd", table, df))`.
+4. **Lift GR4 helpers out of chili-core** (`set_column_scale` / `clear_column_scales`) into a pure-Python `chili.scale` module. Conceded per §3.7 reply. Sprint 24-25 work. **M-1 invariant stays in chili** (it's about engine-honesty, not quantization).
+5. **Coordinate the eval_op inline-String refactor adoption.** We remove our `eval_str` SIDE_EFFECT_FN; mdata confirms they use bytes-form exclusively. Single delivery.
+6. **Coordinate the `init_tick` rename window** (`date` → `filename`) with mdata before adopting.
+
+Net result of these refactors: **claude-2's chili-core surface shrinks by ~80-100 lines** (publish_via_handle removed; get_var_lazy removed) + chili-py shrinks by ~50 lines (GR4 helpers lifted to Python). We end up closer to your codebase.
+
+### Upstream-evaluation asks (we believe these belong upstream; architectural disagreement; your call)
+
+7. **D-1 push-model** (upd_notify_fd / drain_upds / UpdEvent) — see §3.1 reply for the receive-side wake-up clarification. ADR-0006. 2-month production track record at mdata.
+8. **D-3 resume_from cursor** — see §3.3 reply for the UHF crash-recovery case. Critical for tplog tails > 10GB.
+9. **`fsync_handle(h)` durability primitive** (replacing tplog-specific `flush_tplog`) — see §3.4 reply for the kill-9 contract framing. We propose the generic shape as an upstream-friendly compromise.
+10. **W3 Python-callable bridge** — see §3.9 reply and §9 below for the embedded-runtime positioning argument. Net chili-core surface: +43 lines + 1 trait + 1 Func field + 1 EngineState slot. Zero new chili-core deps. Awaiting mdata acceptance evidence (~2 weeks); re-evaluate then.
+
+### Technical correction
+
+11. **`roll_tick` is not equivalent to `roll_tick_log` / `.handle.rotate`.** See §3.6 reply: `rotate_handle` lacks (a) seq-tail validation, (b) old-writer fsync, (c) idempotent retry, (d) non-empty-file recovery. For mdata's UHF crash-recovery case these matter; for the daily-rotation case they don't. We'd ask you to consider keeping `roll_tick_log` as the simple case + `roll_tick` (or an equivalent crash-safe variant) as the production-grade case.
+
+### Process
+
+12. **Cross-link mdata wishlist + delivery docs** in your dev notes so future v0.X cuts can check downstream-shipped features before claiming feature-parity. We're happy to maintain a wishlist + delivery index page if that helps.
 
 ---
 
-## 9. Appendix — citation index
+## 9. Architectural model: standalone vs embedded — naming the disagreement
+
+Your 8 inline comments in §3 are internally consistent: they reflect a coherent model where chili is a **standalone, pepper-first analytics system**. Python is a REPL / convenience layer; first-class users write pepper; subscribers register as pepper functions; control verbs live in pepper.
+
+mdata's deployment fits a different model: **chili as an embedded analytics engine inside a Python (or future R / Julia) host daemon**. The Python (host) layer owns: process lifecycle, async I/O (pyarrow + polars + asyncio), pub/sub to mdata's own mesh, control verbs that touch buffers/disk via Python ecosystem primitives. chili owns: pepper-callable analytics + tplog + IPC.
+
+The two models lead to different conclusions on every feature we discussed:
+
+| Question | Standalone-first answer | Embedded-first answer |
+|---|---|---|
+| Where do subscribers live? | Pepper functions registered via `.broker.subscribe` | Python coroutines woken by D-1's self-pipe |
+| Who owns durability? | OS file system + "don't kill -9" contract | The host process — explicit `fsync_handle(h)` at checkpoints |
+| Where do control verbs live? | Pepper functions in user-bundled `.pep` files | Python handlers registered via W3's `register_fn` |
+| How is data exchanged Python↔chili? | Out-of-band over chili-IPC (TCP) between processes | Same-process FFI; D-1 wakes Python directly |
+| What's the engine size budget? | Minimal — pepper-first, opinionated, small dep tree | Whatever the host can absorb; trait-based extension points are fine |
+
+**Both models are legitimate.** kdb+ has gone hard on standalone; numpy + Polars + scikit-learn are firmly embedded. There's no objective "right answer" — it depends on who chili's primary user is.
+
+mdata committed to the embedded model in 2026-04 (predates our claude-2 fork). For us, the embedded model is non-negotiable — we can't move Polars-buffer management, pyarrow I/O, and mdata-mesh-pub/sub into pepper.
+
+**What this means for upstreaming:**
+
+- If chili's positioning stays standalone-first, the 4 upstream-evaluation asks above (D-1, D-3, fsync_handle, W3) probably don't fit. We accept that and continue maintaining the claude-2 fork. The 3 claude-2-side refactors still happen because we agree with you on those.
+- If chili can accommodate an "embedded extension surface" (optional, opt-in, zero-dep-when-unused), the 4 asks might fit — W3's trait shape is explicitly designed to be opt-in, and D-1's fd-notification is gated by `enable_upd_notify()`.
+
+We don't need you to commit to a positioning shift today. The frame is "here's where the seams are; tell us which seams you're comfortable carrying upstream." We'll plan claude-2's next 2-3 sprints around your answer.
+
+---
+
+## 10. Appendix — citation index
 
 **Wishlists (live + history) — the source-of-truth for every claude-2-only feature:**
 
