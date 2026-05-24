@@ -16,7 +16,7 @@ We compared `main` (v0.9.0, commit `fb4455d`) against `claude-2` (0.8.9, commit 
 - **2 features look like duplicates but have different semantics:** `eval_str` (claude-2 SIDE_EFFECT_FN builtin) vs `eval_op` inline parse (main); `roll_tick` (claude-2 native atomic cutover) vs `roll_tick_log` (main pepper-script rotate). Both pairs converge on the same user-visible behavior for the primary case, but the claude-2 versions carry stronger correctness contracts (atomic cutover; arity-typed builtin).
 - **Polars-fork strategies have diverged.** main patches only `polars-core` via `github.com/hinmeru/polars-core-patch.git`; claude-2 patches 25 polars-family crates against a local `/tmp/polars-py-1.39.3/...` clone to satisfy ADR 0003 (true-lazy via py-1.39.3 fork + chili-side q-style fmt patch). If we forward-port main's `polars-core-patch` URL, we need to verify it carries our q-style fmt patch.
 
-If you want only one section: skip to §3 (the 9 mdata-driven features) — that's the case for upstream adoption. §4 (the 3 main-only features) is the case for claude-2 forward-porting.
+If you want only one section: skip to §3 (the 9 mdata-driven features) — that's the case for upstream adoption. §4 (the 3 main-only features) is the case for claude-2 forward-porting. **§10 lists 5 design-topic asks from mdata's first-party perspective** (their handoff doc at `docs/sync/mdata_architecture_handoff_2026-05-24.md` is recommended pre-reading — has the production-deployment topology + two mermaid diagrams).
 
 ---
 
@@ -305,16 +305,23 @@ Honest assessment, not deflection:
 
 **Revised 2026-05-25 after chili-author's inline comments.** Three of our 9 claude-2-only features become **claude-2-side refactors** (we agree with you); four remain **upstream-evaluation asks**; one is **technical correction** (we believe your comment was based on incorrect information); §9 below frames the underlying architectural question.
 
-### claude-2-side refactors (we conceded to your comments — work happens on our side, no upstream impact)
+### claude-2-side refactors (we conceded to your comments — work happens on our side, requires coordinated migration with mdata)
+
+**Migration footprint check (against mdata's `docs/sync/mdata_architecture_handoff_2026-05-24.md` §2 call-site inventory, 2026-05-24).** The three concessions below all have non-trivial mdata-side call sites in production. We will deprecate, **but the timing must be coordinated with mdata's sprint cadence** — they are currently running 0.8.8 in production with a 24h Pipeline X soak in flight (completes ~2026-05-25 morning local); deprecation-bearing wheels can land only after the soak passes and a dedicated migration sprint is scheduled.
 
 1. **Forward-port to claude-2:** `async_` + `execute` + `polars-core-patch` URL (verify q-style fmt patch first) + `py.typed`. ~1pp work; no mdata-side coordination needed.
-2. **Deprecate `get_var_lazy`** (D-2). Conceded per §3.2 reply. Sprint 24 work; mdata migrates to `engine.get_var(id).lazy()`.
-3. **Deprecate `publish_via_handle`** (mdata 2b). Conceded per §3.5 reply. Sprint 24 work; mdata migrates to `engine.sync(h, ("upd", table, df))`.
-4. **Lift GR4 helpers out of chili-core** (`set_column_scale` / `clear_column_scales`) into a pure-Python `chili.scale` module. Conceded per §3.7 reply. Sprint 24-25 work. **M-1 invariant stays in chili** (it's about engine-honesty, not quantization).
-5. **Coordinate the eval_op inline-String refactor adoption.** We remove our `eval_str` SIDE_EFFECT_FN; mdata confirms they use bytes-form exclusively. Single delivery.
+
+2. **Deprecate `get_var_lazy`** (D-2). Conceded per §3.2 reply. **Migration footprint:** mdata does not enumerate call sites in their handoff doc, but their `MultiRdbRouter` (`src/mdata/common/remote_client.py:225`) and gw query path likely consume the lazy-frame return. **Plan:** chili emits a `DeprecationWarning` for one release (0.8.10), mdata migrates to `engine.get_var(id).lazy()` in their next sprint, removal in 0.9.x. **Not single-sprint.**
+
+3. **Deprecate `publish_via_handle`** (mdata 2b). Conceded per §3.5 reply. **Migration footprint: 10 cross-process call sites in mdata's fh→tp path** (per their §2 inventory) — this is mdata's "canonical chili usage pattern" (their §3 wording), the entire write path of the warehouse. Throughput in production: 6944 msg/sec sustained (their v1-32 6h soak result). **Plan:** chili emits `DeprecationWarning` in 0.8.10, mdata migrates their 10 sites + the `RemoteTpClient` wrapper to `engine.sync(h, ("upd", table, df))` over a coordinated sprint, removal in 0.9.x. **NOT a Sprint 24 deletion** — premature removal breaks the entire production write path.
+
+4. **Lift GR4 helpers out of chili-core** (`set_column_scale` / `clear_column_scales`) into a pure-Python `chili.scale` module. Conceded per §3.7 reply. **Migration footprint:** mdata's `StorageEngine` wrapper (`src/mdata/db/storage.py`) is the integration point — it handles partition-aware Parquet helpers, schema enforcement on write, and integration with mdata's audit columns + Int64-quantized columns. **Plan:** lift the helpers to a pure-Python `chili.scale` module that `StorageEngine` consumes via composition; M-1 invariant stays in chili-core (engine-honesty, not quantization). Migrating mdata is single-site (StorageEngine) but the wheel-API for GR4 changes — coordinate with mdata before removing the chili-py shims. Sprint 25 work.
+
+5. **Coordinate the eval_op inline-String refactor adoption.** We remove our `eval_str` SIDE_EFFECT_FN; mdata confirms they use bytes-form exclusively (their handoff §2 — "0 active mdata uses yet" for `eval_str` builtin). Single delivery, no migration cost.
+
 6. **Coordinate the `init_tick` rename window** (`date` → `filename`) with mdata before adopting.
 
-Net result of these refactors: **claude-2's chili-core surface shrinks by ~80-100 lines** (publish_via_handle removed; get_var_lazy removed) + chili-py shrinks by ~50 lines (GR4 helpers lifted to Python). We end up closer to your codebase.
+Net result after the full migration cycle: **claude-2's chili-core surface shrinks by ~80-100 lines** (publish_via_handle removed; get_var_lazy removed) + chili-py shrinks by ~50 lines (GR4 helpers lifted to Python). We end up closer to your codebase. **End-state arrival: estimated 2-3 mdata-sprints from today** (post 24h soak + post 0.8.9 W3 install + dedicated migration sprint).
 
 ### Upstream-evaluation asks (we believe these belong upstream; architectural disagreement; your call)
 
@@ -362,7 +369,68 @@ We don't need you to commit to a positioning shift today. The frame is "here's w
 
 ---
 
-## 10. Appendix — citation index
+## 10. Discussion topics from mdata's first-party perspective
+
+mdata-team drafted their own architecture handoff doc the same day this gap analysis went out (`docs/sync/mdata_architecture_handoff_2026-05-24.md`, mirror in this repo). It's an authoritative production-deployment snapshot — 9 daemons per pipeline, 7 embed `ChiliEngine`, two mermaid diagrams of the data-flow topology and the today-vs-post-cutover IPC shape. Recommended pre-reading before responding to this gap analysis.
+
+Their handoff §4.3 lists 5 discussion topics they would value your input on, in their priority order. We're surfacing them here because they're substantive design questions that overlap our §8 asks but come from the deployment-side rather than the chili-team-side. Together they cover the next 2-3 sprints of mdata's chili integration roadmap.
+
+### 10.1. IPC cutover design review (HIGH PRIORITY — time-sensitive)
+
+mdata has authored an IPC-cutover proposal at `~/code/mdata/docs/proposals/ipc_cutover_remove_unix_socket_2026-05-24.md` — Option A' migrates all 6 AF_UNIX attach-socket surfaces to chili-IPC using `register_fn` + tuple-form `sync(h, (name, *args))`. Before mdata commits **~10pp of v1-36+** to retire attach-socket, they want chili-author input:
+
+- Is `register_fn` + tuple-form dispatch the right primitive for "evaluate this pepper expression on a remote engine and return the result," or should chili-IPC have a higher-level "remote pepper eval" surface?
+- mdata's current attach-socket use is mostly "evaluate this bytes source string, give me the result back" — that's what `engine.sync(h, b"<src>")` already does over chili-IPC (W1 self-discovered bytes-form). Is the W3 register_fn path strictly better, or are there cases where bytes-form sync is preferable?
+
+**Why time-sensitive:** mdata's next sprint after the in-flight Pipeline X soak is either v1-36 (IPC cutover) or v1-37 (LTP adapter) — principal's call. If you have an opinion on the cutover shape, it's most valuable BEFORE v1-36 starts.
+
+### 10.2. Async surface roadmap
+
+The A-033 incident (mdata v1-32) — asyncio event loop saturation at 6944 msg/sec sustained writer load — cost mdata ~12pp over an 8-commit fix arc (F1–F9). They mitigated mdata-side with `asyncio.to_thread` executor dispatch + executor-bounded `__ping__` fast-path. The underlying chili-side observations stand:
+
+- `flush_tplog()` is sync; holds GIL; blocks the event loop. **Ask:** `flush_tplog_async()` (or our proposed generic `fsync_handle_async(h)`) on the chili roadmap?
+- Reader fairness under sustained writer load — mdata observed `RwLock` reader starvation during A-033 at 6944 msg/sec writer. **Ask:** tunable reader-writer-fairness knob? Default-fair? Or is the v1-32 mitigation (executor-dispatch + fast-path) the right shape?
+
+The full wishlist is at mdata-side `docs/sync/chili_wishlist_2026-05-22_async-surface.md`. Non-blocking but on radar.
+
+### 10.3. Reader-writer fairness defaults
+
+Sub-bullet of 10.2 but worth separating: at 6944 msg/sec sustained writes, mdata observed reader starvation on `parking_lot::RwLock`. They worked around it with `__ping__` fast-path + executor-bounded reads. **Ask:** is there a chili-side configuration knob (e.g., `parking_lot::RwLock` with `RawRwLock::new_fair()` or equivalent) we missed? Or is "be reader-fair by default" something to consider for a future release?
+
+### 10.4. Pepper query-result serialization
+
+mdata serializes pepper query results manually over attach-socket today — custom protocol in `src/mdata/common/attach_socket.py`. With W3 register_fn shipping, can chili-IPC carry the result directly (no custom serializer)? If so:
+
+- **Ask:** what's the wire format chili uses for `sync(h, (name, *args))` return values? Is it well-documented for downstream embedders?
+- **Ask:** does chili guarantee schema stability for query results (e.g., a `DataFrame` returned today has the same wire shape next release)?
+
+This question gates how cleanly the IPC cutover (10.1) can drop the custom protocol.
+
+### 10.5. `StorageEngine` wrap pattern — upstreamable?
+
+mdata's `src/mdata/db/storage.py` is a `ChiliEngine` wrapper that adds:
+
+- Partition-aware Parquet load helpers (slices the canonical hdb tree by date / table)
+- Schema enforcement on write (per-table schema registry; type-mismatch errors before chili sees the rows)
+- Integration with mdata's audit columns (`seq`, `ingest_ts`, `schema_version`) — auto-stamped on publish
+
+mdata's question: is this a pattern other chili embedders would want? If yes, a subset of `StorageEngine` could upstream into chili-py as `chili.storage.StorageWrapper` or similar — saving every downstream embedder from re-inventing it.
+
+mdata is happy to upstream the pattern if you'd accept the abstraction. If you'd rather chili-core stay minimal (per the §9 standalone-first model), they'll keep it mdata-side.
+
+### Cross-reference table
+
+| mdata-side doc | Topic |
+|---|---|
+| `docs/sync/mdata_architecture_handoff_2026-05-24.md` (mirror in this repo) | Full architecture handoff + 2 mermaid diagrams + invariant list |
+| `~/code/mdata/docs/proposals/ipc_cutover_remove_unix_socket_2026-05-24.md` | IPC cutover Option A' (gates §10.1) |
+| `~/code/mdata/docs/sync/chili_wishlist_2026-05-22_async-surface.md` | Async surface wishlist (gates §10.2 + §10.3) |
+| `~/code/mdata/docs/sync/v1_32_a033_step1_findings_2026-05-21.md` | A-033 incident + F1-F9 fix arc |
+| `~/code/mdata/docs/standards/chili_capability_inventory.md` | mdata's catalogue of chili APIs in production |
+
+---
+
+## 11. Appendix — citation index
 
 **Wishlists (live + history) — the source-of-truth for every claude-2-only feature:**
 
