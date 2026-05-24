@@ -45,6 +45,22 @@ pub fn eval_fn_call(
                 .as_ref()
                 .ok_or_else(|| SpicyError::EvalErr("built-in fn not found".to_owned()))?;
             f(&all_args)
+        } else if let Some(name) = func.external_name.as_deref() {
+            // ADR-0007 (Sprint 23) — W3 external Python-callable dispatch.
+            // Lock-discipline: clone the Arc<dyn ExternalFnDispatcher> out
+            // under a brief read lock (via `external_dispatcher()` helper),
+            // then invoke OUTSIDE the lock — same pattern as
+            // EngineState::fn_call:1942-1953 (SpicyObj-clone-out-of-lock)
+            // and the arc_self slot. The dispatcher impl (chili-py's
+            // PyExternalDispatcher) is itself responsible for not holding
+            // any lock across the Python callback; see `external_fn.rs`.
+            let dispatcher = state.external_dispatcher().ok_or_else(|| {
+                SpicyError::EvalErr(format!(
+                    "external fn '{}' registered but no dispatcher installed (chili-py engine init?)",
+                    name
+                ))
+            })?;
+            dispatcher.dispatch(name, &all_args)
         } else {
             let mut new_stack = Stack::new(
                 stack.src_path.clone(),

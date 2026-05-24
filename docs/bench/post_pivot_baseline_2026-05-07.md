@@ -1002,3 +1002,35 @@ established the full N ∈ {1,2,4,8} shape.
   match on canonical fixture).
 - ✅ Codec-correctness verified at the parquet-metadata level (not
   inferred from byte sizes).
+
+
+---
+
+## Sprint 23 — W3 Python-callable bridge — PRE-IMPL baseline (2026-05-24)
+
+Captured per Sprint 23 deliverable #0b (audit MC-11). Locks the
+concurrent-throughput number BEFORE any chili-core / chili-py change so the
+post-impl bench can assert ±2% delta with a real number to compare against.
+
+Shape: `concurrent_eval` (the canonical GR5 bench). Hardware: chili-dev mac
+arm64. Wheel state: 0.8.8 (just-shipped post-Sprint-22, gate-green).
+
+| Shape           | N | calls/sec | p50 (ms) | p99 (ms) |
+|---|---|---|---|---|
+| concurrent_eval | 1 | **1110.28** | 0.85 | 2.13 |
+| concurrent_eval | 4 | **2602.61** | 1.33 | 4.12 |
+
+Scaling factor N=4 vs N=1: 2.34×. Sub-linear but well above the ≈1.0× that
+GIL-held FFI shows (`concurrent_load_direct` Sprint 13.5 baseline) — GR5
+is intact.
+
+**Post-impl assertion** (Sprint 23 wrap, deliverable #16): re-run both shapes;
+assert |delta| ≤ 2% of these numbers OR halt-and-escalate (criterion #1).
+
+Bench command:
+```
+cd crates/chili-py
+uv run python tests/bench_concurrent.py --shape concurrent_eval --workers 1 --duration 8
+uv run python tests/bench_concurrent.py --shape concurrent_eval --workers 4 --duration 10
+```
+

@@ -27,6 +27,11 @@ pub struct Func {
     pub is_built_in_fn: bool,
     pub is_raw: bool,
     pub lang: Language,
+    // ADR-0007 (Sprint 23) — W3 external Func: when Some, pepper dispatch
+    // routes through EngineState::external_dispatcher.dispatch(name, args)
+    // instead of f / f_with_side_effect / nodes. Mutually exclusive with
+    // those — set only via Func::new_external (chili-py register_fn).
+    pub external_name: Option<String>,
 }
 
 impl Func {
@@ -50,6 +55,7 @@ impl Func {
             is_built_in_fn: false,
             is_raw: false,
             lang,
+            external_name: None,
         }
     }
 
@@ -78,6 +84,7 @@ impl Func {
             is_built_in_fn: true,
             is_raw: false,
             lang: Language::Chili,
+            external_name: None,
         }
     }
 
@@ -100,6 +107,7 @@ impl Func {
             is_built_in_fn: true,
             is_raw: false,
             lang: Language::Chili,
+            external_name: None,
         }
     }
 
@@ -118,11 +126,37 @@ impl Func {
             is_built_in_fn: false,
             is_raw: true,
             lang,
+            external_name: None,
+        }
+    }
+
+    // ADR-0007 — W3 external Func (registered via chili-py register_fn).
+    // fn_body is set to the external name so Display / wire-serialize
+    // produce the name; the dispatcher resolves the call at eval time.
+    pub fn new_external(name: &str, arity: usize) -> Self {
+        Self {
+            fn_body: name.to_owned(),
+            pos: SourcePos::new(0, 0),
+            arg_num: arity,
+            missing_index: (0..arity).collect(),
+            params: (0..arity).map(|i| format!("arg{}", i)).collect(),
+            nodes: Box::new(vec![]),
+            part_args: None,
+            f: None,
+            f_with_side_effect: None,
+            is_built_in_fn: false,
+            is_raw: false,
+            lang: Language::Pepper,
+            external_name: Some(name.to_owned()),
         }
     }
 
     pub fn is_built_in_fn(&self) -> bool {
         self.is_built_in_fn
+    }
+
+    pub fn is_external_fn(&self) -> bool {
+        self.external_name.is_some()
     }
 
     pub fn project(&self, args: &[&SpicyObj]) -> Self {

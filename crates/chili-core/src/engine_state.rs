@@ -61,6 +61,7 @@ use crate::{
 use crate::{
     ast_node::AstNode,
     errors::{SpicyError, SpicyResult},
+    external_fn::ExternalFnDispatcher,
     func::Func,
 };
 
@@ -145,6 +146,14 @@ pub struct EngineState {
     job: RwLock<IndexMap<i64, Job>>,
     topic_map: RwLock<HashMap<String, Vec<i64>>>,
     arc_self: RwLock<Option<Arc<Self>>>,
+    /// ADR-0007 (Sprint 23) — W3 external (Python) function bridge. None
+    /// until the first `register_fn` call; non-W3 users pay nothing on
+    /// the dispatch hot path (the W3 branch in `eval_fn_call` is only
+    /// reached when `Func::external_name.is_some()`, which only
+    /// `Func::new_external` sets). The trait object is invoked lock-free
+    /// per the trait's lock-discipline contract; the read lock here is
+    /// taken briefly to clone the Arc, then released before dispatch.
+    external_dispatcher: RwLock<Option<Arc<dyn ExternalFnDispatcher>>>,
     /// Proposal D — LRU parse cache. Keyed on (path, source) so the same
     /// source under different IPC handles or REPL/IPC contexts produces
     /// distinct entries (the cached AST embeds source positions referencing
@@ -209,6 +218,7 @@ impl EngineState {
             job: RwLock::new(IndexMap::new()),
             topic_map: RwLock::new(HashMap::new()),
             arc_self: RwLock::new(None),
+            external_dispatcher: RwLock::new(None),
             parse_cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(PARSE_CACHE_CAPACITY).unwrap(),
             )),
@@ -278,6 +288,28 @@ impl EngineState {
         let mut arc_self = self.arc_self.write();
         *arc_self = Some(arc);
         Ok(())
+    }
+
+    // ADR-0007 (Sprint 23) — W3 external Python-callable bridge.
+    //
+    // Install a dispatcher; replaces any previously-installed one. MUST
+    // NOT be called from within a registered callback (parking_lot
+    // RwLock is not reentrant — deadlock against the read lock held by
+    // the outer dispatch path). Use only during engine init or from
+    // outside callbacks. Not exposed via chili-py in Sprint 23.
+    pub fn set_external_dispatcher(&self, d: Arc<dyn ExternalFnDispatcher>) {
+        *self.external_dispatcher.write() = Some(d);
+    }
+
+    pub fn clear_external_dispatcher(&self) {
+        *self.external_dispatcher.write() = None;
+    }
+
+    /// Lock-free clone of the currently-installed dispatcher (if any).
+    /// Used by `eval_fn_call`'s W3 branch to avoid holding the
+    /// `external_dispatcher` read lock across the Python call.
+    pub(crate) fn external_dispatcher(&self) -> Option<Arc<dyn ExternalFnDispatcher>> {
+        self.external_dispatcher.read().as_ref().map(Arc::clone)
     }
 
     pub fn shutdown(&self) {
