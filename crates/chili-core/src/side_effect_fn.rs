@@ -8,7 +8,7 @@ use std::sync::LazyLock;
 use std::time::Instant;
 
 use crate::errors::{SpicyError, SpicyResult};
-use crate::eval::{eval_call, eval_fn_call, eval_for_console, eval_for_ide, eval_op, eval_str};
+use crate::eval::{eval_call, eval_fn_call, eval_for_console, eval_for_ide, eval_op};
 use crate::func::Func;
 use crate::utils::convert_list_to_df;
 use crate::{ArgType, EngineState, SpicyObj, Stack, eval_query, job, validate_args};
@@ -61,7 +61,7 @@ fn rotate_handle(
     _stack: &mut Stack,
     args: &[&SpicyObj],
 ) -> SpicyResult<SpicyObj> {
-    validate_args(args, &[ArgType::Int, ArgType::Str])?;
+    validate_args(args, &[ArgType::Int, ArgType::StrOrSym])?;
     let handle_num = args[0].to_i64()?;
     let uri = args[1].str()?;
     state.rotate_handle(&handle_num, uri)
@@ -74,6 +74,15 @@ fn exists_handle(
 ) -> SpicyResult<SpicyObj> {
     let handle_num = args[0].to_i64()?;
     state.exists_handle(&handle_num)
+}
+
+fn fsync_handle(
+    state: &EngineState,
+    _stack: &mut Stack,
+    args: &[&SpicyObj],
+) -> SpicyResult<SpicyObj> {
+    let handle_num = args[0].to_i64()?;
+    state.fsync_handle(&handle_num)
 }
 
 fn exit(state: &EngineState, _stack: &mut Stack, args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
@@ -297,35 +306,6 @@ fn tick(state: &EngineState, _stack: &mut Stack, args: &[&SpicyObj]) -> SpicyRes
     state.tick(index, inc)
 }
 
-// resume_cursor[topics] -> i64 — ADR-0006 §4 / D-3. The conservative
-// replay start (min persisted cursor over `topics`; 0 ⇒ full replay).
-// `.sub.init` / `.sub.recover` call this instead of the old hardcoded
-// `0` / `tick[0]`.
-fn resume_cursor(
-    state: &EngineState,
-    _stack: &mut Stack,
-    args: &[&SpicyObj],
-) -> SpicyResult<SpicyObj> {
-    // `topics` arrives as Symbol / String / Series / a (possibly
-    // non-empty) MixedList of syms depending on how the subscription
-    // was constructed. Be tolerant — extract what names we can;
-    // anything unrecognised falls back to the global min (still a safe
-    // lower bound, and 0 when the resume map is empty, i.e. the
-    // no-`resume_from` path). This MUST never error: `.sub.init` calls
-    // it on every subscribe, resume cursor or not.
-    let names: Vec<&str> = match args[0] {
-        SpicyObj::MixedList(items) => items
-            .iter()
-            .filter_map(|o| match o {
-                SpicyObj::Symbol(s) | SpicyObj::String(s) => Some(s.as_str()),
-                _ => None,
-            })
-            .collect(),
-        other => other.to_str_vec().unwrap_or_default(),
-    };
-    Ok(SpicyObj::I64(state.resume_start_for(&names)))
-}
-
 fn set(state: &EngineState, _stack: &mut Stack, args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
     let id = args[0].str()?;
     let value = args[1];
@@ -539,18 +519,6 @@ pub static SIDE_EFFECT_FN: LazyLock<HashMap<String, Func>> = LazyLock::new(|| {
             ),
         ),
         (
-            // Sprint 22 W1 — pepper-source-string eval returning raw SpicyObj
-            // (no stringification, no row limit). For mdata chili-IPC qcon.
-            // Accepts Str | Sym (chili-py converts Python str → Symbol over FFI).
-            "eval_str".to_owned(),
-            Func::new_side_effect_built_in_fn(
-                Some(Box::new(eval_str)),
-                1,
-                "eval_str",
-                &["str_or_sym"],
-            ),
-        ),
-        (
             "timeit".to_owned(),
             Func::new_side_effect_built_in_fn(
                 Some(Box::new(time_it)),
@@ -628,15 +596,6 @@ pub static SIDE_EFFECT_FN: LazyLock<HashMap<String, Func>> = LazyLock::new(|| {
         (
             "tick".to_owned(),
             Func::new_side_effect_built_in_fn(Some(Box::new(tick)), 2, "tick", &["index", "inc"]),
-        ),
-        (
-            "resume_cursor".to_owned(),
-            Func::new_side_effect_built_in_fn(
-                Some(Box::new(resume_cursor)),
-                1,
-                "resume_cursor",
-                &["topics"],
-            ),
         ),
         (
             "set".to_owned(),
@@ -750,6 +709,15 @@ pub static SIDE_EFFECT_FN: LazyLock<HashMap<String, Func>> = LazyLock::new(|| {
                 2,
                 ".handle.rotate",
                 &["handle_num", "uri"],
+            ),
+        ),
+        (
+            ".handle.fsync".to_owned(),
+            Func::new_side_effect_built_in_fn(
+                Some(Box::new(fsync_handle)),
+                1,
+                ".handle.fsync",
+                &["handle_num"],
             ),
         ),
         (

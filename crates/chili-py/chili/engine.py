@@ -1,6 +1,5 @@
 """Python bindings for Chili's ``EngineState`` (Rust ``chili-core``)."""
 
-import re
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -37,7 +36,6 @@ class ChiliEngine:
         self.is_sub_loaded = False
         self.engine = EngineState(debug, lazy, pepper, job_interval, memory_limit)
         self._hdb_path: Optional[str] = None
-        self._column_scales: Dict[str, Dict[str, int]] = {}
 
     def eval(
         self,
@@ -52,27 +50,20 @@ class ChiliEngine:
             src_path: Optional logical source path for error messages.
                       Defaults to ``"repl.pep"`` or ``"repl.chi"``
                       depending on the engine's syntax mode.
-            lazy: ADR 0002 — when False (default), DataFrame-shaped
-                  results are returned eagerly as ``polars.DataFrame``;
-                  when True, results are returned as ``polars.LazyFrame``
-                  for further chained ops + ``.collect()`` (true
-                  cross-FFI lazy with predicate pushdown — ADR 0003,
-                  preserved through the Sprint-20 main merge). Both
-                  paths release the GIL around the heavy work
-                  (golden rule 5).
+            lazy: When False (default), DataFrame-shaped results are
+                  returned eagerly as ``polars.DataFrame``; when True,
+                  results are returned as ``polars.LazyFrame`` for
+                  further chained ops + ``.collect()``.
 
         Returns:
             The result of the evaluation, converted to a Python type.
-            Sprint 20 / M-1: results are **no longer auto-dequantized** —
-            callers apply column scales themselves (see
-            :meth:`set_column_scale` / :meth:`_apply_column_scales`),
-            unifying the eager path with the long-standing lazy-path
-            contract. The on-disk + FFI schema stays Int64-quantized
-            (golden rule 4); M-1 only removes the read-time convenience.
         """
         if src_path is None:
             src_path = "repl.chi" if self.is_repl_use_chili_syntax() else "repl.pep"
-        return self.engine.eval(source, src_path, lazy)
+        res = self.engine.eval(source, src_path)
+        if lazy and isinstance(res, pl.DataFrame):
+            return res.lazy()
+        return res
 
     def get_var(self, id: str) -> Any:
         """Retrieve the value of a variable by name.
@@ -87,27 +78,6 @@ class ChiliEngine:
             NameError: If the variable does not exist.
         """
         return self.engine.get_var(id)
-
-    def get_var_lazy(self, id: str) -> Any:
-        """Retrieve a variable as a ``polars.LazyFrame`` snapshot.
-
-        D-2 (Sprint 21 / ADR-0006 §5). A snapshot-clone of the
-        in-memory accumulated frame then ``.lazy()``, so further
-        ``.filter()`` / ``.select()`` push down in the lazy plan and
-        ``.collect()`` is byte-identical to :meth:`get_var`. Sound vs
-        the IPC receive thread (it mutates only under the write-lock —
-        the snapshot is stable, not a live view).
-
-        Args:
-            id: Variable name (must be a DataFrame-valued variable).
-
-        Returns:
-            A ``polars.LazyFrame``.
-
-        Raises:
-            NameError: If the variable does not exist.
-        """
-        return self.engine.get_var_lazy(id)
 
     def set_var(self, id: str, value: Any):
         """Set or overwrite a variable in the engine.
@@ -262,11 +232,21 @@ class ChiliEngine:
             sort_columns: Optional columns to sort by before writing.
             rechunk: Re-chunk the data into a single contiguous allocation.
             overwrite: If ``True``, overwrite an existing partition.
+            compression: Optional Parquet compression codec name. One of
+                ``"snappy"`` (default if omitted), ``"zstd"``, ``"lz4_raw"``,
+                ``"uncompressed"``, ``"gzip"``, ``"brotli"``. Case-insensitive.
+                ``None`` preserves the default codec for byte-equivalence
+                with pre-Sprint-15 output (ADR 0005). Sprint 15 / 0.8.3.
+            row_group_size: Optional row group size override. ``None``
+                preserves chili's existing auto-sizing logic (auto-computed
+                clamp 1024..32768 when ``sort_columns`` is non-empty,
+                else polars default 262144). Sprint 15 / 0.8.3.
 
         Returns:
             The number of rows written.
         """
-        from datetime import date as _date_t, datetime as _dt_t
+        from datetime import date as _date_t
+        from datetime import datetime as _dt_t
 
         if isinstance(date, str):
             partition = _dt_t.strptime(date, "%Y.%m.%d").date()
@@ -308,51 +288,6 @@ class ChiliEngine:
     def table_count(self) -> int:
         """Return the number of partitioned tables currently loaded."""
         return self.engine.table_count()
-
-    # -----------------------------------------------------------------------
-    # Column scale dequantization (golden rule 4 read-side helper)
-    # -----------------------------------------------------------------------
-
-    def set_column_scale(self, table: str, column: str, factor: int) -> None:
-        """Register a dequantization scale factor for a column.
-
-        After ``set_column_scale("ohlcv_1d", "close", 1_000_000)``, any
-        ``eval()`` result whose query references ``ohlcv_1d`` and contains
-        an ``Int64`` ``close`` column is auto-cast to ``Float64`` and
-        divided by ``factor`` before being returned.
-
-        The on-disk schema stays Int64-quantized (golden rule 4); this is
-        a read-time helper for callers that want Float64 ergonomics.
-        """
-        self._column_scales.setdefault(table, {})[column] = factor
-
-    def clear_column_scales(self) -> None:
-        """Remove all registered column scale factors."""
-        self._column_scales.clear()
-
-    def _apply_column_scales(
-        self, df: "pl.DataFrame", query: str
-    ) -> "pl.DataFrame":
-        if not self._column_scales:
-            return df
-        for table, scales in self._column_scales.items():
-            # Word-boundary match preceded by `from` or `join` so e.g.
-            # `from trades` does not false-match `from all_trades`, AND so
-            # tables introduced by a join also dequantize. This is still
-            # a best-effort textual scan; a future sprint may move table
-            # detection into the engine eval result for full robustness.
-            pattern = r"\b(?:from|join)\s+" + re.escape(table) + r"\b"
-            if not re.search(pattern, query):
-                continue
-            cast_exprs = []
-            for col_name, factor in scales.items():
-                if col_name in df.columns and df[col_name].dtype == pl.Int64:
-                    cast_exprs.append(
-                        pl.col(col_name).cast(pl.Float64) / factor
-                    )
-            if cast_exprs:
-                df = df.with_columns(cast_exprs)
-        return df
 
     def query_plan(self, query: str, hdb_path: Optional[str] = None) -> str:
         """Return the polars query plan for *query* without executing it.
@@ -428,11 +363,14 @@ class ChiliEngine:
     # Feed handler should call .tick.upd
     # Subscriber should call .tick.subscribe and .tick.unsubscribe on tick process
     def init_tick(
-        self, schema: Dict[str, pl.DataFrame], log_dir: str, date: date
+        self, schema: Dict[str, pl.DataFrame], log_dir: str, filename: date | str
     ) -> None:
         self.load_tick()
         self.set_var(".tick.schema", schema)
-        self.fn_call(".tick.createLog", [log_dir, date])
+        self.fn_call(".tick.createLog", [log_dir, filename])
+
+    def roll_tick_log(self, log_dir: str, filename: date | str) -> None:
+        self.fn_call(".tick.rollLog", [log_dir, filename])
 
     def publish(self, table: str, data: Any) -> None:
         self.fn_call(".tick.upd", [table, data])
@@ -479,28 +417,6 @@ class ChiliEngine:
         """
         return self.engine.add_at_time(fn_name, start_time, description)
 
-    def flush_tplog(self) -> int:
-        """Flush + ``fsync`` the active tplog handle (``.tick.msgHandle``).
-
-        Closes the durability gap for mdata's PRD §5.1 part-2 ``kill -9``
-        cold-restart guarantee. After this call returns, any row previously
-        accepted via :meth:`publish` is on disk — a hard process kill cannot
-        lose it.
-
-        Returns
-        -------
-        int
-            Payload bytes-since-last-flush. Replaces the
-            ``log_path.stat().st_size`` proxy with a precise monitor probe.
-
-        Raises
-        ------
-        RuntimeError
-            If :meth:`init_tick` hasn't been called yet (``.tick.msgHandle``
-            is undefined).
-        """
-        return self.engine.flush_tplog()
-
     # Subscriber functions
     def load_sub(self) -> None:
         if not self.is_sub_loaded:
@@ -510,187 +426,29 @@ class ChiliEngine:
             self.is_sub_loaded = True
 
     # The socket should start with chili://hostname:port
-    def subscribe(
-        self,
-        tick_socket: str,
-        topics: Optional[list[str]] = None,
-        resume_from: Optional[dict[str, int]] = None,
-    ) -> None:
-        """Subscribe to a tp, optionally resuming from a persisted cursor.
-
-        Args:
-            tick_socket: ``chili://host:port`` of the tickerplant.
-            topics: Tables to subscribe to (``None``/``[]`` = all).
-            resume_from: D-3 (Sprint 21 / ADR-0006 §4) — ``{table:
-                cursor}`` last-delivered positions the caller persisted.
-                When given, replay starts from the conservative **min**
-                across subscribed topics instead of the start of the
-                tplog. chili's cursor is only a monotonic delivery
-                position; per-table gap-free / zero-dup contiguity is
-                the caller's own ``seq`` column (Q1 Path-1) — a bounded
-                over-replay is expected and deduped caller-side.
-                ``.sub.recover`` reuses the same persisted cursors on
-                reconnect (replacing the old latent ``tick[0]``).
-        """
+    def subscribe(self, tick_socket: str, topics: Optional[list[str]] = None) -> None:
         self.load_sub()
-        if resume_from:
-            self.engine.set_resume_cursors(resume_from)
         self.fn_call(".sub.init", [tick_socket, topics or []])
 
-    # Push-model D-1 (Sprint 21 / ADR-0006)
-    def upd_notify_fd(self) -> int:
-        """Arm GIL-free ``upd`` delivery notification; return the
-        self-pipe **read** fd.
-
-        Register it with ``loop.add_reader(fd, cb)`` (or ``kqueue``);
-        when readable, call :meth:`drain_upds`. The fd is
-        ``O_NONBLOCK`` + ``FD_CLOEXEC``; the call is idempotent (same
-        fd every time). Arm this **before** :meth:`subscribe` so no
-        applied ``upd`` goes unsignalled. Lets an mdata-style rdb/wdb
-        subscriber delete its ~10 ms poll-loop + ``_last_seen_seq``
-        dedup + parallel buffer.
-
-        The fd must not be used across ``os.fork`` without re-creation.
-        """
-        return self.engine.upd_notify_fd()
-
-    def drain_upds(self) -> list:
-        """Drain all applied-``upd`` notifications since the last call.
-
-        Non-blocking; returns ``[]`` when the queue is empty or
-        notification was never armed. Each element is an ``UpdEvent``
-        with ``table``, ``cursor_lo``/``cursor_hi`` (chili's per-handle
-        monotonic delivery ordinal — **not** mdata's per-row ``seq``;
-        per-table contiguity is the caller's own ``seq``, Q1 Path-1)
-        and ``frame`` (the raw delta as sent by the tp, Q3).
-
-        Back-pressure (ADR-0006 §3): the bounded queue blocks the
-        receive thread at capacity (never drops — the tplog is the
-        source of truth); a slow drainer back-pressures the upstream
-        tp, kdb+-like.
-        """
-        return self.engine.drain_upds()
-
-    # Publisher functions (Sprint 17)
-    def publish_via_handle(self, h: int, table: str, df: pl.DataFrame) -> None:
-        """Publish a DataFrame to a remote tp via an open chili-IPC handle.
-
-        Thin one-shot wrapper — open the handle via
-        ``engine.open_handle("chili://host:port")``, cache it, call
-        ``publish_via_handle`` repeatedly, then close via
-        ``engine.close_handle``. Per Sprint 16 mdata-wishlist Q3
-        lock-in (Option B): chili owns the marshalling primitive;
-        callers (e.g. mdata's RemoteTpClient) own connection-manager
-        semantics on top.
-
-        Args:
-            h: Handle id from ``engine.open_handle("chili://...")``;
-                must still be ``Outgoing`` (not promoted to Subscribing).
-            table: Table name the remote tp will dispatch via ``.tick.upd``.
-            df: Rows to publish.
-
-        Raises:
-            RuntimeError: if ``df`` is not a DataFrame, ``h`` has no
-                live connection, or the handle is not ``Outgoing``.
-
-        Note:
-            ``sync()`` is a blocking send-and-receive on chili IPC;
-            this method does not return until the remote tp has
-            answered. The GIL is released around the network round-trip
-            so concurrent Python publishers don't serialize on it.
-        """
-        self.engine.publish_via_handle(h, table, df)
-
-    def roll_tick(self, log_dir: str, segment_label: str) -> None:
-        """Atomically roll the tplog to the next segment.
-
-        Holds chili's internal handle write-lock across open-next →
-        swap-writer (same handle id) → fsync+close-old so a concurrent
-        inbound ``.tick.upd`` is serviced by exactly one valid handle
-        and lands wholly in the old segment or wholly in the new one —
-        never dropped, never misplaced. Replaces the racy
-        ``engine.eod(d)`` + ``init_tick(.., d+1)`` pair at the segment
-        boundary; no Python-side drain barrier required.
-
-        ``roll_tick`` is the safe replacement for the create-next-log
-        step only. It is **cutover-only**: it does NOT fire the EOD
-        broadcast. If a ``(eod;d)`` broadcast is wanted, call
-        ``eod(d)`` first, then ``roll_tick(log_dir, next_label)``.
-
-        Rollover is not date-bound: ``segment_label`` is an opaque
-        caller-owned path component appended to ``log_dir`` exactly as
-        ``init_tick`` does (``.tick.msgLog = log_dir + label``). Pass a
-        date for daily rolls, or a zero-padded counter for size/count-
-        triggered UHF rolls — the caller owns the monotonic increment
-        and naming convention. The logical tick sequence is cumulative
-        across segments (carry-over, matching ``init_tick``).
-
-        Args:
-            log_dir: Same directory string passed to ``init_tick``.
-            segment_label: Opaque next-segment path component
-                (non-empty); caller-owned and monotonically increasing.
-
-        Raises:
-            RuntimeError: if ``segment_label`` is empty, the live
-                ``.tick.msgHandle`` is unset/invalid, the next segment
-                cannot be opened (in which case the current segment is
-                left intact and writable), or the durability fsync of
-                the current segment fails.
-
-        Note:
-            The GIL is released around the cutover so concurrent Python
-            publishers don't serialize on it.
-        """
-        self.engine.roll_tick(log_dir, segment_label)
-
-    # IPC remote queries (upstream 606d1cc, merged Sprint 19).
     def open_handle(self, socket: str) -> int:
         return self.fn_call(".handle.open", [socket])
 
-    def sync(self, handle_num: int, query: Any) -> Any:
-        """Send a synchronous query over a remote handle and return the result.
+    def fsync_handle(self, handle_num: int) -> None:
+        """Flush a file handle's buffered data to disk (``fdatasync``).
 
-        The receiver's behaviour is **three-way polymorphic on the Python
-        type of ``query``** (Sprint 22 W1, mdata wishlist 2026-05-23
-        turn-9 finding) — please pick the most appropriate form:
-
-        ============ =========================== ===================================== ==========================
-        ``query``    Receiver behaviour          Example                                Returns
-        ============ =========================== ===================================== ==========================
-        ``str``      Variable-name LOOKUP        ``sync(h, "myvar")``                   value of ``myvar``
-        ``bytes``    Arbitrary pepper EVAL       ``sync(h, b"1 + 2")``                  evaluated SpicyObj (3)
-        ``tuple`` /  Named-function INVOCATION   ``sync(h, ("eval_str", "1 + 2"))``     return value of the call
-        ``list``                                 ``sync(h, (".myfn", 5))``
-        ============ =========================== ===================================== ==========================
-
-        Two cleanly-equivalent ways to do arbitrary remote pepper-eval
-        (both route through chili-side parse + ``eval_ast`` and return the
-        raw ``SpicyObj`` — no stringification, no row limit):
-
-        * ``sync(h, b"1 + 2")`` — bytes-form. Works in chili 0.8.7+;
-          lower ceremony.
-        * ``sync(h, ("eval_str", "1 + 2"))`` — named-tuple form (chili
-          0.8.8+, via the ``eval_str`` SIDE_EFFECT_FN builtin added in
-          Sprint 22). Useful when the caller already builds tuple-shaped
-          IPC messages.
-
-        Errors propagate as :class:`ChiliError` (never a Rust panic).
-        ``bytearray`` is **NOT** supported (the chili FFI does not
-        register a converter — raises ``ChiliError``).
+        Forces all pending writes on the given handle to be persisted,
+        ensuring data durability without closing the handle.
 
         Args:
-            handle_num: Integer handle id returned by :meth:`open_handle`.
-            query: Python str / bytes / tuple / list (see polymorphism above).
-
-        Returns:
-            The receiver's evaluated result, converted to a Python value.
-
-        Implementation note: adapted for claude-2 (Sprint 19). Upstream's
-        ``sync`` called ``self.eval("pyHandle", [query])`` but claude-2's
-        ``eval()`` 2nd positional is ``src_path`` (ADR 0002 lazy/src_path
-        divergence), not apply-args. Routes via ``fn_call`` — ``606d1cc``'s
-        own ``fn_call`` I64 arm (engine_state.rs) → ``eval_call`` I64 arm
-        (eval.rs) → ``state.sync(h, query)`` is the claude-2 path.
+            handle_num: Handle number to sync.
         """
+        self.fn_call(".handle.fsync", [handle_num])
+
+    def sync(self, handle_num: int, query: str) -> Any:
         self.fn_call("set", ["pyHandle", handle_num])
+        return self.fn_call("pyHandle", [query])
+
+    def async_(self, handle_num: int, query: str) -> Any:
+        neg_handle_num = handle_num if handle_num < 0 else -handle_num
+        self.fn_call("set", ["pyHandle", neg_handle_num])
         return self.fn_call("pyHandle", [query])

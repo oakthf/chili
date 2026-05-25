@@ -45,22 +45,6 @@ pub fn eval_fn_call(
                 .as_ref()
                 .ok_or_else(|| SpicyError::EvalErr("built-in fn not found".to_owned()))?;
             f(&all_args)
-        } else if let Some(name) = func.external_name.as_deref() {
-            // ADR-0007 (Sprint 23) — W3 external Python-callable dispatch.
-            // Lock-discipline: clone the Arc<dyn ExternalFnDispatcher> out
-            // under a brief read lock (via `external_dispatcher()` helper),
-            // then invoke OUTSIDE the lock — same pattern as
-            // EngineState::fn_call:1942-1953 (SpicyObj-clone-out-of-lock)
-            // and the arc_self slot. The dispatcher impl (chili-py's
-            // PyExternalDispatcher) is itself responsible for not holding
-            // any lock across the Python callback; see `external_fn.rs`.
-            let dispatcher = state.external_dispatcher().ok_or_else(|| {
-                SpicyError::EvalErr(format!(
-                    "external fn '{}' registered but no dispatcher installed (chili-py engine init?)",
-                    name
-                ))
-            })?;
-            dispatcher.dispatch(name, &all_args)
         } else {
             let mut new_stack = Stack::new(
                 stack.src_path.clone(),
@@ -437,17 +421,28 @@ pub fn eval_op(
     stack: &mut Stack,
     args: &[&SpicyObj],
 ) -> SpicyResult<SpicyObj> {
-    // args contains only 1 item, which is a mixed list, symbol, or string
+    // args contains only 1 item, which is a mixed list, symbol, or string query
     let arg0 = args[0];
     let list = match arg0 {
         SpicyObj::MixedList(list) => list,
-        SpicyObj::Symbol(s) | SpicyObj::String(s) => {
+        SpicyObj::Symbol(s) => {
             let any = stack.get_var(s);
             if any.is_ok() {
                 return any;
             } else {
                 return state.get_var(s);
             }
+        }
+        SpicyObj::String(s) => {
+            let ast = state
+                .parse("", s)
+                .map_err(|e| SpicyError::EvalErr(e.to_string()))?;
+            let src_path = if state.is_repl_use_chili_syntax() {
+                format!("eval_{}.chi", std::process::id())
+            } else {
+                format!("eval_{}.pep", std::process::id())
+            };
+            return state.eval_ast(ast, &src_path, s);
         }
         _ => return Err(SpicyError::EvalErr(format!("Not able to eval '{}'", arg0))),
     };
@@ -467,7 +462,7 @@ pub fn eval_op(
     let args = &list[1..].iter().collect();
     match &f {
         SpicyObj::Fn(func) => eval_call(state, stack, &f, args, &Some(func.pos.clone()), ""),
-        SpicyObj::I64(h) => state.sync(h, arg0),
+        SpicyObj::I64(h) => state.execute(h, arg0),
         _ => Err(SpicyError::EvalErr(format!(
             "Not able to eval a list with first item '{}'",
             f
@@ -555,36 +550,6 @@ pub fn eval_for_ide(
             Ok(SpicyObj::DataFrame(df.slice(0, limit)))
         }
     }
-}
-
-// Sprint 22 W1 — mdata wishlist 2026-05-23. Same parse + eval path as
-// `eval_for_console`/`eval_for_ide`, but returns the raw SpicyObj instead of
-// stringifying / row-limiting. Designed for `sync(h, (Symbol("eval_str"),
-// "<pepper source>"))` remote-eval round-trip from mdata's chili-IPC qcon.
-//
-// NOTE (turn-9 wishlist finding, 2026-05-23): mdata self-discovered that
-// `sync(h, b"<pepper>")` (bytes-form) ALSO routes through chili's IPC
-// receive as an arbitrary pepper-eval — same end result. `eval_str` is the
-// named-tuple-form alias, shipped for API symmetry / discoverability;
-// both paths are documented in chili-py's `engine.py::sync` docstring.
-//
-// Accepts `Str | Sym` because chili-py converts every Python `str` to
-// `SpicyObj::Symbol` at the FFI boundary (see crates/chili-py/src/lib.rs
-// header comment around L11 + the actual `extract_pyobject_to_spicy` arm at
-// `crates/chili-py/src/lib.rs:111`); the remote-eval call shape therefore
-// arrives with a Symbol source arg, not a String. `obj.str()` already
-// returns `Ok(...)` for both variants (obj.rs:399).
-pub fn eval_str(
-    state: &EngineState,
-    _stack: &mut Stack,
-    args: &[&SpicyObj],
-) -> SpicyResult<SpicyObj> {
-    validate_args(args, &[ArgType::StrOrSym])?;
-    let src = args[0].str()?;
-    let ast = state
-        .parse("", src)
-        .map_err(|e| SpicyError::EvalErr(e.to_string()))?;
-    state.eval_ast(ast, "", src)
 }
 
 pub fn eval_call(
@@ -684,7 +649,7 @@ pub fn eval_call(
                 )))
             }
         }
-        SpicyObj::I64(h) => state.sync(h, args[0]),
+        SpicyObj::I64(h) => state.execute(h, args[0]),
         SpicyObj::MixedList(list) => {
             if args.len() == 1 {
                 let arg0 = args[0];

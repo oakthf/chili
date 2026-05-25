@@ -1,6 +1,6 @@
 [package]
 name = "chili-py"
-version = "0.8.9"
+version = "0.9.0"
 edition = "2024"
 authors = ["The Chili Authors <purple-chili@hotmail.com>"]
 description = "Python bindings for chili-core EngineState"
@@ -13,54 +13,7 @@ crate-type = ["cdylib"]
 chili-core = { path = "../chili-core" }
 chili-op = { path = "../chili-op" }
 indexmap = "2.12.0"
-# mimalloc removed in 0.8.2 — caused process-level segfault when chili-sauce
-# co-loaded with pyarrow (and likely other native C extensions that bring
-# their own allocator infrastructure). See docs/sync/mdata_chili_2026-05-08_pyarrow_response.md
-# for the investigation. The mimalloc-on-cdylib steady-state RSS reduction
-# documented in Sprint 3 was not worth process-level interop breakage.
-# mimalloc = { version = "0.1", default-features = false }
 polars = { version = "0.53.0" }
 pyo3 = { version = "0.27", features = ["abi3-py310", "chrono"] }
-# pyo3-polars version specifier below is overridden by [patch.crates-io].pyo3-polars
-# at the bottom of this file (per ADR 0003 amendment Sprint 7 Part A — the
-# crates.io 0.26.0 release expects a `compute_boolean` polars-arrow feature
-# that py-1.39.3 polars-arrow no longer has). Cargo silently picks the patched
-# in-tree version; the version = "0.26.0" line is a phantom constraint kept
-# only so the crates.io fallback (without [patch]) names a known-meaningful tag.
 pyo3-polars = { version = "0.26.0", features = ["lazy"] }
 chrono = { version = "0.4" }
-
-# Sprint 7 Part A — option 3b per ADR 0003 amendment.
-# chili-py is `exclude`d from the workspace (see ../../Cargo.toml), so
-# the workspace's [patch.crates-io] block doesn't apply here. Mirror it
-# locally so chili-py builds against the same patched polars + pyo3-polars.
-# Local clone path: /tmp/polars-py-1.39.3 (must exist for any chili-py
-# build until the fork is hosted on a stable URL — see ADR 0003 amendment).
-[patch.crates-io]
-polars         = { path = "/tmp/polars-py-1.39.3/crates/polars" }
-polars-arrow   = { path = "/tmp/polars-py-1.39.3/crates/polars-arrow" }
-polars-buffer  = { path = "/tmp/polars-py-1.39.3/crates/polars-buffer" }
-polars-compute = { path = "/tmp/polars-py-1.39.3/crates/polars-compute" }
-polars-core    = { path = "/tmp/polars-py-1.39.3/crates/polars-core" }
-polars-dtype   = { path = "/tmp/polars-py-1.39.3/crates/polars-dtype" }
-polars-error   = { path = "/tmp/polars-py-1.39.3/crates/polars-error" }
-polars-expr    = { path = "/tmp/polars-py-1.39.3/crates/polars-expr" }
-polars-ffi     = { path = "/tmp/polars-py-1.39.3/crates/polars-ffi" }
-polars-io      = { path = "/tmp/polars-py-1.39.3/crates/polars-io" }
-polars-json    = { path = "/tmp/polars-py-1.39.3/crates/polars-json" }
-polars-lazy    = { path = "/tmp/polars-py-1.39.3/crates/polars-lazy" }
-polars-mem-engine = { path = "/tmp/polars-py-1.39.3/crates/polars-mem-engine" }
-polars-ops     = { path = "/tmp/polars-py-1.39.3/crates/polars-ops" }
-polars-parquet = { path = "/tmp/polars-py-1.39.3/crates/polars-parquet" }
-polars-plan    = { path = "/tmp/polars-py-1.39.3/crates/polars-plan" }
-polars-row     = { path = "/tmp/polars-py-1.39.3/crates/polars-row" }
-polars-schema  = { path = "/tmp/polars-py-1.39.3/crates/polars-schema" }
-polars-stream  = { path = "/tmp/polars-py-1.39.3/crates/polars-stream" }
-polars-time    = { path = "/tmp/polars-py-1.39.3/crates/polars-time" }
-polars-utils   = { path = "/tmp/polars-py-1.39.3/crates/polars-utils" }
-# pyo3-polars upstream (github.com/pola-rs/pyo3-polars) was archived 2025-07-28
-# and vendored INTO the main polars repo at polars/pyo3-polars/. The in-tree
-# version is API-consistent with py-1.39.3's polars; the standalone crates.io
-# pyo3-polars 0.26.0 still requests features (e.g., `compute_boolean`) that
-# were renamed/folded post-0.53.0 release. Use the in-tree one.
-pyo3-polars = { path = "/tmp/polars-py-1.39.3/pyo3-polars/pyo3-polars" }

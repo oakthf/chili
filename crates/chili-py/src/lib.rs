@@ -20,30 +20,17 @@
 //! | `polars.DataFrame`     | `DataFrame`       |
 //! | `polars.LazyFrame`     | `LazyFrame`       |
 //! | `None`                 | `Null`            |
-//!
-//! Allocator: system default (libsystem malloc on macOS). The Sprint 3
-//! mimalloc `#[global_allocator]` override was removed in 0.8.2 because
-//! it caused a process-level segfault when chili-sauce co-loaded with
-//! pyarrow (and likely with any other native C extension that brings
-//! its own allocator infrastructure). The mimalloc-on-cdylib RSS
-//! reduction was not worth process-level interop breakage. See
-//! `docs/sync/mdata_chili_2026-05-08_pyarrow_response.md`.
-
-mod external_dispatcher;
 
 use std::process;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use chili_core::constant::{NS_IN_DAY, UNIX_EPOCH_DAY};
-use chili_core::{EngineState, ExternalFnDispatcher, Func, SpicyObj, Stack, UpdEventCore};
+use chili_core::{EngineState, SpicyObj, Stack};
 use chili_op::{BUILT_IN_FN, LOG_FN};
-
-use crate::external_dispatcher::PyExternalDispatcher;
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Timelike, Utc};
 use indexmap::IndexMap;
 use polars::frame::DataFrame;
-use polars::prelude::IntoLazy;
-use pyo3::exceptions::{PyRuntimeError, PyTypeError};
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{
     PyBool, PyBytes, PyDate, PyDateTime, PyDelta, PyDict, PyFloat, PyInt, PyList, PyString, PyTime,
@@ -276,54 +263,11 @@ fn spicy_to_py(py: Python<'_>, obj: SpicyObj) -> PyResult<Py<PyAny>> {
     }
 }
 
-/// One applied `upd` batch delivered to a Python subscriber
-/// (Sprint 21 / ADR-0006 — mdata push-model D-1).
-///
-/// ``cursor_lo``/``cursor_hi`` are chili's **per-handle delivery
-/// ordinal** before/after this batch — a monotonic per-handle
-/// position, **not** mdata's per-row ``seq`` column. Per-table
-/// contiguity is the caller's own ``seq`` (Q1 Path-1); these cursor
-/// fields are named ``cursor_*`` (not ``seq_*``) deliberately to
-/// prevent that collision.
-#[pyclass(name = "UpdEvent", frozen)]
-struct UpdEvent {
-    #[pyo3(get)]
-    table: String,
-    #[pyo3(get)]
-    cursor_lo: i64,
-    #[pyo3(get)]
-    cursor_hi: i64,
-    #[pyo3(get)]
-    frame: PyDataFrame,
-}
-
-#[pymethods]
-impl UpdEvent {
-    fn __repr__(&self) -> String {
-        format!(
-            "UpdEvent(table={:?}, cursor_lo={}, cursor_hi={}, rows={})",
-            self.table,
-            self.cursor_lo,
-            self.cursor_hi,
-            self.frame.0.height(),
-        )
-    }
-}
-
 /// Chili evaluation engine; mirrors Rust ``chili_core::EngineState``.
 #[pyclass(name = "EngineState")]
 struct PyEngineState {
     inner: Arc<EngineState>,
     init_pid: u32,
-    /// ADR-0007 (Sprint 23) — W3 Python-callable bridge. Lazily created
-    /// on the first `register_fn` call; non-W3 engines never allocate
-    /// the dispatcher and never reach the W3 branch in
-    /// `eval_fn_call` (chili-core sees `external_dispatcher = None`).
-    /// The Mutex protects the Option only, not the dispatcher itself;
-    /// once initialized, the dispatcher's internal `callables` RwLock
-    /// handles all subsequent register/unregister/dispatch concurrency
-    /// (see external_dispatcher.rs).
-    w3_dispatcher: Mutex<Option<Arc<PyExternalDispatcher>>>,
 }
 
 impl PyEngineState {
@@ -381,213 +325,24 @@ impl PyEngineState {
         Ok(Self {
             inner: arc,
             init_pid: process::id(),
-            w3_dispatcher: Mutex::new(None),
         })
     }
 
-    /// ADR-0007 (Sprint 23) — register a Python callable as a
-    /// pepper-invokable function.
-    ///
-    /// The function becomes callable from pepper source via
-    /// tuple-dispatch:
-    ///
-    /// * ``client.sync(h, (name, *args))`` over chili-IPC (the typical
-    ///   shape for mdata's control verbs).
-    /// * ``engine.fn_call(name, args)`` for a local invocation.
-    /// * ``name[arg1; arg2; ...]`` in pepper source (e.g. inside a
-    ///   pepper script that the engine has already loaded).
-    ///
-    /// Arguments
-    /// ---------
-    /// ``name`` :  pepper function name. Any valid identifier; mdata
-    ///             convention uses dotted names like
-    ///             ``".mdata.eod.fire"``.
-    /// ``callable``: a Python callable. Arg + return types are bridged
-    ///             via the existing chili type system (primitives,
-    ///             dates, lists, dicts, DataFrames). Unsupported types
-    ///             raise ``ChiliError`` at the boundary.
-    /// ``arity`` : number of positional arguments the callable expects.
-    ///             Mismatch at the call site produces a partial-applied
-    ///             function (matches existing pepper user-fn behavior).
-    ///
-    /// Concurrency
-    /// -----------
-    /// Callbacks dispatch on the chili-IPC thread that received the
-    /// call. The dispatcher acquires the GIL for the call duration
-    /// (~300 ns overhead per round-trip, measured); the callable is
-    /// responsible for any internal thread-safety. Re-entry into engine
-    /// methods (``engine.fn_call`` / ``engine.set_var`` /
-    /// ``engine.get_var``) from within the callback is safe — chili-core
-    /// holds zero ``vars`` locks across function-dispatch boundaries.
-    ///
-    /// Shadowing
-    /// ---------
-    /// Calling ``engine.set_var(name, ...)`` AFTER ``register_fn(name,
-    /// ...)`` silently overwrites the Func placeholder; subsequent
-    /// pepper calls to ``name`` will follow normal var dispatch (will
-    /// error since ``name`` is no longer a Fn). To re-register, call
-    /// ``register_fn`` again. The internal callable in the dispatcher
-    /// is left in place until ``unregister_fn`` is called.
-    ///
-    /// Wire serialization
-    /// ------------------
-    /// External Funcs over the wire deliver their name only. Clients
-    /// invoking external Funcs MUST use call-form sync
-    /// (``sync(h, (name, *args))``), NOT variable-lookup sync
-    /// (``sync(h, name)`` str-form). The Func is resolved + invoked on
-    /// the server side; only the result travels over the wire.
-    ///
-    /// Exceptions
-    /// ----------
-    /// Exceptions raised by the Python callable propagate as
-    /// ``ChiliError`` on the caller side with the original
-    /// ``ExcType: msg`` and the Python traceback embedded.
-    #[pyo3(signature = (name, callable, arity))]
-    fn register_fn(
-        &self,
-        name: &str,
-        callable: Bound<'_, PyAny>,
-        arity: usize,
-    ) -> PyResult<()> {
-        self.check_fork()?;
-        if !callable.is_callable() {
-            return Err(PyTypeError::new_err(format!(
-                "register_fn: 'callable' must be callable, got {}",
-                callable
-                    .get_type()
-                    .name()
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|_| "?".to_string())
-            )));
-        }
-        // Lazy-init the W3 dispatcher + install it on the chili-core
-        // EngineState. After this branch runs once, the EngineState's
-        // `external_dispatcher` slot is wired up for the engine's
-        // lifetime.
-        let dispatcher = {
-            let mut slot = self.w3_dispatcher.lock().expect("w3_dispatcher Mutex");
-            if slot.is_none() {
-                let d = Arc::new(PyExternalDispatcher::new());
-                self.inner
-                    .set_external_dispatcher(Arc::clone(&d) as Arc<dyn ExternalFnDispatcher>);
-                *slot = Some(Arc::clone(&d));
-                d
-            } else {
-                Arc::clone(slot.as_ref().unwrap())
-            }
-        };
-        dispatcher.register(name, callable.unbind());
-        // Install the Func placeholder so pepper var lookup finds it.
-        let placeholder = Func::new_external(name, arity);
-        map_spicy_error(self.inner.set_var(name, SpicyObj::Fn(placeholder)))?;
-        Ok(())
-    }
-
-    /// ADR-0007 (Sprint 23) — unregister a previously registered
-    /// Python callable.
-    ///
-    /// Returns ``True`` if a callable was removed from the dispatcher,
-    /// ``False`` if no such name was registered. If the Func
-    /// placeholder in ``vars`` was already cleared by the user
-    /// (e.g. via ``engine.del_var(name)`` or ``engine.set_var(name,
-    /// ...)`` shadowing), emits ``warnings.warn(...)`` so the
-    /// inconsistency surfaces in logs (per audit MC-13). The unregister
-    /// itself still succeeds — the callable IS removed from the
-    /// dispatcher even if the placeholder was missing.
-    fn unregister_fn(&self, py: Python<'_>, name: &str) -> PyResult<bool> {
-        self.check_fork()?;
-        let removed = {
-            let slot = self.w3_dispatcher.lock().expect("w3_dispatcher Mutex");
-            match slot.as_ref() {
-                Some(d) => d.unregister(name),
-                None => false,
-            }
-        };
-        if removed {
-            // Best-effort: drop the Func placeholder. Emit a UserWarning
-            // if it was already gone, instead of silently ignoring.
-            // chili-core's `del_var` always succeeds (returns Null for
-            // missing) — so we probe `has_var` first to detect the
-            // inconsistency. There's a benign race here: a concurrent
-            // thread could clear the var between `has_var` and `del_var`,
-            // producing a spurious warning. That's acceptable for a
-            // diagnostic.
-            let placeholder_existed = self.inner.has_var(name).unwrap_or(false);
-            let _ = self.inner.del_var(name);
-            if !placeholder_existed {
-                let warnings = py.import("warnings")?;
-                warnings.call_method1(
-                    "warn",
-                    (format!(
-                        "unregister_fn: external Func placeholder '{}' was already cleared from vars; \
-                         callable removed from dispatcher but no placeholder Func was present.",
-                        name
-                    ),),
-                )?;
-            }
-        }
-        Ok(removed)
-    }
-
     /// Evaluate a Chili or Pepper expression string (same as the REPL).
-    ///
-    /// If `lazy=False` (default, ADR 0002 Option b), the result is eagerly
-    /// materialized: a `LazyFrame` produced by an internally-lazy engine is
-    /// collected to a `DataFrame` before returning. Both branches release the
-    /// GIL around the heavy work (`py.detach`) — golden rule 5 preserved.
-    ///
-    /// If `lazy=True`, the result is returned as a `polars.LazyFrame` so the
-    /// caller can chain further ops + `.collect()` lazily. When the engine
-    /// is in eager mode (the default), the returned LazyFrame is a
-    /// post-collect `df.lazy()` wrapper — chain-compatible but without
-    /// predicate / projection pushdown across the eval boundary. For true
-    /// end-to-end lazy semantics, construct `ChiliEngine(lazy=True)`.
-    #[pyo3(signature = (source, src_path, lazy=false))]
-    fn eval(
-        &self,
-        py: Python<'_>,
-        source: &str,
-        src_path: &str,
-        lazy: bool,
-    ) -> PyResult<Py<PyAny>> {
+    fn eval(&self, py: Python<'_>, source: &str, src_path: &str) -> PyResult<Py<PyAny>> {
         self.check_fork()?;
-        let obj = py.detach(move || -> Result<SpicyObj, chili_core::SpicyError> {
+        let obj = py.detach(move || {
             let mut stack = Stack::new(None, 0, 0, "");
             let args = SpicyObj::String(source.to_string());
-            let raw = self.inner.eval(&mut stack, &args, src_path)?;
-            // ADR 0002 Option b — lazy/eager normalization happens here so
-            // the caller-visible shape matches the `lazy` flag regardless
-            // of the engine's persistent lazy_mode.
-            let raw = unwrap_return(raw);
-            match (lazy, raw) {
-                (false, SpicyObj::LazyFrame(lf)) => lf
-                    .collect()
-                    .map(SpicyObj::DataFrame)
-                    .map_err(|e| chili_core::SpicyError::EvalErr(e.to_string())),
-                (true, SpicyObj::DataFrame(df)) => Ok(SpicyObj::LazyFrame(df.lazy())),
-                (_, other) => Ok(other),
-            }
+            map_spicy_error(self.inner.eval(&mut stack, &args, src_path))
         });
-        spicy_to_py(py, map_spicy_error(obj)?)
+        spicy_to_py(py, obj?)
     }
 
     /// Retrieve a variable by name, converted to a Python object.
     fn get_var(&self, py: Python<'_>, id: &str) -> PyResult<Py<PyAny>> {
         self.check_fork()?;
         let obj = py.detach(move || map_spicy_error(self.inner.get_var(id)));
-        spicy_to_py(py, obj?)
-    }
-
-    /// D-2 (Sprint 21 / ADR-0006 §5) — retrieve a variable as a
-    /// `polars.LazyFrame` snapshot for pushdown-capable chaining.
-    ///
-    /// A shallow snapshot-clone under the read-lock then `.lazy()`.
-    /// `.collect()` is byte-identical to :meth:`get_var`;
-    /// projection / predicate pushdown appears in the lazy plan over
-    /// the in-memory frame. GIL released around the native clone.
-    fn get_var_lazy(&self, py: Python<'_>, id: &str) -> PyResult<Py<PyAny>> {
-        self.check_fork()?;
-        let obj = py.detach(move || map_spicy_error(self.inner.get_var_lazy(id)));
         spicy_to_py(py, obj?)
     }
 
@@ -736,11 +491,9 @@ impl PyEngineState {
     /// Load a partitioned database from the given directory.
     ///
     /// The GIL is released around `EngineState::load_par_df` so concurrent
-    /// Python callers don't serialize on it. Safety verified by the
-    /// `docs/sync/load_par_df_state_audit.md` GREEN verdict (Sprint 13.5
-    /// Part D): `EngineState` is `Send + Sync`, the only shared-state
-    /// access during the call is a bounded `par_df.write()` window
-    /// during Phase 2 extend.
+    /// Python callers don't serialize on it. `EngineState` is `Send + Sync`;
+    /// the only shared-state access during the call is a bounded
+    /// `par_df.write()` window during Phase 2 extend.
     fn load_par_df(&self, py: Python<'_>, hdb_path: &str) -> PyResult<()> {
         self.check_fork()?;
         let path = hdb_path.to_owned();
@@ -751,8 +504,7 @@ impl PyEngineState {
     /// Remove all loaded partitioned DataFrames from memory.
     ///
     /// GIL released for the same reason as `load_par_df`; both methods
-    /// hold the same `par_df.write()` lock and the state audit covers
-    /// both (`docs/sync/load_par_df_state_audit.md` §5.2).
+    /// hold the same `par_df.write()` lock.
     fn clear_par_df(&self, py: Python<'_>) -> PyResult<()> {
         self.check_fork()?;
         py.detach(move || map_spicy_error(self.inner.clear_par_df()))?;
@@ -765,13 +517,11 @@ impl PyEngineState {
         self.inner.par_df_count()
     }
 
-    /// Sprint 16 — schedule a registered pepper function to fire at
-    /// `start_time` on the chili scheduler thread.
+    /// Schedule a registered pepper function to fire at `start_time` on
+    /// the chili scheduler thread.
     ///
-    /// Thin PyO3 binding around `.job.addAtTime` (defined at
-    /// `crates/chili-core/src/job.rs:96`). Backs mdata's PRD §3.2 Option A
-    /// EOD timer path (chili-side scheduler) — replaces their Python asyncio
-    /// timer for callers who prefer chili to own the timer thread.
+    /// Thin PyO3 binding around `.job.addAtTime`. Callers who prefer chili
+    /// to own the timer thread can use this instead of Python-side timers.
     ///
     /// Parameters
     /// ----------
@@ -828,176 +578,6 @@ impl PyEngineState {
         }
     }
 
-    /// Sprint 16 — flush + `fsync` the active tplog handle (`.tick.msgHandle`).
-    ///
-    /// Backs mdata's PRD §5.1 part-2 kill-9 durability requirement. Looks up
-    /// `.tick.msgHandle` (set by `.tick.createLog` during `init_tick`),
-    /// flushes user-space buffers, then `fs::File::sync_all` flushes kernel
-    /// buffers to disk. Returns payload bytes-since-last-flush — replaces
-    /// mdata's `log_path.stat().st_size` proxy with a precise monitor probe.
-    ///
-    /// Raises `RuntimeError` if `init_tick()` hasn't been called yet
-    /// (`.tick.msgHandle` would be undefined). GIL is released around the
-    /// fsync syscall.
-    fn flush_tplog(&self, py: Python<'_>) -> PyResult<i64> {
-        self.check_fork()?;
-        let handle_obj = map_spicy_error(self.inner.get_var(".tick.msgHandle")).map_err(|_| {
-            pyo3::exceptions::PyRuntimeError::new_err(
-                "flush_tplog: `.tick.msgHandle` is not set — call init_tick() first",
-            )
-        })?;
-        let h = match handle_obj {
-            SpicyObj::I64(h) => h,
-            other => {
-                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "flush_tplog: `.tick.msgHandle` is not an integer handle id (got {})",
-                    other.get_type_name()
-                )));
-            }
-        };
-        py.detach(move || map_spicy_error(self.inner.flush_handle(&h)))
-    }
-
-    /// Sprint 17 — Publish a DataFrame to a remote tp via an open
-    /// chili-IPC handle. Thin one-shot wrapper over `sync(h, (`upd; table; df))`.
-    ///
-    /// Per Sprint 16 mdata-wishlist Q3 lock-in (Option B): chili owns the
-    /// marshalling primitive; the caller (e.g. mdata's RemoteTpClient)
-    /// owns connection-manager semantics on top — open the handle via
-    /// `engine.open_handle("chili://host:port")`, cache it, call
-    /// `publish_via_handle` repeatedly, and close via `close_handle`.
-    ///
-    /// Parameters
-    /// ----------
-    /// h : int
-    ///     A handle id from `engine.open_handle("chili://...")` that
-    ///     is currently `Outgoing` (not yet promoted to Subscribing).
-    /// table : str
-    ///     Table name the remote tp will dispatch into via `.tick.upd`.
-    /// df : polars.DataFrame
-    ///     Rows to publish.
-    ///
-    /// Notes
-    /// -----
-    /// Blocking: `sync()` is a send-and-receive on chili IPC. This
-    /// method does not return until the remote tp has answered. If the
-    /// remote is slow or unreachable, the chili-side handle map's write
-    /// lock is held across the network read (inherited from `sync()`;
-    /// pre-Sprint-17 concern). Callers needing timeout / cancellation
-    /// must implement it above this layer.
-    ///
-    /// GIL is released around the `sync()` syscall + network read
-    /// per the Sprint 14 P3.2b convention.
-    fn publish_via_handle(
-        &self,
-        py: Python<'_>,
-        h: i64,
-        table: &str,
-        df: Bound<'_, PyAny>,
-    ) -> PyResult<()> {
-        self.check_fork()?;
-        let df_spicy = spicy_from_py_bound(&df)?;
-        let table = table.to_owned();
-        py.detach(move || map_spicy_error(self.inner.publish_via_handle(&h, &table, &df_spicy)))
-    }
-
-    /// Atomically roll the tplog to the next segment (Sprint 18; mdata
-    /// wishlist v2 P0, thread `mdata-chili-eod-upd-race-2026-05-15`).
-    ///
-    /// Holds chili's internal handle write-lock across open-next →
-    /// swap-writer (same handle id) → fsync+close-old, so a concurrent
-    /// inbound `.tick.upd` is serviced by exactly one valid handle and
-    /// lands wholly in the old segment or wholly in the new one — never
-    /// dropped (`InvalidHandleErr`), never misplaced into the wrong
-    /// segment. Replaces the racy `engine.eod(d)` + `init_tick(..d+1)`
-    /// pair at the segment boundary; no Python-side drain barrier
-    /// required.
-    ///
-    /// Parameters
-    /// ----------
-    /// log_dir : str
-    ///     Same directory string passed to `init_tick` (chili appends
-    ///     `segment_label` to it via plain concatenation).
-    /// segment_label : str
-    ///     Opaque caller-owned next-segment path component. A date, a
-    ///     zero-padded UHF counter — anything. The caller owns the
-    ///     monotonic increment and naming convention. Must be non-empty.
-    ///
-    /// Notes
-    /// -----
-    /// Cutover-only: does NOT fire the EOD broadcast. Call
-    /// `engine.eod(d)` first if a `(eod;d)` broadcast is wanted.
-    /// Idempotent: a repeat call once the live handle already points at
-    /// `segment_label` is a no-op. The logical tick sequence is
-    /// cumulative across segments (carry-over, matching `.tick.createLog`).
-    ///
-    /// GIL is released around the cutover per the Sprint 14 convention.
-    fn roll_tick(&self, py: Python<'_>, log_dir: &str, segment_label: &str) -> PyResult<()> {
-        self.check_fork()?;
-        let log_dir = log_dir.to_owned();
-        let segment_label = segment_label.to_owned();
-        py.detach(move || map_spicy_error(self.inner.roll_tick(&log_dir, &segment_label)))
-    }
-
-    /// Arm GIL-free `upd` delivery notification and return the
-    /// self-pipe **read** fd (Sprint 21 / ADR-0006 — mdata push-model
-    /// D-1).
-    ///
-    /// The fd is `O_NONBLOCK` + `FD_CLOEXEC`; register it with
-    /// ``asyncio.loop.add_reader(fd, drain_cb)`` (or ``kqueue``). When
-    /// it becomes readable, call :meth:`drain_upds`. Idempotent: every
-    /// call returns the same fd. Arm this **before** :meth:`subscribe`
-    /// so no applied ``upd`` goes unsignalled.
-    ///
-    /// The fd must not be used across ``os.fork`` without re-creation
-    /// (``check_fork`` still guards every method; the close-on-exec is
-    /// the defensive belt for ``multiprocessing`` — Q5).
-    fn upd_notify_fd(&self) -> PyResult<i32> {
-        self.check_fork()?;
-        self.inner
-            .enable_upd_notify()
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
-    }
-
-    /// Drain all applied-`upd` notifications since the last call
-    /// (Sprint 21 / ADR-0006 — D-1). Non-blocking; returns ``[]`` when
-    /// the queue is empty or notification was never armed.
-    ///
-    /// Drains the self-pipe wakeup bytes then the bounded queue, so
-    /// after this returns the fd is not readable until the next
-    /// applied ``upd``. GIL is released around the native drain.
-    fn drain_upds(&self, py: Python<'_>) -> PyResult<Vec<UpdEvent>> {
-        self.check_fork()?;
-        let core: Vec<UpdEventCore> = py.detach(|| self.inner.drain_upds());
-        Ok(core
-            .into_iter()
-            .map(|e| UpdEvent {
-                table: e.table,
-                cursor_lo: e.cursor_lo,
-                cursor_hi: e.cursor_hi,
-                frame: PyDataFrame(e.frame),
-            })
-            .collect())
-    }
-
-    /// Seed the D-3 per-table resume cursors before `subscribe`
-    /// (Sprint 21 / ADR-0006 §4). `cursors` maps table → the
-    /// last-delivered cursor the caller persisted. `.sub.init` /
-    /// `.sub.recover` then replay from the conservative **min** across
-    /// the subscribed topics; mdata's own per-row `seq` does the exact
-    /// per-table dedup (Q1 Path-1), so a bounded over-replay is
-    /// harmless. An unseeded table replays from the start.
-    fn set_resume_cursors(
-        &self,
-        cursors: std::collections::HashMap<String, i64>,
-    ) -> PyResult<()> {
-        self.check_fork()?;
-        for (table, cursor) in &cursors {
-            self.inner.set_resume_cursor(table, *cursor);
-        }
-        Ok(())
-    }
-
     /// Start a TCP listener on the given port in a background thread.
     ///
     /// The listener runs until the process exits.  The GIL is released so
@@ -1038,8 +618,13 @@ impl PyEngineState {
                 .map_err(|e| e.to_string())?;
             let query_obj = SpicyObj::String(query);
             let mut stack = Stack::new(None, 0, 0, "");
+            let source = if self.inner.is_repl_use_chili_syntax() {
+                "plan.chi"
+            } else {
+                "plan.pep"
+            };
             let obj = plan_state
-                .eval(&mut stack, &query_obj, "plan.pep")
+                .eval(&mut stack, &query_obj, source)
                 .map_err(|e| e.to_string())?;
             match unwrap_return(obj) {
                 SpicyObj::LazyFrame(lf) => lf.describe_plan().map_err(|e| e.to_string()),
@@ -1071,6 +656,5 @@ fn engine_state(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.py().get_type::<SerializationError>(),
     )?;
     m.add_class::<PyEngineState>()?;
-    m.add_class::<UpdEvent>()?;
     Ok(())
 }

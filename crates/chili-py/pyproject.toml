@@ -4,34 +4,12 @@ build-backend = "maturin"
 
 [project]
 name = "chili-sauce"
-version = "0.8.9"
+version = "0.9.0"
 description = "Python bindings for the Chili engine (EngineState)"
 requires-python = ">=3.10"
 readme = "README.md"
-dependencies = [
-    # Pinned to 1.39.3 because chili's Rust side compiles polars-plan
-    # from `pola-rs/polars` at the `py-1.39.3` tag (with a chili-side
-    # q-style fmt patch on top) — the same source the Python polars
-    # 1.39.3 wheel is built from. The DSL_SCHEMA_HASH matches by
-    # construction → lazy-frame transfer over the FFI works end-to-end
-    # with predicate pushdown preserved. See ADR 0003 (RESOLVED Sprint 7
-    # Part A) and the `[patch.crates-io]` block in workspace + chili-py
-    # Cargo.toml. Pin must move in lockstep with any polars source-tree
-    # version bump.
-    "polars==1.39.3",
-]
-
-[dependency-groups]
-dev = [
-    "pytest>=9.0",
-    "pluggy>=1.5",
-    # Sprint 15 tests (TestParquetWriteConfig) read parquet metadata via
-    # pyarrow to verify the requested codec / row_group_size landed on disk.
-    # Was previously installed ad-hoc in the local venv; declaring here
-    # makes the test suite reproducible on fresh clones.
-    "pyarrow>=20",
-]
 
 [tool.maturin]
 module-name = "chili.engine_state"
 python-source = "."
+include = ["chili/py.typed"]

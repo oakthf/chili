@@ -3,16 +3,12 @@ use std::{
     env,
     fmt::Display,
     fs::{self, DirEntry, OpenOptions},
-    io::{self, Read, Seek, SeekFrom, Write},
+    io::{Read, Seek, SeekFrom, Write},
     net::{TcpListener, TcpStream},
     num::NonZeroUsize,
-    os::fd::RawFd,
     path::{Path, PathBuf},
     process,
-    sync::{
-        Arc, LazyLock,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, LazyLock},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -51,7 +47,6 @@ use crate::{
     par_df::{DFType, PartitionedDataFrame},
     parse, read_chili_ipc_msg, serde6, serde9,
     side_effect_fn::SIDE_EFFECT_FN,
-    upd_notify::{UpdEventCore, UpdNotify},
     utils::{
         self, MessageType, convert_list_to_df, handle_chili_conn, handle_q_conn, read_q_msg,
         read_q_table_name, send_auth, unpack_socket,
@@ -61,42 +56,12 @@ use crate::{
 use crate::{
     ast_node::AstNode,
     errors::{SpicyError, SpicyResult},
-    external_fn::ExternalFnDispatcher,
     func::Func,
 };
 
-// Sprint 16 (2026-05-13): added `sync_all` to support mdata's PRD §5.1 part-2
-// kill-9 durability requirement (`engine.flush_tplog()` Python API). Default
-// is a no-op so non-file-backed wire types (TcpStream) don't pretend to fsync.
-// The blanket `impl<T: Read+Write+Send+Sync> ReadWrite for T` was removed in
-// the same change — `sync_all`'s correct semantic differs by underlying type,
-// and Rust's coherence rules disallow a specific override of a blanket impl
-// (E0119). Adding a new wire type now requires an explicit `impl ReadWrite for
-// <Type>` — by design, since the contributor needs to decide what sync_all
-// means for that type.
-pub trait ReadWrite: Read + Write + Send + Sync {
-    fn sync_all(&self) -> io::Result<()> {
-        Ok(())
-    }
-}
+pub trait ReadWrite: Read + Write + Send + Sync {}
 
-impl ReadWrite for fs::File {
-    fn sync_all(&self) -> io::Result<()> {
-        fs::File::sync_all(self)
-    }
-}
-
-impl ReadWrite for TcpStream {}
-
-// Forward the trait through Box<T> so `Box<TcpStream>` / `Box<fs::File>` /
-// `Box<dyn ReadWrite>` all satisfy `ReadWrite`. Without this, coercing
-// `&mut Box<T>` to `&mut dyn ReadWrite` (which the IPC handler call sites
-// at engine_state.rs:2079-2082 do) fails since the blanket impl is gone.
-impl<T: ReadWrite + ?Sized> ReadWrite for Box<T> {
-    fn sync_all(&self) -> io::Result<()> {
-        (**self).sync_all()
-    }
-}
+impl<T: Read + Write + Send + Sync> ReadWrite for T {}
 
 pub struct Handle {
     pub rw: Option<Box<dyn ReadWrite>>,
@@ -106,11 +71,6 @@ pub struct Handle {
     pub ipc_type: IpcType,
     pub conn_type: ConnType,
     pub on_disconnected: Option<String>,
-    /// Bytes written via `state.sync(h, …)` or `state.publish(table, …)`
-    /// since the most recent successful `state.flush_handle(h)` call.
-    /// Counter resets to 0 on each flush. Used by mdata's monitor probe
-    /// (replaces their `stat().st_size` proxy).
-    pub bytes_since_flush: AtomicU64,
 }
 
 /// LRU cache size for parsed AST trees. 256 entries × ~1 KB per AST is
@@ -132,28 +92,9 @@ pub struct EngineState {
     // handle number, rw, is_local, version, ipc type
     handle: RwLock<IndexMap<i64, Handle>>,
     tick_count: RwLock<Vec<i64>>,
-    /// Sprint 21 / ADR-0006 — mdata push-model D-1. Lazily-created
-    /// GIL-free `upd` notification (None until the first
-    /// `enable_upd_notify()`; non-subscribers pay nothing on the
-    /// receive hot path beyond a read-lock + `Option` check).
-    upd_notify: RwLock<Option<Arc<UpdNotify>>>,
-    /// ADR-0006 §4 — D-3 per-table resume cursor (table →
-    /// last-delivered cursor), seeded from `subscribe(resume_from=)`,
-    /// consulted by `.sub.init` / `.sub.recover`. The field is added
-    /// here with D-1 (cheap; avoids touching the struct twice); the
-    /// `.sub.*` wiring lands in the D-3 step.
-    resume_cursor: RwLock<HashMap<String, i64>>,
     job: RwLock<IndexMap<i64, Job>>,
     topic_map: RwLock<HashMap<String, Vec<i64>>>,
     arc_self: RwLock<Option<Arc<Self>>>,
-    /// ADR-0007 (Sprint 23) — W3 external (Python) function bridge. None
-    /// until the first `register_fn` call; non-W3 users pay nothing on
-    /// the dispatch hot path (the W3 branch in `eval_fn_call` is only
-    /// reached when `Func::external_name.is_some()`, which only
-    /// `Func::new_external` sets). The trait object is invoked lock-free
-    /// per the trait's lock-discipline contract; the read lock here is
-    /// taken briefly to clone the Arc, then released before dispatch.
-    external_dispatcher: RwLock<Option<Arc<dyn ExternalFnDispatcher>>>,
     /// Proposal D — LRU parse cache. Keyed on (path, source) so the same
     /// source under different IPC handles or REPL/IPC contexts produces
     /// distinct entries (the cached AST embeds source positions referencing
@@ -213,12 +154,9 @@ impl EngineState {
             source: RwLock::new(source),
             handle: RwLock::new(IndexMap::new()),
             tick_count: RwLock::new(vec![0i64; MAX_HANDLE_NUM]),
-            upd_notify: RwLock::new(None),
-            resume_cursor: RwLock::new(HashMap::new()),
             job: RwLock::new(IndexMap::new()),
             topic_map: RwLock::new(HashMap::new()),
             arc_self: RwLock::new(None),
-            external_dispatcher: RwLock::new(None),
             parse_cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(PARSE_CACHE_CAPACITY).unwrap(),
             )),
@@ -290,28 +228,6 @@ impl EngineState {
         Ok(())
     }
 
-    // ADR-0007 (Sprint 23) — W3 external Python-callable bridge.
-    //
-    // Install a dispatcher; replaces any previously-installed one. MUST
-    // NOT be called from within a registered callback (parking_lot
-    // RwLock is not reentrant — deadlock against the read lock held by
-    // the outer dispatch path). Use only during engine init or from
-    // outside callbacks. Not exposed via chili-py in Sprint 23.
-    pub fn set_external_dispatcher(&self, d: Arc<dyn ExternalFnDispatcher>) {
-        *self.external_dispatcher.write() = Some(d);
-    }
-
-    pub fn clear_external_dispatcher(&self) {
-        *self.external_dispatcher.write() = None;
-    }
-
-    /// Lock-free clone of the currently-installed dispatcher (if any).
-    /// Used by `eval_fn_call`'s W3 branch to avoid holding the
-    /// `external_dispatcher` read lock across the Python call.
-    pub(crate) fn external_dispatcher(&self) -> Option<Arc<dyn ExternalFnDispatcher>> {
-        self.external_dispatcher.read().as_ref().map(Arc::clone)
-    }
-
     pub fn shutdown(&self) {
         self.handle.write().clear();
     }
@@ -338,27 +254,6 @@ impl EngineState {
         let vars = self.vars.read();
         match vars.get(id) {
             Some(obj) => Ok(obj.clone()),
-            None => Err(SpicyError::NameErr(id.to_owned())),
-        }
-    }
-
-    /// D-2 (Sprint 21 / ADR-0006 §5) — a variable as a `LazyFrame`
-    /// snapshot. A shallow Arc-clone of the in-memory accumulated
-    /// `DataFrame` under the read-lock, then `.lazy()`. Sound: the IPC
-    /// receive thread only mutates the var under the write-lock, so
-    /// the clone is a stable snapshot — no live view. `.collect()` is
-    /// byte-identical to `get_var(id)`; projection/predicate pushdown
-    /// appears in the lazy plan over the in-memory frame (NOT a
-    /// Parquet scan).
-    pub fn get_var_lazy(&self, id: &str) -> Result<SpicyObj, SpicyError> {
-        let vars = self.vars.read();
-        match vars.get(id) {
-            Some(SpicyObj::DataFrame(df)) => Ok(SpicyObj::LazyFrame(df.clone().lazy())),
-            Some(other) => Err(SpicyError::Err(format!(
-                "get_var_lazy: '{}' is {}, not a DataFrame",
-                id,
-                other.get_type_name()
-            ))),
             None => Err(SpicyError::NameErr(id.to_owned())),
         }
     }
@@ -767,46 +662,6 @@ impl EngineState {
         }
     }
 
-    /// Open a `file://` path as a tplog writer: open (read+write+create,
-    /// no truncate) → detect `ConnType` from the existing content
-    /// (`New` empty / `File` <8 bytes / `Sequence` `[255,0,0,0]` magic)
-    /// → seek to EOF so writes append. Sprint 18: extracted verbatim
-    /// from `open_handle`'s `file://` arm so `roll_tick` reuses the
-    /// EXACT same file-prep (audit CRITICAL-1: a hand-rolled open in
-    /// `roll_tick` that omitted the EOF seek would clobber a
-    /// pre-existing segment's head). The single source of truth — a
-    /// future change here cannot desync the two callers.
-    fn prepare_file_writer(path: &str) -> SpicyResult<(Box<dyn ReadWrite>, ConnType)> {
-        let mut file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path)
-            .map_err(|e| SpicyError::Err(e.to_string()))?;
-        let metadata = file
-            .metadata()
-            .map_err(|e| SpicyError::Err(e.to_string()))?;
-        let conn_type = if metadata.len() == 0 {
-            ConnType::New
-        } else if metadata.len() < 8 {
-            ConnType::File
-        } else {
-            let mut header = [0u8; 4];
-            file.read_exact(&mut header)
-                .map_err(|e| SpicyError::Err(format!("failed to read header, error: {}", e)))?;
-            if [255, 0, 0, 0] == header {
-                ConnType::Sequence
-            } else {
-                ConnType::File
-            }
-        };
-        file.seek(SeekFrom::End(0))
-            .map_err(|e| SpicyError::Err(format!("failed to seek to end of file, error: {}", e)))?;
-        let rw: Box<dyn ReadWrite> = Box::new(file);
-        Ok((rw, conn_type))
-    }
-
     pub fn open_handle(&self, uri: &str, h: i64) -> SpicyResult<SpicyObj> {
         let mut callback = None;
         let uri = if h > 0 {
@@ -838,7 +693,7 @@ impl EngineState {
                 } else if schema == "chili" {
                     (IpcType::Chili, path, 9)
                 } else if schema == "file" {
-                    let (rw, conn_type) = Self::prepare_file_writer(path)?;
+                    let (rw, conn_type, msg_count) = utils::prepare_file_writer(path)?;
                     let h = self.set_handle(
                         Some(rw),
                         &format!("file://{}", path),
@@ -848,6 +703,7 @@ impl EngineState {
                         conn_type,
                         0,
                     )?;
+                    self.tick(*h.i64().unwrap() as usize, msg_count)?;
                     return Ok(h);
                 } else {
                     return Err(err);
@@ -892,153 +748,39 @@ impl EngineState {
 
     pub fn close_handle(&self, handle_num: &i64) -> SpicyResult<SpicyObj> {
         let mut handle = self.handle.write();
+        // Flush (fdatasync) the writer before dropping the handle
+        if let Some(h) = handle.get_mut(handle_num)
+            && let Some(ref mut rw) = h.rw
+        {
+            let _ = rw.flush();
+        }
         handle.shift_remove(handle_num);
         Ok(SpicyObj::Null)
     }
 
-    /// Sprint 18 — atomic tplog segment rollover (mdata wishlist v2 P0;
-    /// thread `mdata-chili-eod-upd-race-2026-05-15`).
-    ///
-    /// Replaces the racy `.tick.createLog` close-then-reopen pair
-    /// (`tick.pep:9`→`:10`, two separate `handle.write()` acquisitions
-    /// with the id `shift_remove`d in between). Holds `handle.write()`
-    /// across the whole writer cutover **keeping the same handle id**,
-    /// so a concurrent inbound `.tick.upd` (`sync()` `:971`) either ran
-    /// fully before the swap (→ old segment) or runs fully after (→ new
-    /// segment): never `InvalidHandleErr` (gap-loss), never misplaced
-    /// into the wrong segment via id-reuse (`set_handle:874` derives
-    /// `1+max(keys)` — a single-tplog tickerplant re-derives the freed
-    /// id). The swap point is the crisp day/segment boundary.
-    ///
-    /// `segment_label` is an opaque caller-owned path component (a
-    /// date, a zero-padded UHF counter, …) appended to `log_dir`
-    /// exactly as `.tick.createLog` does (`.tick.msgLog: logDir+date`).
-    /// Cutover-only: does NOT fire `signal_eod` (it filters
-    /// `ConnType::Publishing` and skips the `Sequence` tplog handle —
-    /// independent by construction). Idempotent: a repeat call once the
-    /// live handle already points at `segment_label` is a no-op.
-    ///
-    /// Failure artifact (review MAJOR, Sprint 18): the next-segment file
-    /// is `create`-opened (by `prepare_file_writer`) BEFORE the old
-    /// segment is fsync'd. If that fsync errors, `roll_tick` returns
-    /// `Err` with the old segment still live and writable (no swap), but
-    /// a **zero-byte next-segment file may be left on disk**. This is
-    /// safe and retry-correct: a re-invocation sees `len==0 → New`,
-    /// `validateSeq` returns 0, and the open is idempotent — no data is
-    /// lost or duplicated. File-count monitors (e.g. mdata's tplog
-    /// probes) should treat a zero-byte trailing segment as "roll did
-    /// not complete; retry pending", not as a real segment.
-    pub fn roll_tick(&self, log_dir: &str, segment_label: &str) -> SpicyResult<()> {
-        if segment_label.is_empty() {
-            return Err(SpicyError::Err(
-                "roll_tick: segment_label must not be empty".to_owned(),
-            ));
-        }
-        let h = match self.get_var(".tick.msgHandle")? {
-            SpicyObj::I64(h) => h,
-            other => {
-                return Err(SpicyError::Err(format!(
-                    "roll_tick: .tick.msgHandle is not an i64 handle: {:?}",
-                    other
-                )));
-            }
-        };
-        let next_path = format!("{}{}", log_dir, segment_label);
-        let next_uri = format!("file://{}", next_path);
-
-        // Early idempotent short-circuit: if the live handle already
-        // points at this segment, return before any file I/O. This
-        // makes the realistic EodScheduler-retry path a cheap no-op and
-        // — critically — keeps `validateSeq`'s whole-file walk + torn-
-        // tail `set_len` from ever running against an ALREADY-LIVE
-        // segment (which a concurrent writer could be appending to).
-        // Callers must single-flight rolls (do not invoke `roll_tick`
-        // concurrently with itself for the same handle); mdata's EOD is
-        // a single asyncio task, so this holds. A true concurrent
-        // double-roll is still serialized by the `handle.write()` swap
-        // below and re-checked there.
-        {
-            let handle = self.handle.read();
-            if let Some(e) = handle.get(&h)
-                && e.uri == next_uri
-            {
-                return Ok(());
-            }
-        }
-
-        // Validate / recover the next segment BEFORE it becomes the
-        // live handle — matches `.tick.createLog:7` (`validateSeq`
-        // precedes the open). No `.tick.upd` can race a not-yet-live
-        // file, and the whole-file walk + torn-tail `set_len` stays
-        // OUT of the `handle.write()` critical section (audit OPP-1).
-        // Fresh segment ⇒ 0.
-        let seq_delta = match self.fn_call(
-            ".broker.validateSeq",
-            &[
-                &SpicyObj::String(next_path.clone()),
-                &SpicyObj::Boolean(false),
-            ],
-        )? {
-            SpicyObj::I64(n) => n,
-            other => {
-                return Err(SpicyError::Err(format!(
-                    "roll_tick: validateSeq returned non-i64: {:?}",
-                    other
-                )));
-            }
-        };
-
-        // Open the next writer BEFORE touching the live handle. If this
-        // errors the old segment is untouched and still writable
-        // (failure-atomicity invariant).
-        let (new_rw, conn_type) = Self::prepare_file_writer(&next_path)?;
-
-        {
-            let mut handle = self.handle.write();
-            let entry = handle.get_mut(&h).ok_or(SpicyError::InvalidHandleErr(h))?;
-            // Idempotent: already rolled to this segment → no-op.
-            if entry.uri == next_uri {
-                return Ok(());
-            }
-            // Durability: fsync the old segment's tail before it stops
-            // being the live writer (mdata PRD §5.1). Bounded; once per
-            // roll; under the lock by design (fsync-inside-lock).
-            if let Some(old) = entry.rw.as_mut() {
-                old.flush().map_err(|e| SpicyError::Err(e.to_string()))?;
-                old.sync_all().map_err(|e| SpicyError::Err(e.to_string()))?;
-            }
-            // Atomic same-id swap. `rw` is replaced (never taken-then-
-            // filled) so it is `Some` at every lock-release point;
-            // `sync()`'s wildcard arm (`:1121`, also covers `rw: None`)
-            // is never reached for this id mid-roll.
-            entry.rw = Some(new_rw);
-            entry.conn_type = conn_type;
-            entry.uri = next_uri;
-            entry.socket = format!("file://{}", next_path);
-            entry.bytes_since_flush.store(0, Ordering::Relaxed);
-        }
-
-        // Cumulative tick counter, matching `.tick.createLog:7`
-        // `tick[0; validateSeq]` — index 0 is the conventional tplog
-        // slot (`tick.pep:6`). `tick()` is `+= inc` and bounds-checks
-        // internally, so a fresh segment (seq_delta 0) leaves the
-        // logical sequence MONOTONIC across segments (carry-over by
-        // construction — NOT a per-segment reset; mdata SEQ-MONO holds).
-        self.tick(0, seq_delta)?;
-        self.set_var(".tick.msgLog", SpicyObj::String(next_path))?;
-        Ok(())
-    }
-
     pub fn rotate_handle(&self, handle_num: &i64, uri: &str) -> SpicyResult<SpicyObj> {
+        // If the uri already exists in handles, do nothing
+        {
+            let handles = self.handle.read();
+            if handles.values().any(|h| h.uri == uri) {
+                return Ok(SpicyObj::Null);
+            }
+        }
         match uri.split_once("://") {
             Some(("file", path)) => {
-                let (rw, conn_type) = utils::prepare_file_writer(path)?;
-                if conn_type != ConnType::New {
-                    return Err(SpicyError::EvalErr(format!("file '{}' is not empty", path)));
-                }
+                let (rw, conn_type, msg_count) = utils::prepare_file_writer(path)?;
                 let idx = *handle_num as usize;
                 if *handle_num < 0 || idx >= MAX_HANDLE_NUM {
                     return Err(SpicyError::HandleOutOfRangeErr(*handle_num, MAX_HANDLE_NUM));
+                }
+                // Flush (fdatasync) the old handle before replacing it
+                {
+                    let mut handles = self.handle.write();
+                    if let Some(h) = handles.get_mut(handle_num)
+                        && let Some(ref mut rw) = h.rw
+                    {
+                        rw.flush().map_err(|e| SpicyError::Err(e.to_string()))?;
+                    }
                 }
                 let mut tick_count = self.tick_count.write();
                 self.set_handle(
@@ -1047,10 +789,14 @@ impl EngineState {
                     uri,
                     false,
                     IpcType::Chili,
-                    ConnType::New,
+                    conn_type,
                     *handle_num,
                 )?;
-                tick_count[idx] = 0;
+                if conn_type == ConnType::New {
+                    tick_count[idx] = 0;
+                } else {
+                    tick_count[idx] = msg_count;
+                }
                 Ok(SpicyObj::Null)
             }
             _ => Err(SpicyError::EvalErr(format!(
@@ -1064,6 +810,19 @@ impl EngineState {
         Ok(SpicyObj::Boolean(
             self.handle.read().contains_key(handle_num),
         ))
+    }
+
+    pub fn fsync_handle(&self, handle_num: &i64) -> SpicyResult<SpicyObj> {
+        let mut handles = self.handle.write();
+        match handles.get_mut(handle_num) {
+            Some(h) => {
+                if let Some(ref mut rw) = h.rw {
+                    rw.flush().map_err(|e| SpicyError::Err(e.to_string()))?;
+                }
+                Ok(SpicyObj::Null)
+            }
+            None => Err(SpicyError::InvalidHandleErr(*handle_num)),
+        }
     }
 
     pub fn list_handle(&self) -> SpicyResult<DataFrame> {
@@ -1132,7 +891,6 @@ impl EngineState {
                 ipc_type,
                 conn_type,
                 on_disconnected: None,
-                bytes_since_flush: AtomicU64::new(0),
             },
         );
         Ok(SpicyObj::I64(h))
@@ -1183,7 +941,6 @@ impl EngineState {
                         ipc_type: handle.ipc_type,
                         conn_type: ConnType::Subscribing,
                         on_disconnected: handle.on_disconnected,
-                        bytes_since_flush: AtomicU64::new(0),
                     },
                 );
                 let user = self.user.clone();
@@ -1221,7 +978,6 @@ impl EngineState {
                 is_local,
                 ipc_type,
                 conn_type,
-                bytes_since_flush,
                 ..
             }) => {
                 if *conn_type == ConnType::Outgoing {
@@ -1282,7 +1038,6 @@ impl EngineState {
                         SpicyObj::Symbol(s) | SpicyObj::String(s) => {
                             writeln!(rw, "{}", s).map_err(|e| SpicyError::Err(e.to_string()))?;
                             // s + '\n'
-                            bytes_since_flush.fetch_add(s.len() as u64 + 1, Ordering::Relaxed);
                             *conn_type = ConnType::File;
                             Ok(SpicyObj::I64(s.len() as i64))
                         }
@@ -1306,7 +1061,6 @@ impl EngineState {
                                     .map_err(|e| SpicyError::Err(e.to_string()))?;
                             }
                             // 8 (magic) + 8 (total_len) + 8 (timestamp) + payload
-                            bytes_since_flush.fetch_add(24 + total_len as u64, Ordering::Relaxed);
                             *conn_type = ConnType::Sequence;
                             Ok(SpicyObj::I64(total_len as i64))
                         }
@@ -1319,7 +1073,7 @@ impl EngineState {
                     match msg {
                         SpicyObj::Symbol(s) | SpicyObj::String(s) => {
                             writeln!(rw, "{}", s).map_err(|e| SpicyError::Err(e.to_string()))?;
-                            bytes_since_flush.fetch_add(s.len() as u64 + 1, Ordering::Relaxed);
+
                             Ok(SpicyObj::I64(s.len() as i64))
                         }
                         _ => Err(SpicyError::MismatchedTypeErr(
@@ -1347,7 +1101,6 @@ impl EngineState {
                                     .map_err(|e| SpicyError::Err(e.to_string()))?;
                             }
                             // 8 (total_len) + 8 (timestamp) + payload
-                            bytes_since_flush.fetch_add(16 + total_len as u64, Ordering::Relaxed);
                             *conn_type = ConnType::Sequence;
                             Ok(SpicyObj::I64(total_len as i64))
                         }
@@ -1367,43 +1120,61 @@ impl EngineState {
         }
     }
 
-    /// Sprint 16 — `engine.flush_tplog()` backing for mdata's PRD §5.1
-    /// part-2 kill-9 durability requirement.
-    ///
-    /// Flushes user-space buffers then `fsync`s the kernel buffers for a
-    /// file:// handle. Returns the count of payload bytes written through
-    /// this handle since the most recent successful `flush_handle` (or
-    /// since handle creation if never flushed) — this replaces mdata's
-    /// `log_path.stat().st_size` proxy with a precise monitor probe.
-    ///
-    /// Returns Err for non-file:// connections (TCP handles don't have
-    /// `fsync` semantics; per Q1 lock-in 2026-05-13, par_df Parquet
-    /// fsync is wdb's responsibility via `os.fsync(fd)`).
-    pub fn flush_handle(&self, h: &i64) -> SpicyResult<i64> {
-        let mut handles = self.handle.write();
-        let handle = handles.get_mut(h).ok_or(SpicyError::InvalidHandleErr(*h))?;
-
-        match handle.conn_type {
-            ConnType::New | ConnType::File | ConnType::Sequence => {}
-            other => {
-                return Err(SpicyError::Err(format!(
-                    "flush_handle: handle {h} is not a file:// connection (conn_type={other:?})"
-                )));
+    pub fn async_(&self, h: &i64, msg: &SpicyObj) -> SpicyResult<SpicyObj> {
+        let mut handle = self.handle.write();
+        match handle.get_mut(h) {
+            Some(Handle {
+                rw: Some(rw),
+                is_local,
+                ipc_type,
+                conn_type,
+                ..
+            }) => {
+                if *conn_type == ConnType::Outgoing {
+                    match msg {
+                        SpicyObj::Symbol(_) | SpicyObj::String(_) | SpicyObj::MixedList(_) => {
+                            if *ipc_type == IpcType::Q {
+                                let v8 = serde6::serialize(msg)?;
+                                let v8 = if !*is_local { serde6::compress(v8) } else { v8 };
+                                if let Err(e) = utils::write_q_ipc_msg(rw, &v8, MessageType::Async)
+                                {
+                                    *conn_type = ConnType::Disconnected;
+                                    return Err(SpicyError::Err(e.to_string()));
+                                }
+                                Ok(SpicyObj::Null)
+                            } else {
+                                let v8 = serde9::serialize(msg, !*is_local)?;
+                                if let Err(e) =
+                                    utils::write_chili_ipc_msg(rw, &v8, MessageType::Async)
+                                {
+                                    *conn_type = ConnType::Disconnected;
+                                    return Err(SpicyError::Err(e.to_string()));
+                                }
+                                Ok(SpicyObj::Null)
+                            }
+                        }
+                        _ => Err(SpicyError::MismatchedTypeErr(
+                            "sym|str|mixedList".to_owned(),
+                            msg.get_type_name(),
+                        )),
+                    }
+                } else {
+                    Err(SpicyError::EvalErr(format!(
+                        "cannot async for {:?} handle",
+                        conn_type
+                    )))
+                }
             }
+            _ => Err(SpicyError::InvalidHandleErr(*h)),
         }
+    }
 
-        let rw = handle
-            .rw
-            .as_mut()
-            .ok_or_else(|| SpicyError::Err(format!("flush_handle: handle {h} has no rw")))?;
-        rw.flush()
-            .map_err(|e| SpicyError::Err(format!("flush failed for handle {h}: {e}")))?;
-        rw.sync_all()
-            .map_err(|e| SpicyError::Err(format!("sync_all failed for handle {h}: {e}")))?;
-
-        // Both flush() and sync_all() succeeded — safe to reset counter.
-        let bytes = handle.bytes_since_flush.swap(0, Ordering::AcqRel);
-        Ok(bytes as i64)
+    pub fn execute(&self, h: &i64, msg: &SpicyObj) -> SpicyResult<SpicyObj> {
+        if *h > 0 {
+            self.sync(h, msg)
+        } else {
+            self.async_(&-h, msg)
+        }
     }
 
     pub fn add_subscriber(&self, topic: &str, h: i64) -> SpicyResult<()> {
@@ -1514,60 +1285,6 @@ impl EngineState {
                 }
             }
         }
-        Ok(())
-    }
-
-    /// Sprint 17 — Publish a DataFrame to a remote tp via an open
-    /// chili-IPC handle. Thin one-shot wrapper over `sync()`.
-    ///
-    /// Builds the message `(`upd; table; df)` (a 3-tuple MixedList
-    /// matching the in-process `.tick.upd[table; df]` shape) and
-    /// dispatches via `sync()` to the remote tp on handle `h`.
-    ///
-    /// Per Sprint 16 mdata-wishlist Q3 lock-in (Option B): chili owns
-    /// the marshalling primitive; downstream callers (e.g. mdata's
-    /// RemoteTpClient) own connection-manager semantics on top.
-    ///
-    /// Note: `sync()` is a blocking send-and-receive on chili IPC.
-    /// The remote tp's response value is read and discarded, but this
-    /// method does not return until the remote has answered. If the
-    /// remote is slow or unreachable, the handle map's write lock is
-    /// held across the network read (inherited from `sync()`;
-    /// pre-Sprint-17 concern, not this method's responsibility to fix).
-    /// Callers needing client-side cancellation/timeout must implement
-    /// it above this layer.
-    ///
-    /// Errors:
-    ///   - `Err` if `df` is not a `DataFrame`.
-    ///   - `InvalidHandleErr` if `h` has no entry.
-    ///   - `Err` if handle is not `ConnType::Outgoing` (i.e. not a
-    ///     client-side chili:// connection).
-    pub fn publish_via_handle(&self, h: &i64, table: &str, df: &SpicyObj) -> SpicyResult<()> {
-        if !matches!(df, SpicyObj::DataFrame(_)) {
-            return Err(SpicyError::Err(format!(
-                "publish_via_handle: df must be DataFrame, got {}",
-                df.get_type_name()
-            )));
-        }
-        // Validate handle exists + is Outgoing. The read lock is
-        // dropped before sync() so sync()'s internal write lock does
-        // not deadlock (parking_lot RwLock is not re-entrant).
-        {
-            let handles = self.handle.read();
-            let handle = handles.get(h).ok_or(SpicyError::InvalidHandleErr(*h))?;
-            if handle.conn_type != ConnType::Outgoing {
-                return Err(SpicyError::Err(format!(
-                    "publish_via_handle: handle {h} is not Outgoing (got {:?})",
-                    handle.conn_type
-                )));
-            }
-        }
-        let msg = SpicyObj::MixedList(vec![
-            SpicyObj::Symbol("upd".into()),
-            SpicyObj::Symbol(table.into()),
-            df.clone(),
-        ]);
-        self.sync(h, &msg)?;
         Ok(())
     }
 
@@ -2290,92 +2007,6 @@ impl EngineState {
         Ok(self.tick_count.read()[index])
     }
 
-    // ---- Sprint 21 / ADR-0006 — mdata push-model D-1 ---------------
-
-    /// Arm GIL-free `upd` notification and return the self-pipe read fd
-    /// (`O_NONBLOCK` + `FD_CLOEXEC`; `asyncio.add_reader`-able).
-    ///
-    /// Idempotent + lazy: first call creates the bounded queue +
-    /// self-pipe; later calls return the same fd. Callers should arm
-    /// this *before* `.sub.init` so no applied `upd` goes unsignalled
-    /// (any gap is recoverable via the tplog — Q4 — but arming first
-    /// avoids the recovery path entirely).
-    pub fn enable_upd_notify(&self) -> io::Result<RawFd> {
-        {
-            let guard = self.upd_notify.read();
-            if let Some(n) = guard.as_ref() {
-                return Ok(n.read_fd());
-            }
-        }
-        let mut guard = self.upd_notify.write();
-        // Re-check under the write lock (another thread may have armed
-        // it between the read-unlock and the write-acquire).
-        if let Some(n) = guard.as_ref() {
-            return Ok(n.read_fd());
-        }
-        let notify = Arc::new(UpdNotify::new()?);
-        let fd = notify.read_fd();
-        *guard = Some(notify);
-        Ok(fd)
-    }
-
-    /// Receive-thread accessor: an `Arc` clone of the notifier iff a
-    /// subscriber has armed it. One uncontended read-lock + (when
-    /// armed) one `Arc` atomic increment per inbound IPC message —
-    /// negligible, and `None` (the common non-subscriber case) is a
-    /// bare `Option` check.
-    pub fn upd_notify(&self) -> Option<Arc<UpdNotify>> {
-        self.upd_notify.read().clone()
-    }
-
-    /// Python-caller-thread drain: non-blocking; empty when notify was
-    /// never armed.
-    pub fn drain_upds(&self) -> Vec<UpdEventCore> {
-        match self.upd_notify() {
-            Some(n) => n.drain(),
-            None => Vec::new(),
-        }
-    }
-
-    /// ADR-0006 §4 — D-3 per-table resume-cursor accessors (the
-    /// `.sub.*` wiring that consumes these lands in the D-3 step).
-    pub fn set_resume_cursor(&self, table: &str, cursor: i64) {
-        self.resume_cursor.write().insert(table.to_owned(), cursor);
-    }
-
-    /// The persisted resume cursor for `table`, or `0` (replay from the
-    /// start of the tplog) when none was seeded.
-    pub fn get_resume_cursor(&self, table: &str) -> i64 {
-        self.resume_cursor.read().get(table).copied().unwrap_or(0)
-    }
-
-    /// ADR-0006 §4 + Q1 Path-1 — the conservative replay start for a
-    /// subscription. `replay` takes a single i64 start but
-    /// `resume_from` is per-table; mdata owns exact per-row dedup via
-    /// its own `seq` (Q1 Path-1), so chili replays from the safe lower
-    /// bound: the **min** persisted cursor across the subscribed
-    /// `topics` (`0` — full replay — if any subscribed topic was never
-    /// seeded, because a fresh table must replay from the start). An
-    /// empty `topics` (subscribe-all) mins over the whole map; an
-    /// empty map is `0`. Over-replay is bounded and harmless — mdata's
-    /// own `seq` filter drops already-seen rows.
-    pub fn resume_start_for(&self, topics: &[&str]) -> i64 {
-        let map = self.resume_cursor.read();
-        if map.is_empty() {
-            return 0;
-        }
-        if topics.is_empty() {
-            return map.values().copied().min().unwrap_or(0);
-        }
-        topics
-            .iter()
-            .map(|t| map.get(*t).copied().unwrap_or(0))
-            .min()
-            .unwrap_or(0)
-    }
-
-    // ----------------------------------------------------------------
-
     pub fn get_table_names(&self, start_with: &str) -> SpicyResult<SpicyObj> {
         let vars = self.vars.read();
         let mut table_names = Vec::new();
@@ -2575,9 +2206,6 @@ impl EngineState {
             }
             Err(e) => {
                 error!("error reading auth credentials: {}", e);
-                // Best-effort shutdown; peer may already have RST'd the
-                // socket. Sprint 22 MC-1 — previously `.unwrap()` panicked
-                // the listener thread on bare-TCP-RST (mdata wishlist W2).
                 let _ = stream.shutdown(std::net::Shutdown::Both);
                 default_auth
             }
@@ -2636,12 +2264,6 @@ impl EngineState {
 
         info!("listening at port {}", port);
 
-        // Sprint 22 W2 — defensive accept loop: every error path
-        // logs + continues so a single bad connection (bare TCP
-        // connect-close, RST mid-handshake, unsupported version, ...)
-        // cannot kill the listener thread. Previously a scatter of
-        // `.unwrap()` calls turned any of these into a process abort.
-        // See `docs/sync/mdata_wishlist_2026-05-23_remote-eval-surface.md` W2.
         for stream in listener.incoming() {
             let state_tcp = Arc::clone(self);
             let mut stream = match stream {

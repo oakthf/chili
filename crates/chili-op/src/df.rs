@@ -121,7 +121,6 @@ pub fn pivot(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
         pivot_expr,
         true,
         PlSmallStr::from("_"),
-        polars::frame::PivotColumnNaming::Auto,
     );
     let df = lf.collect().map_err(|e| SpicyError::Err(e.to_string()))?;
     Ok(SpicyObj::DataFrame(df))

@@ -1,5 +1,5 @@
 [workspace.package]
-version = "0.8.9"
+version = "0.9.0"
 edition = "2024"
 authors = ["The Chili Authors <purple-chili@hotmail.com>"]
 description = "chili"
@@ -46,54 +46,6 @@ lto = "fat"   # cross-crate inlining across polars boundary
 codegen-units = 1
 # panic = "abort"
 
-# Sprint 9 P7 — bench profile override per iteration_lessons.md lesson 16.
-# Inherits from `release` (opt-level 3, lto fat, codegen-units 1) but
-# retains debug symbols so `samply record` / `cargo flamegraph` can
-# resolve stack frames to function names. Cost: bench binaries ~2x larger
-# on disk; symbol-retention adds maybe 1-2% to compile wall.
-[profile.bench]
-strip = false
-debug = true
-
-# Sprint 7 Part A — option 3b per ADR 0003 amendment.
-# All polars-* crates pinned to a local clone of pola-rs/polars at the
-# `py-1.39.3` tag, with a thin chili-side q-style fmt patch on top
-# (commit 8d56f02 in the local clone). This eliminates BOTH:
-#   1. The DSL_SCHEMA_HASH skew vs Python polars 1.39.3 (root cause: chili
-#      was building polars-plan from crates.io 0.53.0 while Python polars
-#      1.39.3's wheel embeds polars-plan from py-1.39.3 commit, ~6 weeks
-#      newer with substantial dsl/ source changes).
-#   2. The q-style Datetime/Duration display ergonomic that the
-#      hinmeru/polars-core-patch.git fork was carrying (now ported into
-#      chili's local clone as a single 30-line patch on top of py-1.39.3
-#      polars-core).
-# Local clone path: /tmp/polars-py-1.39.3 MUST EXIST locally — see ADR 0003
-# amendment "Outstanding migration work" §1 for the GitHub-hosted-fork
-# migration plan (Sprint 8 P0). On a fresh clone of this repo, OR on a
-# CI runner, OR after a macOS reboot (which flushes /tmp), `cargo build`
-# will fail with `no such file` until /tmp/polars-py-1.39.3 is recreated
-# (re-clone pola-rs/polars at py-1.39.3 tag and re-apply the q-style fmt
-# patch from commit 8d56f02 in the local clone) OR the patch block is
-# rewritten to use git-based refs.
-[patch.crates-io]
-polars         = { path = "/tmp/polars-py-1.39.3/crates/polars" }
-polars-arrow   = { path = "/tmp/polars-py-1.39.3/crates/polars-arrow" }
-polars-buffer  = { path = "/tmp/polars-py-1.39.3/crates/polars-buffer" }
-polars-compute = { path = "/tmp/polars-py-1.39.3/crates/polars-compute" }
-polars-core    = { path = "/tmp/polars-py-1.39.3/crates/polars-core" }
-polars-dtype   = { path = "/tmp/polars-py-1.39.3/crates/polars-dtype" }
-polars-error   = { path = "/tmp/polars-py-1.39.3/crates/polars-error" }
-polars-expr    = { path = "/tmp/polars-py-1.39.3/crates/polars-expr" }
-polars-ffi     = { path = "/tmp/polars-py-1.39.3/crates/polars-ffi" }
-polars-io      = { path = "/tmp/polars-py-1.39.3/crates/polars-io" }
-polars-json    = { path = "/tmp/polars-py-1.39.3/crates/polars-json" }
-polars-lazy    = { path = "/tmp/polars-py-1.39.3/crates/polars-lazy" }
-polars-mem-engine = { path = "/tmp/polars-py-1.39.3/crates/polars-mem-engine" }
-polars-ops     = { path = "/tmp/polars-py-1.39.3/crates/polars-ops" }
-polars-parquet = { path = "/tmp/polars-py-1.39.3/crates/polars-parquet" }
-polars-plan    = { path = "/tmp/polars-py-1.39.3/crates/polars-plan" }
-polars-row     = { path = "/tmp/polars-py-1.39.3/crates/polars-row" }
-polars-schema  = { path = "/tmp/polars-py-1.39.3/crates/polars-schema" }
-polars-stream  = { path = "/tmp/polars-py-1.39.3/crates/polars-stream" }
-polars-time    = { path = "/tmp/polars-py-1.39.3/crates/polars-time" }
-polars-utils   = { path = "/tmp/polars-py-1.39.3/crates/polars-utils" }
+[patch.crates-io.polars-core]
+git = "https://github.com/hinmeru/polars-core-patch.git"
+tag = "v0.53.0"

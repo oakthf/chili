@@ -2,49 +2,45 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.8.9] - 2026-05-24
+## [0.9.0] - 2026-05-25
+
+**(claude-2 fork note, Sprint 24, 2026-05-25):** main-port merge into the
+claude-2 working branch — drops the claude-2-unique features built for mdata
+in Sprints 16-23 (push-model D-1/D-2/D-3, W3 register_fn, flush_tplog,
+publish_via_handle, roll_tick atomic, GR4 column-scale helpers) per mdata
+Revision A reframe + author shipping equivalents (fsync_handle, rotate_handle
+atomic + torn-tail recovery, sync(h, tuple-form), eval_op String-parse,
+etc.). Preserves the M-1 invariant test guard (test_engine.py::
+TestM1EagerNoAutoDequant). ADR-0006 and ADR-0007 marked Superseded.
+
 
 ### Added
 
-- **W3 Python-callable bridge** (`engine.register_fn(name, callable, arity)` /
-  `engine.unregister_fn(name)`) — register Python callables as
-  pepper-invokable functions, dispatched via a new `ExternalFnDispatcher`
-  trait. Tuple-form `sync(h, (name, *args))` over chili-IPC dispatches into
-  the registered Python handler; Python exceptions propagate as
-  `ChiliError` with the traceback embedded. See
-  `docs/decisions/0007-w3-python-callable-bridge.md` for the full contract.
-- `Func::new_external(name, arity)` constructor + `Func::is_external_fn()`
-  helper + `Func::external_name: Option<String>` field.
-- `EngineState::set_external_dispatcher` / `clear_external_dispatcher` API
-  for installing an `ExternalFnDispatcher` trait object.
-- 5 Rust unit tests (`crates/chili-core/tests/external_fn_test.rs`) using
-  a Rust-side stub dispatcher; covers happy path, missing-dispatcher
-  error, arity-mismatch projection, dispatcher replacement, and
-  concurrent dispatch + register/unregister (no deadlock).
-- 8 chili-py pytest tests (`crates/chili-py/tests/test_register_fn.py`)
-  for the Python end: local invoke, callback re-entry into the engine,
-  exception propagation, arity-mismatch projection, unregister, dangling-
-  dispatcher warn-on-inconsistency, remote-via-chili-IPC closure gate,
-  and concurrent register + dispatch.
+- `.handle.fsync` built-in — explicitly flush a file handle's buffered data to disk (`fdatasync`), giving users on-demand durability control
+- `SyncFile` wrapper in `utils.rs` — makes `Write::flush` call `sync_data()` so that file handle flushes issue `fdatasync` instead of the default no-op
+- `detect_conn_type` utility in `utils.rs` — shared file-type detection (New/File/Sequence) from magic header bytes, used by `prepare_file_writer` and `validate_seq`
+- `count_seq_messages` utility in `utils.rs` — walks sequence file frames and returns `(msg_count, valid_byte_size)`, used by `prepare_file_writer` and `validate_seq`
+- `fsync_handle` method on Python `ChiliEngine` — exposes `.handle.fsync` via `fn_call`
+- `async_` and `execute` on `EngineState` — positive handle numbers use sync IPC/file writes; negative handle numbers send async IPC without waiting for a response
+- String literals in `eval_op` / `eval_call` are parsed and evaluated as Chili/Pepper query source (inline `eval_str` behavior)
+- `py.typed` marker in `chili-py` for PEP 561 type checkers
 
 ### Changed
 
-- chili-core lib.rs re-exports `ExternalFnDispatcher`.
-- `serde9.rs` SpicyObj::Fn serializer carries an inline note that external
-  Funcs serialize as their fn_body only — deserialized form on the remote
-  side is non-callable. Clients invoking external Funcs MUST use call-form
-  sync, not variable-lookup sync.
+- `rotate_handle` skips rotation when the target URI already exists in the handle map, avoiding duplicate file handles for the same path
+- `rotate_handle` now accepts non-empty files and sets `tick_count` to the existing message count for sequence files
+- `close_handle` now flushes the writer (best-effort `fdatasync`) before dropping the handle
+- `rotate_handle` now flushes the old handle's writer before replacing it, ensuring all data is durable on disk before the new file is opened
+- `prepare_file_writer` returns `(writer, conn_type, msg_count)` — for sequence files, truncates to the last valid message boundary and reports the message count
+- `validate_seq` refactored to use `detect_conn_type` and `count_seq_messages` utilities
+- Handle sends in eval route through `execute` instead of always calling `sync`
+- TCP incoming listener logs and drops bad connections instead of panicking on accept, auth, or handle setup failures
 
-### Notes
+### Fixed
 
-- GR5 (GIL released around `Engine::eval`) is preserved by design:
-  callback dispatch acquires the GIL only for the callback duration
-  (~300ns per round-trip + Python body time). Non-W3 users see the
-  `external_dispatcher` slot as `None` and never reach the W3 branch in
-  `eval_fn_call` — zero overhead.
-- No on-disk format change. No parse-cache impact.
+- `sync` no longer deadlocks when marking a handle disconnected after a failed write (sets `ConnType::Disconnected` inline instead of re-acquiring the handle lock)
 
-## [0.8.3] - 2026-05-17
+## [0.8.2] - 2026-05-24
 
 ### Added
 
@@ -59,6 +55,10 @@ All notable changes to this project will be documented in this file.
 - Parse cache unit tests and log-rotation integration tests
 - Criterion benchmark for categorical eval in `chili-op`
 - Register `LOG_FN` in Python engine for logging support
+- Package import support in `import` — paths starting with `@` or alphabetic characters are resolved as chiz package imports (e.g. `import "@scope/dep-name/util"` resolves to `$CHIZPATH/@scope/dep-name/<version>/src/util.chi`)
+- Version is resolved from local `chiz_index.json` or global `$CHIZPATH/.index`; import fails if the package is not found in either index
+- File extension order follows the current language setting (`.chi` first in Chili mode, `.pep` first in Pepper mode)
+- Supports deeper module paths (e.g. `import "@scope/pkg/sub/module"` → `src/sub/module.chi`)
 
 ### Changed
 
@@ -73,15 +73,6 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - `upsert` / `insert` clippy lint fixes (unnecessary references)
-
-## [0.8.2] - 2026-05-10
-
-### Added
-
-- Package import support in `import` — paths starting with `@` or alphabetic characters are resolved as chiz package imports (e.g. `import "@scope/dep-name/util"` resolves to `$CHIZPATH/@scope/dep-name/<version>/src/util.chi`)
-- Version is resolved from local `chiz_index.json` or global `$CHIZPATH/.index`; import fails if the package is not found in either index
-- File extension order follows the current language setting (`.chi` first in Chili mode, `.pep` first in Pepper mode)
-- Supports deeper module paths (e.g. `import "@scope/pkg/sub/module"` → `src/sub/module.chi`)
 
 ## [0.8.0] - 2026-05-03
 
