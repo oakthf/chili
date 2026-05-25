@@ -43,47 +43,6 @@ engine.sync(h, b"1+1")                # bytes  — sent as a raw string query
 engine.sync(h, ["set", "a", 2])       # list   — sent as a function call (func, args…)
 ```
 
-## Python-callable bridge (W3, 0.8.9+)
-
-Register a Python callable so it becomes invokable from pepper / chili-IPC
-under a chosen name. Useful for daemons that need a control verb wired to
-Python-side bookkeeping (e.g. drain a buffer, finalize a partition) rather
-than pure pepper.
-
-```python
-from chili import ChiliEngine
-
-engine = ChiliEngine()
-
-def eod_fire(date):
-    # ... Python-side bookkeeping (drain buffer, write to disk, etc.) ...
-    return f"acked {date}"
-
-engine.engine.register_fn(".mdata.eod.fire", eod_fire, arity=1)
-
-# Local invocation:
-engine.engine.fn_call(".mdata.eod.fire", ["2026-05-24"])
-# => "acked 2026-05-24"
-
-# Over chili-IPC (the typical mdata shape):
-client = ChiliEngine()
-h = client.open_handle("chili://:1800")
-client.sync(h, (".mdata.eod.fire", "2026-05-24"))
-# => "acked 2026-05-24"
-
-# Tear down when done:
-engine.engine.unregister_fn(".mdata.eod.fire")
-```
-
-- Arity is **explicit** at registration; mismatched call → partial-applied Func.
-- Python exceptions propagate as `ChiliError` with the traceback embedded.
-- The callable may freely call back into `engine.fn_call` / `engine.set_var`
-  / `engine.get_var` (re-entrancy is safe; lock-free dispatch).
-- Wire serialization: external Funcs are call-form only — invoke via
-  `sync(h, (name, *args))`, not `sync(h, name)` (str-form lookup).
-- See `docs/decisions/0007-w3-python-callable-bridge.md` for the full
-  contract.
-
 ## Features
 
 - **Evaluate** Chili or Pepper expressions from Python
@@ -92,7 +51,6 @@ engine.engine.unregister_fn(".mdata.eod.fire")
 - **Partitioned storage** — write and load date-partitioned Parquet tables
 - **IPC / TCP** — start a TCP listener for remote connections
 - **Tick plant** — built-in pub/sub infrastructure for real-time data
-- **Python-callable bridge** — register Python functions as pepper-invokable
 
 ## Type Mapping
 

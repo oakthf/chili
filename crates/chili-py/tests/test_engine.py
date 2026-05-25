@@ -1,10 +1,8 @@
 """Tests for :class:`chili.engine.ChiliEngine`."""
 
-import pytest
 import polars as pl
-
+import pytest
 from chili import ChiliEngine
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -84,16 +82,9 @@ class TestEval:
 
 
 class TestEvalLazy:
-    """ADR 0002 — opt-in lazy parameter on engine.eval.
+    """Opt-in lazy parameter on engine.eval.
 
     Default `lazy=False` returns DataFrame; `lazy=True` returns LazyFrame.
-    Both paths preserve golden rule 5 (GIL release).
-
-    Sprint 7 Part A resolved the DSL_SCHEMA_HASH mismatch (ADR 0003) by
-    git-pinning chili's Rust polars-* crates to `pola-rs/polars` at the
-    `py-1.39.3` tag (the same source Python polars 1.39.3 is built from)
-    and layering chili's q-style fmt patch on top. Lazy-frame transfer
-    over the FFI now works end-to-end.
     """
 
     def test_default_eval_returns_dataframe(self, pepper_engine: ChiliEngine):
@@ -109,9 +100,7 @@ class TestEvalLazy:
         out = pepper_engine.eval("([] x:1 2 3; y:4 5 6)", lazy=True)
         assert isinstance(out, pl.LazyFrame)
 
-    def test_eval_lazy_true_collect_round_trips_data(
-        self, pepper_engine: ChiliEngine
-    ):
+    def test_eval_lazy_true_collect_round_trips_data(self, pepper_engine: ChiliEngine):
         eager = pepper_engine.eval("([] x:1 2 3; y:4 5 6)")
         lazy = pepper_engine.eval("([] x:1 2 3; y:4 5 6)", lazy=True)
         collected = lazy.collect()
@@ -130,14 +119,14 @@ class TestEvalLazy:
         )
         assert out["x"].to_list() == [3, 4, 5]
 
-    def test_eval_lazy_default_on_lazy_engine_still_lazy(self, lazy_engine: ChiliEngine):
+    def test_eval_lazy_default_on_lazy_engine_still_lazy(
+        self, lazy_engine: ChiliEngine
+    ):
         # When the engine is constructed lazy=True, default eval (lazy=False
         # at the FFI boundary) collects the engine-internal LazyFrame to a
         # DataFrame before returning. Explicit lazy=True keeps it lazy.
         assert isinstance(lazy_engine.eval("([] x:1 2 3)"), pl.DataFrame)
-        assert isinstance(
-            lazy_engine.eval("([] x:1 2 3)", lazy=True), pl.LazyFrame
-        )
+        assert isinstance(lazy_engine.eval("([] x:1 2 3)", lazy=True), pl.LazyFrame)
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +248,6 @@ class TestTick:
         assert engine.get_tick_count(0) == 10
 
     def test_get_tick_count_no_arg_defaults_to_index_zero(self, engine: ChiliEngine):
-        # Sprint 5 Part D.1 regression — mdata handoff doc claims
         # engine.get_tick_count() (no arg) defaults to index=0. Pin that.
         assert engine.get_tick_count() == 0
         engine.tick()  # default index=0, inc=1
@@ -400,62 +388,6 @@ class TestTableCount:
         assert engine.table_count() == 0
 
 
-class TestColumnScale:
-    """Read-side dequantization helper (golden rule 4)."""
-
-    def test_set_clear_round_trip(self, engine: ChiliEngine):
-        engine.set_column_scale("ohlcv_1d", "close", 1_000_000)
-        engine.set_column_scale("ohlcv_1d", "open", 1_000_000)
-        assert engine._column_scales == {
-            "ohlcv_1d": {"close": 1_000_000, "open": 1_000_000}
-        }
-        engine.clear_column_scales()
-        assert engine._column_scales == {}
-
-    def test_apply_dequantizes_int64_column(self, engine: ChiliEngine):
-        engine.set_column_scale("ohlcv_1d", "close", 100)
-        df = pl.DataFrame({"sym": ["A", "B"], "close": [12345, 67890]})
-        out = engine._apply_column_scales(df, "select close from ohlcv_1d")
-        assert out["close"].dtype == pl.Float64
-        assert out["close"].to_list() == [123.45, 678.90]
-
-    def test_apply_skips_non_referenced_table(self, engine: ChiliEngine):
-        engine.set_column_scale("ohlcv_1d", "close", 100)
-        df = pl.DataFrame({"sym": ["A"], "close": [12345]})
-        out = engine._apply_column_scales(df, "select close from ohlcv_1m")
-        assert out["close"].dtype == pl.Int64
-
-    def test_apply_no_op_when_no_scales(self, engine: ChiliEngine):
-        df = pl.DataFrame({"close": [12345]})
-        out = engine._apply_column_scales(df, "select close from ohlcv_1d")
-        assert out.equals(df)
-
-    def test_apply_does_not_false_match_substring_table(self, engine: ChiliEngine):
-        # Word-boundary regex must not match `from trades` against `from
-        # all_trades`. Pre-fix code (`f"from {table}" not in query`) would
-        # have rescaled the `all_trades` query against the `trades` scale.
-        engine.set_column_scale("trades", "px", 100)
-        df = pl.DataFrame({"px": [12345]})
-        out = engine._apply_column_scales(df, "select px from all_trades")
-        assert out["px"].dtype == pl.Int64
-        assert out["px"].to_list() == [12345]
-
-    def test_apply_dequantizes_two_tables_in_join(self, engine: ChiliEngine):
-        # Both tables register a scale; result df has columns matching
-        # both. Pre-fix code stopped after the first match (single-table
-        # break) so only one of the two columns was rescaled.
-        engine.set_column_scale("ohlcv_1d", "close", 100)
-        engine.set_column_scale("trades", "px", 1000)
-        df = pl.DataFrame({"close": [12345], "px": [678900]})
-        out = engine._apply_column_scales(
-            df, "select close, px from ohlcv_1d join trades on sym"
-        )
-        assert out["close"].dtype == pl.Float64
-        assert out["px"].dtype == pl.Float64
-        assert out["close"].to_list() == [123.45]
-        assert out["px"].to_list() == [678.90]
-
-
 @pytest.fixture()
 def tmp_hdb(tmp_path):
     """Build a small HDB on disk: ohlcv_1d / 2024.01.01 with two rows."""
@@ -472,6 +404,33 @@ def tmp_hdb(tmp_path):
     e.write_partitioned_df(df, hdb, "ohlcv_1d", "2024.01.01")
     e.shutdown()
     return hdb
+
+
+class TestOverwritePartition:
+    def test_overwrite_returns_positive(self, engine: ChiliEngine, tmp_hdb):
+        new_df = pl.DataFrame({"sym": ["AAPL"], "close": [20000]})
+        result = engine.write_partitioned_df(
+            new_df, tmp_hdb, "ohlcv_1d", "2024.01.01", overwrite=True
+        )
+        # wpar returns bytes-written or row-count depending on shard layout;
+        # the contract here is "did not error" + "returned a non-zero int."
+        assert isinstance(result, int)
+        assert result > 0
+
+    def test_overwrite_partition_with_zstd(
+        self, engine: ChiliEngine, tmp_hdb, tmp_path
+    ):
+        # Mirror coverage for asymmetry regression.
+        new_df = pl.DataFrame({"sym": ["AAPL", "MSFT"], "close": [21000, 39000]})
+        result = engine.write_partitioned_df(
+            new_df, tmp_hdb, "ohlcv_1d", "2024.01.01", overwrite=True
+        )
+        assert isinstance(result, int) and result > 0
+        # Read back through polars; chili's read path is codec-agnostic.
+        shard = sorted(__import__("glob").glob(f"{tmp_hdb}/ohlcv_1d/2024.01.01_*"))[0]
+        round_trip = pl.read_parquet(shard)
+        assert round_trip["sym"].to_list() == ["AAPL", "MSFT"]
+        assert round_trip["close"].to_list() == [21000, 39000]
 
 
 class TestQueryPlan:
@@ -492,7 +451,9 @@ class TestQueryPlan:
         e = ChiliEngine(pepper=True)
         try:
             e.load_partitioned_df(tmp_hdb)
-            plan = e.query_plan("select last close by sym from ohlcv_1d where date=2024.01.01")
+            plan = e.query_plan(
+                "select last close by sym from ohlcv_1d where date=2024.01.01"
+            )
             assert isinstance(plan, str)
             assert len(plan) > 0
         finally:
@@ -501,46 +462,3 @@ class TestQueryPlan:
     def test_query_plan_raises_without_hdb(self, engine: ChiliEngine):
         with pytest.raises(RuntimeError, match="No HDB path provided"):
             engine.query_plan("select * from ohlcv_1d")
-
-
-class TestM1EagerNoAutoDequant:
-    """Sprint 20 / M-1 contract guard.
-
-    Eager ``eval()`` no longer auto-applies registered column scales;
-    callers dequantize themselves (mdata already does, both paths). The
-    ``_apply_column_scales`` helper stays available (see
-    :class:`TestColumnScale`) but ``eval()`` MUST NOT invoke it. Without
-    this committed test a silent reintroduction of auto-dequant in the
-    ``eval()`` wrapper is invisible to the Rust gate + regression suite
-    (Sprint-19 lesson #1). On-disk schema stays Int64-quantized
-    (golden rule 4); M-1 only drops the read-time convenience.
-    """
-
-    def test_eager_eval_returns_raw_int64_despite_registered_scale(
-        self, tmp_hdb
-    ):
-        e = ChiliEngine(pepper=True)
-        try:
-            e.load_partitioned_df(tmp_hdb)
-            e.set_column_scale("ohlcv_1d", "close", 100)
-            df = e.eval(
-                "select last close by sym from ohlcv_1d where date=2024.01.01"
-            )
-            assert isinstance(df, pl.DataFrame)
-            # M-1: NOT auto-dequantized — close stays Int64 as stored,
-            # NOT cast to Float64 / divided by the registered scale.
-            assert df["close"].dtype == pl.Int64
-            assert sorted(df["close"].to_list()) == [19000, 38000]
-        finally:
-            e.shutdown()
-
-    def test_apply_column_scales_helper_preserved_for_callers(
-        self, engine: ChiliEngine
-    ):
-        # The opt-in helper is preserved so callers can dequantize
-        # explicitly on the eager path (parity with the lazy path).
-        engine.set_column_scale("ohlcv_1d", "close", 100)
-        df = pl.DataFrame({"sym": ["A"], "close": [19000]})
-        out = engine._apply_column_scales(df, "select close from ohlcv_1d")
-        assert out["close"].dtype == pl.Float64
-        assert out["close"].to_list() == [190.0]

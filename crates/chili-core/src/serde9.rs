@@ -938,13 +938,6 @@ pub fn serialize(args: &SpicyObj, compress: bool) -> SpicyResult<Vec<Vec<u8>>> {
             Ok(vec![header, buf])
         }
         SpicyObj::Null => Ok(vec![vec![code, 0, 0, 0, 0, 0, 0, 0]]),
-        // ADR-0007 (Sprint 23) — W3 external Funcs serialize as their
-        // fn_body only (existing format). Deserialized form on the remote
-        // side is non-callable: no dispatcher, no `external_name`, hits
-        // `Func::new_raw_fn`. Clients invoking external Funcs MUST use
-        // call-form sync (`sync(h, (name, *args))`), NOT variable-lookup
-        // sync (`sync(h, name)` str-form). The Func is resolved + invoked
-        // on the server side; only the result travels over the wire.
         SpicyObj::Fn(f) if f.part_args.is_none() => {
             let fn_body = &f.fn_body;
             let mut buf = Vec::with_capacity(fn_body.len() + 16 + PADDING[fn_body.len() % 8].len());

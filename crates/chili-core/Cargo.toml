@@ -76,13 +76,6 @@ chumsky = { workspace = true }
 ariadne = { workspace = true }
 lru = "0.18.0"
 parking_lot = "0.12"
-# Sprint 21 (ADR-0006 — mdata push-model D-1). crossbeam-channel: the
-# bounded back-pressure queue; libc: the POSIX self-pipe + fcntl
-# (macOS has no eventfd/pipe2). Versions match the existing Cargo.lock
-# pins (0.5.15 / 0.2.186) — promoted from transitive to direct, no
-# lockfile churn.
-crossbeam-channel = "0.5"
-libc = "0.2"
 sysinfo = "0.39"
 serde_json = "1.0"
 unicode-width = "0.2"
@@ -91,10 +84,6 @@ unicode-width = "0.2"
 criterion = { version = "0.8", features = ["html_reports"] }
 tempfile = "3"
 serial_test = "3"
-# Sprint 21 — upd_notify_test.rs polls/fcntls the self-pipe fd and
-# builds trivial DataFrame payloads for UpdEventCore.
-libc = "0.2"
-polars = { workspace = true }
 
 [[bench]]
 name = "parse_cache"

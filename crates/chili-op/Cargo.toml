@@ -75,9 +75,9 @@ ndarray = "0.17"
 regex = "1.11"
 ndarray-linalg = { version = "0.18", optional = true }
 chili-core = { path = "../chili-core" }
-log = "0.4"
 num = "0.4"
 sysinfo = "0.39"
+log = "0.4"
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
@@ -96,8 +96,4 @@ harness = false
 
 [[bench]]
 name = "write_partition"
-harness = false
-
-[[bench]]
-name = "categorical_eval"
 harness = false
