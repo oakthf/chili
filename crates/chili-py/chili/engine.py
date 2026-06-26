@@ -486,9 +486,37 @@ class ChiliEngine:
             self.is_sub_loaded = True
 
     # The socket should start with chili://hostname:port
-    def subscribe(self, tick_socket: str, topics: Optional[list[str]] = None) -> None:
+    def subscribe(
+        self,
+        tick_socket: str,
+        topics: Optional[list[str]] = None,
+        filters: Optional[dict[str, tuple[str, list[str]]]] = None,
+    ) -> None:
+        """Subscribe to one or more topics on a tickerplant.
+
+        Args:
+            tick_socket: ``chili://host:port`` of the tickerplant.
+            topics: list of topic (table) names. Topics that also appear in
+                ``filters`` are subscribed with a row-filter instead.
+            filters: FR-1 per-handle row-filter (TorQ ``.u.sub[t;syms]``).
+                ``{topic: (column, [allowed values])}`` — the tickerplant
+                broadcasts only rows where ``frame[column]`` is in the value
+                set to this subscriber; unfiltered topics get the whole frame.
+                The historical replay is unfiltered (shared tplog); only the
+                live broadcast stream is filtered. Each filtered topic uses a
+                separate handle/connection.
+        """
         self.load_sub()
-        self.fn_call(".sub.init", [tick_socket, topics or []])
+        filters = filters or {}
+        # Unfiltered topics go through the existing single-handle .sub.init.
+        unfiltered = [t for t in (topics or []) if t not in filters]
+        if unfiltered or not filters:
+            self.fn_call(".sub.init", [tick_socket, unfiltered])
+        # FR-1: one filtered subscription per (topic -> (column, values)).
+        for topic, (column, values) in filters.items():
+            self.fn_call(
+                ".sub.initFiltered", [tick_socket, topic, column, list(values)]
+            )
 
     def open_handle(self, socket: str) -> int:
         return self.fn_call(".handle.open", [socket])

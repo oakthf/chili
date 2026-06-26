@@ -6,8 +6,8 @@ use std::{
 };
 
 use crate::{
-    ArgType, ConnType, EngineState, Func, SpicyError, SpicyObj, SpicyResult, Stack, serde9, utils,
-    validate_args,
+    ArgType, ConnType, EngineState, Func, SpicyError, SpicyObj, SpicyResult, Stack, SubFilter,
+    utils, validate_args,
 };
 
 // message broker functions
@@ -15,11 +15,10 @@ fn publish(state: &EngineState, _stack: &mut Stack, args: &[&SpicyObj]) -> Spicy
     validate_args(args, &[ArgType::StrOrSym, ArgType::StrOrSym, ArgType::Any])?;
     let table = args[1].str().unwrap();
     let message = args[2];
-    let bytes = serde9::serialize(
-        &SpicyObj::MixedList(vec![args[0].clone(), args[1].clone(), message.clone()]),
-        false,
-    )?;
-    state.publish(table, &bytes)?;
+    // FR-1: pass the frame (not pre-serialized bytes) so the broadcast path
+    // can apply each subscriber's optional per-handle row-filter and serialize
+    // once per DISTINCT filter.
+    state.publish(args[0], args[1], table, message)?;
     Ok(SpicyObj::Null)
 }
 
@@ -31,6 +30,41 @@ fn subscribe(state: &EngineState, _stack: &mut Stack, args: &[&SpicyObj]) -> Spi
         state.add_subscriber(topic, handle)?;
     }
     // update connection type to publishing
+    state.handle_subscriber(&handle)?;
+    Ok(SpicyObj::Null)
+}
+
+/// FR-1 — TorQ `.u.sub[t;syms]`. Register a subscriber on a single topic with
+/// a per-handle row-filter: only rows where `frame[column]` is in `values` are
+/// broadcast to `handle`. `.broker.subscribeFiltered[handle; topic; column; values]`.
+/// An empty `values` list = no filter (whole-frame, like `.broker.subscribe`).
+fn subscribe_filtered(
+    state: &EngineState,
+    _stack: &mut Stack,
+    args: &[&SpicyObj],
+) -> SpicyResult<SpicyObj> {
+    validate_args(
+        args,
+        &[ArgType::Int, ArgType::StrOrSym, ArgType::StrOrSym, ArgType::Any],
+    )?;
+    let handle = args[0].to_i64().unwrap();
+    let topic = args[1].str().unwrap();
+    let column = args[2].str().unwrap().to_owned();
+    let values = args[3].to_str_vec().map_err(|e| {
+        SpicyError::Err(format!(
+            ".broker.subscribeFiltered: values must be a symbol/string list ({})",
+            e
+        ))
+    })?;
+    let filter = if values.is_empty() {
+        None
+    } else {
+        Some(SubFilter::new(
+            column,
+            values.into_iter().map(|s| s.to_owned()).collect(),
+        ))
+    };
+    state.add_subscriber_filtered(topic, handle, filter)?;
     state.handle_subscriber(&handle)?;
     Ok(SpicyObj::Null)
 }
@@ -153,6 +187,16 @@ pub static BROKER_FN: LazyLock<HashMap<String, Func>> = LazyLock::new(|| {
                 2,
                 ".broker.subscribe",
                 &["handle", "topics"],
+            ),
+        ),
+        (
+            // FR-1: call by subscriber with a per-handle row-filter (TorQ `.u.sub[t;syms]`)
+            ".broker.subscribeFiltered".to_owned(),
+            Func::new_side_effect_built_in_fn(
+                Some(Box::new(subscribe_filtered)),
+                4,
+                ".broker.subscribeFiltered",
+                &["handle", "topic", "column", "values"],
             ),
         ),
         (

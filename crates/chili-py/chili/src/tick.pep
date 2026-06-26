@@ -36,6 +36,15 @@
   (.tick.msgLog; tick[0; 0]; .tick.schema)
 };
 
+// FR-1 — TorQ `.u.sub[t;syms]`: register a per-handle row-filter for ONE
+// topic. Only rows where row[column] is in `values` are broadcast to this
+// handle. Returns the same (msgLog; tickCount; schema) info tuple as
+// .tick.subscribe so the subscriber can replay.
+.tick.subscribeFiltered: {[topic; column; values]
+  .broker.subscribeFiltered[this.h; topic; column; values];
+  (.tick.msgLog; tick[0; 0]; .tick.schema)
+};
+
 .tick.unsubscribe: {[topics]
   topics: $[count topics; topics; key .tick.schema];
   // this is reserved for current stack

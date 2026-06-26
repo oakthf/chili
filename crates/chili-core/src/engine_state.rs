@@ -26,7 +26,7 @@ use polars::{
     io::parquet::read::ParquetReader,
     prelude::{
         ArrowDataType, ArrowField, Column, DataType, IntoLazy, NamedFrom, NamedFromOwned, TimeUnit,
-        col,
+        col, lit,
     },
     series::Series,
 };
@@ -73,6 +73,41 @@ pub struct Handle {
     pub on_disconnected: Option<String>,
 }
 
+/// FR-1 — a per-handle row-filter for a topic. TorQ `.u.sub[t;syms]`:
+/// `column` is a symbol/identity column (e.g. `sym`), `values` is the set of
+/// allowed values; the tickerplant sends only rows where `frame[column]` is in
+/// `values`. The `key` is the canonical de-dup identity (column + sorted
+/// values) so the publish path serializes one filtered frame per DISTINCT
+/// filter, not once per handle.
+#[derive(Clone, Debug)]
+pub struct SubFilter {
+    pub column: String,
+    pub values: std::collections::HashSet<String>,
+    key: String,
+}
+
+impl SubFilter {
+    pub fn new(column: String, mut values: Vec<String>) -> Self {
+        values.sort();
+        values.dedup();
+        let key = format!("{}\u{0}{}", column, values.join("\u{1}"));
+        Self {
+            column,
+            values: values.into_iter().collect(),
+            key,
+        }
+    }
+}
+
+/// FR-1 — one subscriber registration on a topic: the IPC handle plus an
+/// OPTIONAL row-filter. `filter == None` reproduces the pre-FR-1 behavior
+/// (whole frame broadcast to the handle).
+#[derive(Clone, Debug)]
+pub struct Subscriber {
+    pub handle: i64,
+    pub filter: Option<SubFilter>,
+}
+
 /// LRU cache size for parsed AST trees. 256 entries × ~1 KB per AST is
 /// well under 1 MB total memory budget. mdata's gateway sends a small
 /// number of distinct query shapes per (path, source) pair, so this is
@@ -93,7 +128,11 @@ pub struct EngineState {
     handle: RwLock<IndexMap<i64, Handle>>,
     tick_count: RwLock<Vec<i64>>,
     job: RwLock<IndexMap<i64, Job>>,
-    topic_map: RwLock<HashMap<String, Vec<i64>>>,
+    // FR-1: per-handle FILTERED subscribe (TorQ `.u.sub[t;syms]`). Each
+    // subscriber on a topic carries an OPTIONAL row-filter; when present the
+    // tickerplant broadcasts only matching rows to that handle. No filter =
+    // whole frame (backward-compatible current behavior).
+    topic_map: RwLock<HashMap<String, Vec<Subscriber>>>,
     arc_self: RwLock<Option<Arc<Self>>>,
     /// Proposal D — LRU parse cache. Keyed on (path, source) so the same
     /// source under different IPC handles or REPL/IPC contexts produces
@@ -1221,8 +1260,25 @@ impl EngineState {
     }
 
     pub fn add_subscriber(&self, topic: &str, h: i64) -> SpicyResult<()> {
+        self.add_subscriber_filtered(topic, h, None)
+    }
+
+    /// FR-1 — register a subscriber on `topic` with an OPTIONAL per-handle
+    /// row-filter. Re-subscribing the same handle to the same topic REPLACES
+    /// its filter (idempotent re-subscribe, e.g. on `.sub.recover`), rather
+    /// than stacking duplicate registrations.
+    pub fn add_subscriber_filtered(
+        &self,
+        topic: &str,
+        h: i64,
+        filter: Option<SubFilter>,
+    ) -> SpicyResult<()> {
         let mut topic_map = self.topic_map.write();
-        topic_map.entry(topic.to_owned()).or_insert(vec![]).push(h);
+        let subs = topic_map.entry(topic.to_owned()).or_insert(vec![]);
+        match subs.iter_mut().find(|s| s.handle == h) {
+            Some(existing) => existing.filter = filter,
+            None => subs.push(Subscriber { handle: h, filter }),
+        }
         Ok(())
     }
 
@@ -1231,11 +1287,64 @@ impl EngineState {
         topic_map
             .entry(topic.to_owned())
             .or_insert(vec![])
-            .retain(|&x| x != h);
+            .retain(|s| s.handle != h);
         Ok(())
     }
 
-    pub fn publish(&self, table: &str, bytes: &[Vec<u8>]) -> SpicyResult<()> {
+    /// FR-1 — filter a published frame to the rows whose `filter.column` value
+    /// is in `filter.values`. Falls back to the unfiltered frame (a clone) if
+    /// the message isn't a DataFrame or the filter column is absent — a filter
+    /// can never make a subscriber MORE blind to a malformed frame than an
+    /// unfiltered subscriber would be.
+    fn filtered_message(message: &SpicyObj, filter: &SubFilter) -> SpicyObj {
+        let SpicyObj::DataFrame(df) = message else {
+            return message.clone();
+        };
+        if df.column(&filter.column).is_err() {
+            warn!(
+                "filtered subscribe: column '{}' not in published frame; sending unfiltered",
+                filter.column
+            );
+            return message.clone();
+        }
+        let allowed: Vec<&str> = filter.values.iter().map(|s| s.as_str()).collect();
+        let mask = Series::new("__sub_filter__".into(), allowed);
+        // Cast the filter column to String in the PREDICATE only (the row mask),
+        // so the filter works uniformly across Categorical / Enum / Utf8 sym
+        // columns. `.filter()` drops rows but preserves the original schema —
+        // the emitted frame keeps the column's original dtype.
+        match df
+            .clone()
+            .lazy()
+            .filter(
+                col(&filter.column)
+                    .cast(DataType::String)
+                    .is_in(lit(mask).implode(false), false),
+            )
+            .collect()
+        {
+            Ok(filtered) => SpicyObj::DataFrame(filtered),
+            Err(e) => {
+                warn!(
+                    "filtered subscribe failed on column '{}' ({}); sending unfiltered",
+                    filter.column, e
+                );
+                message.clone()
+            }
+        }
+    }
+
+    /// FR-1 — broadcast `message` (the table frame) to every subscriber on
+    /// `table`. Unfiltered subscribers receive the whole frame (serialized
+    /// once); each DISTINCT filter is applied + serialized once and shared
+    /// across all handles carrying that filter.
+    pub fn publish(
+        &self,
+        upd_name: &SpicyObj,
+        table_obj: &SpicyObj,
+        table: &str,
+        message: &SpicyObj,
+    ) -> SpicyResult<()> {
         let mut topic_map = self.topic_map.write();
         let subscribers = match topic_map.get(table) {
             Some(subscribers) => subscribers.clone(),
@@ -1250,8 +1359,36 @@ impl EngineState {
             return Ok(());
         }
 
+        // Serialize one payload per DISTINCT filter (plus one for the
+        // unfiltered subscribers), so an N-handle topic with K distinct
+        // filters does K+1 serializations, not N.
+        let serialize_frame = |frame_msg: &SpicyObj| -> SpicyResult<Vec<Vec<u8>>> {
+            serde9::serialize(
+                &SpicyObj::MixedList(vec![upd_name.clone(), table_obj.clone(), frame_msg.clone()]),
+                false,
+            )
+        };
+        let mut payload_cache: HashMap<Option<String>, Vec<Vec<u8>>> = HashMap::new();
+        let mut filter_by_key: HashMap<String, SubFilter> = HashMap::new();
+        for sub in &subscribers {
+            let cache_key = sub.filter.as_ref().map(|f| f.key.clone());
+            if let Some(f) = &sub.filter {
+                filter_by_key.entry(f.key.clone()).or_insert_with(|| f.clone());
+            }
+            if !payload_cache.contains_key(&cache_key) {
+                let frame_msg = match &sub.filter {
+                    None => message.clone(),
+                    Some(f) => Self::filtered_message(message, f),
+                };
+                payload_cache.insert(cache_key, serialize_frame(&frame_msg)?);
+            }
+        }
+
         let mut handle = self.handle.write();
-        for subscriber in subscribers {
+        for sub in subscribers {
+            let subscriber = sub.handle;
+            let cache_key = sub.filter.as_ref().map(|f| f.key.clone());
+            let bytes = payload_cache.get(&cache_key).expect("payload cached above");
             if let Some(v) = handle.get_mut(&subscriber) {
                 if v.conn_type == ConnType::Disconnected {
                     continue;
@@ -1280,7 +1417,7 @@ impl EngineState {
                 topic_map
                     .get_mut(table)
                     .unwrap()
-                    .retain(|x| *x != subscriber);
+                    .retain(|s| s.handle != subscriber);
             }
         }
         Ok(())
@@ -1359,7 +1496,7 @@ impl EngineState {
         let mut offset = 0;
         for (topic, handles) in topic_map.iter() {
             topics.push(topic.clone());
-            subscribers.extend(handles);
+            subscribers.extend(handles.iter().map(|s| s.handle));
             offset += handles.len();
             offsets.push(offset as i32);
         }

@@ -20,7 +20,7 @@ pub mod utils;
 pub use arg_type::ArgType;
 pub use engine_state::EngineState;
 pub use engine_state::ReadWrite;
-pub use engine_state::{ConnType, IpcType};
+pub use engine_state::{ConnType, IpcType, SubFilter, Subscriber};
 pub use errors::{SpicyError, SpicyResult};
 pub use eval::at;
 pub use func::{Func, FuncType};
