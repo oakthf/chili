@@ -446,7 +446,7 @@ dependencies = [
 
 [[package]]
 name = "chili-bin"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "chili-core",
  "chili-op",
@@ -464,7 +464,7 @@ dependencies = [
 
 [[package]]
 name = "chili-core"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "anyhow",
  "ariadne",
@@ -486,6 +486,7 @@ dependencies = [
  "regex",
  "serde_json",
  "serial_test",
+ "socket2 0.5.10",
  "sysinfo 0.39.3",
  "tempfile",
  "thiserror",
@@ -495,7 +496,7 @@ dependencies = [
 
 [[package]]
 name = "chili-op"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "chili-core",
  "chrono",
@@ -519,7 +520,7 @@ dependencies = [
 
 [[package]]
 name = "chili-parser"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "ariadne",
  "chumsky",
@@ -1497,7 +1498,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2",
+ "socket2 0.6.4",
  "tokio",
  "tower-service",
  "tracing",
@@ -3093,7 +3094,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2",
+ "socket2 0.6.4",
  "thiserror",
  "tokio",
  "tracing",
@@ -3130,7 +3131,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2",
+ "socket2 0.6.4",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -3817,6 +3818,16 @@ checksum = "1b6b67fb9a61334225b5b790716f609cd58395f895b3fe8b328786812a40bc3b"
 
 [[package]]
 name = "socket2"
+version = "0.5.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e22376abed350d73dd1cd119b57ffccad95b4e585a7cda43e286245ce23c0678"
+dependencies = [
+ "libc",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "socket2"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
@@ -4093,7 +4104,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
- "socket2",
+ "socket2 0.6.4",
  "tokio-macros",
  "windows-sys 0.61.2",
 ]

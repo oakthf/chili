@@ -591,14 +591,21 @@ impl PyEngineState {
 
     /// Start a TCP listener on the given port in a background thread.
     ///
-    /// The listener runs until the process exits.  The GIL is released so
-    /// the calling Python thread is not blocked.
+    /// The bind happens **synchronously** on the calling thread: if the
+    /// port is already in use (or the bind otherwise fails) this raises a
+    /// Python exception that the caller can catch — it no longer aborts the
+    /// process asynchronously. `SO_REUSEADDR` is set so a restart during a
+    /// peer's `TIME_WAIT` succeeds. Once bound, the accept loop runs on a
+    /// background thread until the process exits.
     #[pyo3(signature = (port, remote=false, users=vec![]))]
     fn start_tcp_listener(&self, port: i32, remote: bool, users: Vec<String>) -> PyResult<()> {
         self.check_fork()?;
+        // Bind synchronously so a port-taken error surfaces as a catchable
+        // Python exception (FR-5).
+        let listener = map_spicy_error(EngineState::bind_tcp_listener(port, remote))?;
         let state = Arc::clone(&self.inner);
         std::thread::spawn(move || {
-            state.start_tcp_listener(port, remote, users);
+            state.run_accept_loop(listener, users);
         });
         Ok(())
     }

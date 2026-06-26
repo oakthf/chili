@@ -373,9 +373,14 @@ class ChiliEngine:
     ) -> None:
         """Start a TCP listener on *port* in a background thread.
 
-        The listener accepts incoming IPC connections (Q or Chili
-        protocol), performs authentication, and dispatches each
-        connection to its own handler thread.
+        The bind happens **synchronously** on the calling thread: if the
+        port is already in use this raises :class:`ChiliError` (it no longer
+        aborts the process asynchronously), so callers can catch and handle
+        a port collision. ``SO_REUSEADDR`` is set so a restart during a
+        peer's ``TIME_WAIT`` succeeds. Once bound, the listener accepts
+        incoming IPC connections (Q or Chili protocol), performs
+        authentication, and dispatches each connection to its own handler
+        thread.
 
         Args:
             port: TCP port number to listen on.
@@ -383,6 +388,9 @@ class ChiliEngine:
                     Otherwise bind to ``127.0.0.1`` (localhost only).
             users: Optional list of usernames allowed to authenticate.
                    An empty list (the default) allows any user.
+
+        Raises:
+            ChiliError: if the bind fails (e.g. the port is already in use).
         """
         self.engine.start_tcp_listener(port, remote, users or [])
 

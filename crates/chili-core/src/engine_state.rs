@@ -2284,29 +2284,70 @@ impl EngineState {
         Ok(SpicyObj::Dict(status))
     }
 
-    /// Start a TCP listener on the given port and spawn a thread per
-    /// incoming connection. Handles authentication, IPC version
-    /// negotiation, and connection dispatch.
+    /// Bind a TCP listener on the given port **synchronously on the
+    /// calling thread**, returning an `Err` (which the Python binding
+    /// surfaces as an exception) if the bind fails — e.g. the port is
+    /// already in use.
     ///
-    /// This method blocks the **calling thread** (it should be spawned
-    /// on a dedicated thread from `main`).
-    pub fn start_tcp_listener(self: &Arc<Self>, port: i32, remote: bool, users: Vec<String>) {
-        let addr = if remote {
-            format!("0.0.0.0:{}", port)
-        } else {
-            format!("127.0.0.1:{}", port)
-        };
+    /// `SO_REUSEADDR` is set before binding so a process restart during a
+    /// peer's `TIME_WAIT` does not abort with `Address already in use`.
+    ///
+    /// FR-5 (mdata TorQ re-align): historically the bind ran on a detached
+    /// thread and a taken port surfaced asynchronously via
+    /// `std::process::exit(1)` — too late for the embedding Python process
+    /// to catch. Binding synchronously here lets callers handle the failure.
+    pub fn bind_tcp_listener(port: i32, remote: bool) -> SpicyResult<TcpListener> {
+        use socket2::{Domain, Protocol, Socket, Type};
+        use std::net::SocketAddr;
 
-        let listener = match TcpListener::bind(&addr) {
+        let ip = if remote { "0.0.0.0" } else { "127.0.0.1" };
+        let addr: SocketAddr = format!("{}:{}", ip, port)
+            .parse()
+            .map_err(|e| SpicyError::OsErr(format!("invalid listen addr {}:{} - {}", ip, port, e)))?;
+
+        let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))
+            .map_err(|e| SpicyError::OsErr(format!("socket create failed on port {} - {}", port, e)))?;
+        // SO_REUSEADDR: survive a peer's TIME_WAIT on restart.
+        socket
+            .set_reuse_address(true)
+            .map_err(|e| SpicyError::OsErr(format!("set SO_REUSEADDR failed on port {} - {}", port, e)))?;
+        socket
+            .bind(&addr.into())
+            .map_err(|e| SpicyError::OsErr(format!("bind failed on port {} - {}", port, e)))?;
+        // 128 = the conventional listen backlog.
+        socket
+            .listen(128)
+            .map_err(|e| SpicyError::OsErr(format!("listen failed on port {} - {}", port, e)))?;
+
+        info!("listening at port {}", port);
+        Ok(socket.into())
+    }
+
+    /// Bind-or-exit convenience used by the standalone `chili` binary,
+    /// where a failed bind should abort the process (no embedding host to
+    /// catch the error). Embedders (the Python binding) call
+    /// [`Self::bind_tcp_listener`] + [`Self::run_accept_loop`] directly so
+    /// they can handle the bind error.
+    pub fn start_tcp_listener(self: &Arc<Self>, port: i32, remote: bool, users: Vec<String>) {
+        let listener = match Self::bind_tcp_listener(port, remote) {
             Ok(l) => l,
             Err(e) => {
                 eprintln!("{} - {}", e, port);
                 std::process::exit(1)
             }
         };
+        self.run_accept_loop(listener, users);
+    }
 
-        info!("listening at port {}", port);
-
+    /// Run the accept loop on an already-bound `TcpListener`, spawning a
+    /// thread per incoming connection. Handles authentication, IPC version
+    /// negotiation, and connection dispatch.
+    ///
+    /// This method blocks the **calling thread** (it should be spawned on a
+    /// dedicated thread). The bind itself happens up-front in
+    /// [`Self::bind_tcp_listener`] so a port-taken error is known
+    /// synchronously by the caller.
+    pub fn run_accept_loop(self: &Arc<Self>, listener: TcpListener, users: Vec<String>) {
         for stream in listener.incoming() {
             let state_tcp = Arc::clone(self);
             let mut stream = match stream {
