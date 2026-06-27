@@ -85,6 +85,30 @@ fn fsync_handle(
     state.fsync_handle(&handle_num)
 }
 
+// FR (gw async-router de-risk): targeted async-reply to an arbitrary handle —
+// the `neg[.z.w]` analog. Unlike `async_` (which rejects Incoming handles), this
+// writes a fire-and-forget Async message to ANY connected handle, so a query
+// handler can reply to its caller's inbound connection. Fire-and-forget: it does
+// NOT block on a response read, so it never holds the handle lock across a
+// network round-trip (the property that lets an async gw avoid `sync`'s
+// engine-wide serialization).
+fn reply_handle(
+    state: &EngineState,
+    _stack: &mut Stack,
+    args: &[&SpicyObj],
+) -> SpicyResult<SpicyObj> {
+    let handle_num = args[0].to_i64()?;
+    state.reply(&handle_num, args[1])
+}
+
+// FR (gw async-router de-risk): `.z.w` — the handle of the connection that sent
+// the message currently being evaluated (the kdb+ `.z.w`). 0 when not serving an
+// IPC connection (a local/REPL eval). Lets a handler identify its caller so it
+// can `.handle.reply` to it.
+fn z_w(_state: &EngineState, stack: &mut Stack, _args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
+    Ok(SpicyObj::I64(stack.h))
+}
+
 fn exit(state: &EngineState, _stack: &mut Stack, args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
     let exit_code = args[0].to_i64()?;
     state.shutdown();
@@ -728,6 +752,19 @@ pub static SIDE_EFFECT_FN: LazyLock<HashMap<String, Func>> = LazyLock::new(|| {
                 ".handle.fsync",
                 &["handle_num"],
             ),
+        ),
+        (
+            ".handle.reply".to_owned(),
+            Func::new_side_effect_built_in_fn(
+                Some(Box::new(reply_handle)),
+                2,
+                ".handle.reply",
+                &["handle_num", "msg"],
+            ),
+        ),
+        (
+            ".z.w".to_owned(),
+            Func::new_side_effect_built_in_fn(Some(Box::new(z_w)), 0, ".z.w", &[]),
         ),
         (
             ".fn.select".to_owned(),

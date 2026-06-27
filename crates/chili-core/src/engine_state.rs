@@ -1338,6 +1338,55 @@ impl EngineState {
         }
     }
 
+    /// Targeted async-reply to an arbitrary handle (the `.handle.reply` builtin,
+    /// the kdb+ `neg[.z.w]` analog). Mirrors [`Self::async_`] — a fire-and-forget
+    /// Async write with NO response read, so it never holds the handle lock
+    /// across a network round-trip — but, unlike `async_`, it accepts BOTH
+    /// Incoming and Outgoing connections (it only rejects a Disconnected one).
+    /// This is what lets a query handler reply to its caller's inbound
+    /// connection, the missing primitive for an async query-router (gw).
+    pub fn reply(&self, h: &i64, msg: &SpicyObj) -> SpicyResult<SpicyObj> {
+        let mut handle = self.handle.write();
+        match handle.get_mut(h) {
+            Some(Handle {
+                rw: Some(rw),
+                is_local,
+                ipc_type,
+                conn_type,
+                ..
+            }) => {
+                if *conn_type == ConnType::Disconnected {
+                    return Err(SpicyError::Err(format!("handle {h} is disconnected")));
+                }
+                match msg {
+                    SpicyObj::Symbol(_) | SpicyObj::String(_) | SpicyObj::MixedList(_) => {
+                        if *ipc_type == IpcType::Q {
+                            let v8 = serde6::serialize(msg)?;
+                            let v8 = if !*is_local { serde6::compress(v8) } else { v8 };
+                            if let Err(e) = utils::write_q_ipc_msg(rw, &v8, MessageType::Async) {
+                                *conn_type = ConnType::Disconnected;
+                                return Err(SpicyError::Err(e.to_string()));
+                            }
+                            Ok(SpicyObj::Null)
+                        } else {
+                            let v8 = serde9::serialize(msg, !*is_local)?;
+                            if let Err(e) = utils::write_chili_ipc_msg(rw, &v8, MessageType::Async) {
+                                *conn_type = ConnType::Disconnected;
+                                return Err(SpicyError::Err(e.to_string()));
+                            }
+                            Ok(SpicyObj::Null)
+                        }
+                    }
+                    _ => Err(SpicyError::MismatchedTypeErr(
+                        "sym|str|mixedList".to_owned(),
+                        msg.get_type_name(),
+                    )),
+                }
+            }
+            _ => Err(SpicyError::InvalidHandleErr(*h)),
+        }
+    }
+
     pub fn add_subscriber(&self, topic: &str, h: i64) -> SpicyResult<()> {
         self.add_subscriber_filtered(topic, h, None)
     }
