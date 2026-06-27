@@ -135,6 +135,32 @@ class ChiliEngine:
         """Return the registered pre-eval hook name, or ``None``."""
         return self.engine.get_pre_eval_hook()
 
+    def set_post_eval_hook(self, name: str) -> None:
+        """Register a post-eval audit hook (FR-2b; TorQ ``logusage.q``).
+
+        The symmetric counterpart to :meth:`set_pre_eval_hook`. Fired AFTER every
+        INBOUND IPC request with ``name(user; handle; query; result; error)``:
+        ``result`` is the evaluated value (Null on error), ``error`` is the error
+        string symbol (Null on success) — enough for TorQ ``logAfter`` (rows +
+        elapsed + status) and ``logError``. Fired for side effects ONLY (audit
+        logging); the return value is ignored and any error the hook raises is
+        logged + swallowed so audit logging can never break the request path.
+        Local/REPL ``eval`` is NOT hooked, matching TorQ.
+
+        Args:
+            name: Name of a function ``(user; handle; query; result; error)``
+                already defined in the engine.
+        """
+        return self.engine.set_post_eval_hook(name)
+
+    def clear_post_eval_hook(self) -> None:
+        """Clear any registered post-eval hook (no audit hook fires)."""
+        return self.engine.clear_post_eval_hook()
+
+    def get_post_eval_hook(self) -> "str | None":
+        """Return the registered post-eval hook name, or ``None``."""
+        return self.engine.get_post_eval_hook()
+
     def set_jobs_deactivate_on_error(self, enabled: bool) -> None:
         """Enable/disable quarantine-on-error for scheduled ``.job``s (FR-3).
 
@@ -432,9 +458,16 @@ class ChiliEngine:
         """
         self.engine.start_tcp_listener(port, remote, users or [])
 
-    def set_write_timeout_ms(self, ms: int) -> None:
-        """Shed a subscriber whose socket blocks a write for > ms (0 = off)."""
-        self.engine.set_write_timeout_ms(ms)
+    def set_subscriber_queue_max(self, n: int) -> None:
+        """Shed a subscriber whose OUTBOUND write queue exceeds ``n`` frames.
+
+        TorQ ``subscribercutoff.q`` faithful queue-depth shed (M-2 Stage 2b). When
+        ``n > 0``, each Publishing subscriber gets a bounded channel + writer
+        thread; the publisher ``try_send``s a whole frame and never blocks. A full
+        queue (the subscriber stopped draining) sheds it (Disconnected + socket
+        shutdown) so it reconnects/replays. ``0`` (default) = off (Direct path).
+        """
+        self.engine.set_subscriber_queue_max(n)
 
     def list_handle(self) -> pl.DataFrame:
         """Return a DataFrame listing all active handles."""

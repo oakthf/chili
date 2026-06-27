@@ -91,6 +91,43 @@ pub struct Handle {
     // path tear down both directions so the peer gets a reset and reconnects.
     // `None` for OUTGOING / file / non-timeout handles (the pre-Stage-2 shape).
     pub shutdown_handle: Option<std::net::TcpStream>,
+    // M-2 Stage 2b (FR 2026-06-28) — TorQ `subscribercutoff.q` faithful
+    // QUEUE-DEPTH shed (replaces the time-based 2a shed). When present, this
+    // Publishing handle's outbound writes go to a BOUNDED `sync_channel`; a
+    // dedicated writer thread owns the socket and `write_chili_ipc_msg`s each
+    // WHOLE serialized frame. `publish`/`signal_eod` `try_send` the complete
+    // frame and return INSTANTLY (the publisher never blocks). A `Full` channel
+    // = the subscriber's queue exceeded the bound (the chili analog of TorQ's
+    // `sum .z.W > maxsize`) → SHED. `None` = the Direct path (rw used directly),
+    // exactly the pre-2b behaviour. Only Publishing (incoming subscriber)
+    // handles are ever Queued; sync/async_/reply/file handles stay Direct.
+    pub queued: Option<QueuedWriter>,
+}
+
+/// M-2 Stage 2b — the publisher-side handle to a per-subscriber bounded write
+/// queue + its dedicated writer thread. The writer thread (spawned in
+/// `handle_subscriber` when `subscriber_queue_max > 0`) exclusively OWNS the
+/// `Box<dyn ReadWrite>` socket, so it is the only writer → no frame
+/// interleaving is possible (torn-frame safety: each channel item is the
+/// COMPLETE `Vec<Vec<u8>>` frame, written by a single `write_chili_ipc_msg`
+/// call under the thread's exclusive socket ownership). On a `try_send` `Full`
+/// (publisher side) OR a `write_all` error (writer side), `disconnected` is set
+/// so the engine's existing disconnect sweep tears the socket down.
+#[derive(Clone)]
+pub struct QueuedWriter {
+    /// Bounded sender; `try_send` a whole serialized frame. `Full` == shed.
+    pub sender: std::sync::mpsc::SyncSender<Vec<Vec<u8>>>,
+    /// Set true by the writer thread on a socket write error, or by the engine
+    /// on a `try_send` `Full` shed. Polled by the disconnect path.
+    pub disconnected: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// M-2 Stage 2b — a snapshotted write target for the publish/EOD broadcast.
+/// `Direct` is the pre-2b blocking-write path (sync handles, queue-off
+/// subscribers); `Queued` is the bounded-channel non-blocking path.
+enum WriteTarget {
+    Direct(Arc<Mutex<Box<dyn ReadWrite>>>),
+    Queued(QueuedWriter),
 }
 
 /// FR-1 — a per-handle row-filter for a topic. TorQ `.u.sub[t;syms]`:
@@ -178,21 +215,36 @@ pub struct EngineState {
     /// (`handle_q_conn`/`handle_chili_conn`) consult it — local/REPL eval
     /// bypasses it, matching TorQ (`.z.pg` gates remote handles, not `.z.pi`).
     pre_eval_hook: RwLock<Option<String>>,
+    /// FR-2b (TorQ `logusage.q` `logAfter`/`logError`): optional name of a
+    /// registered engine function `(user; handle; query; result; error)` that
+    /// fires AFTER every INBOUND IPC request is evaluated — the symmetric
+    /// counterpart to `pre_eval_hook`. `result` is the evaluated value (or Null
+    /// on error); `error` is the error string (or Null on success) — enough for
+    /// logusage's `logAfter` (rows + elapsed + status) and `logError`. The hook
+    /// is fired for its side effects (audit logging); its return value is
+    /// IGNORED and a hook error is logged + swallowed (logging must never break
+    /// the request path). `None` => zero overhead. Only the network conn
+    /// handlers consult it — local/REPL eval bypasses it (matching `.z.pg`).
+    post_eval_hook: RwLock<Option<String>>,
     /// FR-3 (TorQ timer `runandreschedule` quarantine): when true, a scheduled
     /// `.job` whose fire returns an error is DEACTIVATED instead of being left
     /// to re-fire every interval forever. Default false preserves the existing
     /// log-and-keep-firing behaviour. This is the in-engine-timer safety knob
     /// (the 2026-06-18 silent-repeated-failure shape); set once at daemon boot.
     jobs_deactivate_on_error: RwLock<bool>,
-    /// M-2 Stage 2 (slow-subscriber shed): OPT-IN per-write timeout, in
-    /// milliseconds, applied to INCOMING (subscriber) sockets at accept time.
-    /// `0` (the default) = OFF — no `set_write_timeout` is installed, exactly
-    /// reproducing the pre-Stage-2 blocking-write behaviour. When `> 0`, a
-    /// subscriber whose TCP send buffer fills (it stopped reading) makes the
-    /// tp's blocking `write_all` time out instead of hanging the publish loop;
-    /// the timed-out handle is then marked Disconnected AND its socket is
-    /// `shutdown(Both)` so the peer's reconnect/replay logic re-subscribes.
-    write_timeout_ms: std::sync::atomic::AtomicI64,
+    /// M-2 Stage 2b (TorQ `subscribercutoff.q` faithful queue-depth shed):
+    /// OPT-IN bound on a Publishing subscriber's OUTBOUND write queue. `0` (the
+    /// default) = OFF — subscribers use the Direct (blocking-write) path,
+    /// exactly reproducing the pre-2b behaviour. When `> 0`, each Publishing
+    /// subscriber gets a bounded `sync_channel(subscriber_queue_max)` + a
+    /// dedicated writer thread; `publish`/`signal_eod` `try_send` a whole frame
+    /// and return instantly. A full queue (the chili analog of TorQ's
+    /// `sum .z.W > maxsize`) = the subscriber stopped draining → it is SHED
+    /// (marked Disconnected + socket `shutdown(Both)`) so the peer's
+    /// reconnect/replay logic re-subscribes. Replaces the time-based Stage-2a
+    /// write-timeout shed (faithful to subscribercutoff.q, which measures queue
+    /// DEPTH, not write latency).
+    subscriber_queue_max: std::sync::atomic::AtomicI64,
 }
 
 impl Default for EngineState {
@@ -251,8 +303,9 @@ impl EngineState {
             interval: 0,
             memory_limit: 0.0,
             pre_eval_hook: RwLock::new(None),
+            post_eval_hook: RwLock::new(None),
             jobs_deactivate_on_error: RwLock::new(false),
-            write_timeout_ms: std::sync::atomic::AtomicI64::new(0),
+            subscriber_queue_max: std::sync::atomic::AtomicI64::new(0),
         }
     }
 
@@ -372,6 +425,64 @@ impl EngineState {
         self.pre_eval_hook.read().clone()
     }
 
+    /// FR-2b: register (`Some`) or clear (`None`) the post-eval audit hook.
+    /// See the `post_eval_hook` field docs for the contract.
+    pub fn set_post_eval_hook(&self, name: Option<String>) {
+        *self.post_eval_hook.write() = name.filter(|n| !n.is_empty());
+    }
+
+    /// FR-2b: name of the currently registered post-eval hook, if any.
+    pub fn get_post_eval_hook(&self) -> Option<String> {
+        self.post_eval_hook.read().clone()
+    }
+
+    /// FR-2b (TorQ `logusage.q` `logAfter`/`logError`): fire the registered
+    /// post-eval hook with `(user; handle; query; result; error)` for its side
+    /// effects (audit logging). `result` is the evaluated value (or Null on
+    /// error); `error` is the error string symbol (or Null on success). The
+    /// hook's return value is IGNORED; any error it raises is logged and
+    /// swallowed — audit logging must never break the request path. No-op (zero
+    /// overhead) when no hook is registered.
+    fn fire_post_eval_hook(
+        &self,
+        stack: &mut Stack,
+        query: &SpicyObj,
+        result: &SpicyResult<SpicyObj>,
+        src: &str,
+    ) {
+        let hook = self.post_eval_hook.read().clone();
+        let Some(name) = hook else {
+            return;
+        };
+        let f = match self.get_var(&name) {
+            Ok(f) if matches!(f, SpicyObj::Fn(_)) => f,
+            Ok(_) => {
+                warn!("post-eval hook '{}' is not a function; skipping", name);
+                return;
+            }
+            Err(_) => {
+                warn!("post-eval hook '{}' is not defined; skipping", name);
+                return;
+            }
+        };
+        let user_obj = SpicyObj::Symbol(stack.user.clone());
+        let handle_obj = SpicyObj::I64(stack.h);
+        let (result_obj, error_obj) = match result {
+            Ok(v) => (v.clone(), SpicyObj::Null),
+            Err(e) => (SpicyObj::Null, SpicyObj::Symbol(e.to_string())),
+        };
+        let args: Vec<&SpicyObj> = vec![
+            &user_obj,
+            &handle_obj,
+            query,
+            &result_obj,
+            &error_obj,
+        ];
+        if let Err(e) = crate::eval::eval_call(self, stack, &f, &args, &None, src) {
+            warn!("post-eval hook '{}' failed (ignored): {}", name, e);
+        }
+    }
+
     /// FR-2 (TorQ `.z.pg`/`.z.ps`): evaluate an INBOUND IPC `query` after
     /// passing it through the registered pre-eval hook, if one is set.
     ///
@@ -385,6 +496,19 @@ impl EngineState {
     ///
     /// With no hook, this is identical to `eval` (zero overhead).
     pub fn eval_with_pre_hook(
+        &self,
+        stack: &mut Stack,
+        query: &SpicyObj,
+        src: &str,
+    ) -> SpicyResult<SpicyObj> {
+        let result = self.eval_with_pre_hook_inner(stack, query, src);
+        // FR-2b: fire the post-eval audit hook (TorQ `logAfter`/`logError`) for
+        // its side effects. No-op when unset; never alters the result.
+        self.fire_post_eval_hook(stack, query, &result, src);
+        result
+    }
+
+    fn eval_with_pre_hook_inner(
         &self,
         stack: &mut Stack,
         query: &SpicyObj,
@@ -1061,12 +1185,14 @@ impl EngineState {
         }
         Ok(SpicyObj::Null)
     }
-    /// M-2 Stage 2: set the opt-in per-write timeout (ms) for INCOMING
-    /// subscriber sockets accepted AFTER this call. `0` disables it. Read with
-    /// `write_timeout_ms.load(Relaxed)` in the accept loop.
-    pub fn set_write_timeout_ms(&self, ms: i64) {
-        self.write_timeout_ms
-            .store(ms, std::sync::atomic::Ordering::Relaxed);
+    /// M-2 Stage 2b: set the opt-in OUTBOUND-queue bound for Publishing
+    /// subscribers promoted AFTER this call (TorQ `subscribercutoff.q`
+    /// `maxsize`/`breachlimit` analog — a depth bound, not a time bound). `0`
+    /// disables it (subscribers use the Direct blocking-write path). Read with
+    /// `subscriber_queue_max.load(Relaxed)` in `handle_subscriber`.
+    pub fn set_subscriber_queue_max(&self, n: i64) {
+        self.subscriber_queue_max
+            .store(n, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// M-2 Stage 2: attach the shutdown-dup `TcpStream` to an already-registered
@@ -1107,6 +1233,7 @@ impl EngineState {
                 conn_type,
                 on_disconnected: None,
                 shutdown_handle: None,
+                queued: None,
             },
         );
         Ok(SpicyObj::I64(h))
@@ -1169,6 +1296,8 @@ impl EngineState {
                         on_disconnected: handle.on_disconnected,
                         // Outgoing/subscribing handle — no incoming shutdown dup.
                         shutdown_handle: None,
+                        // Subscribing (OUTGOING) handle — never queue-shed.
+                        queued: None,
                     },
                 );
                 let user = self.user.clone();
@@ -1204,6 +1333,11 @@ impl EngineState {
             // already-broken socket just returns Err, which we ignore.
             if let Some(s) = hd.shutdown_handle.as_ref() {
                 let _ = s.shutdown(std::net::Shutdown::Both);
+            }
+            // M-2 Stage 2b: flag the queued writer thread to stop draining.
+            if let Some(q) = hd.queued.as_ref() {
+                q.disconnected
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
             }
         }
     }
@@ -1649,7 +1783,7 @@ impl EngineState {
         // not-found case still retains the topic_map entry, under the topic_map
         // write lock we already hold).
         #[allow(clippy::type_complexity)]
-        let mut targets: Vec<(i64, Arc<Mutex<Box<dyn ReadWrite>>>, Option<String>)> = Vec::new();
+        let mut targets: Vec<(i64, WriteTarget, Option<String>)> = Vec::new();
         let mut failed: Vec<i64> = Vec::new();
         {
             let handle = self.handle.read();
@@ -1660,11 +1794,27 @@ impl EngineState {
                     if v.conn_type == ConnType::Disconnected {
                         continue;
                     }
-                    match v.rw.as_ref() {
-                        Some(rw) => targets.push((subscriber, Arc::clone(rw), cache_key)),
-                        None => {
-                            warn!("handle {} is disconnected", subscriber);
+                    // M-2 Stage 2b: a Queued (bounded-channel) subscriber takes
+                    // the non-blocking try_send path; otherwise the Direct
+                    // blocking-write path (pre-2b). A handle is exactly one of
+                    // the two (queued set ⇒ rw taken into the writer thread).
+                    if let Some(q) = v.queued.as_ref() {
+                        if q.disconnected.load(std::sync::atomic::Ordering::Relaxed) {
                             failed.push(subscriber);
+                        } else {
+                            targets.push((subscriber, WriteTarget::Queued(q.clone()), cache_key));
+                        }
+                    } else {
+                        match v.rw.as_ref() {
+                            Some(rw) => targets.push((
+                                subscriber,
+                                WriteTarget::Direct(Arc::clone(rw)),
+                                cache_key,
+                            )),
+                            None => {
+                                warn!("handle {} is disconnected", subscriber);
+                                failed.push(subscriber);
+                            }
                         }
                     }
                 } else {
@@ -1680,18 +1830,40 @@ impl EngineState {
             }
         } // GLOBAL HANDLE LOCK DROPPED HERE
         // (topic_map write lock is unrelated to the handle lock-order invariant.)
-        for (subscriber, rw_arc, cache_key) in targets {
+        for (subscriber, target, cache_key) in targets {
             let bytes = payload_cache.get(&cache_key).expect("payload cached above");
-            let mut rw = rw_arc.lock();
-            match crate::write_chili_ipc_msg(&mut **rw, bytes, MessageType::Async) {
-                Ok(_) => (),
-                Err(e) => {
-                    warn!(
-                        "failed to write to handle {} - err {}, disconnecting...",
-                        subscriber, e
-                    );
-                    drop(rw);
-                    failed.push(subscriber);
+            match target {
+                WriteTarget::Direct(rw_arc) => {
+                    let mut rw = rw_arc.lock();
+                    if let Err(e) = crate::write_chili_ipc_msg(&mut **rw, bytes, MessageType::Async) {
+                        warn!(
+                            "failed to write to handle {} - err {}, disconnecting...",
+                            subscriber, e
+                        );
+                        drop(rw);
+                        failed.push(subscriber);
+                    }
+                }
+                WriteTarget::Queued(q) => {
+                    // try_send a WHOLE frame; never blocks. A `Full` queue ==
+                    // the subscriber stopped draining (TorQ `.z.W > maxsize`) →
+                    // SHED. `Disconnected` (writer thread already gone) also sheds.
+                    match q.sender.try_send(bytes.clone()) {
+                        Ok(()) => (),
+                        Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                            warn!(
+                                "subscriber {} outbound queue full (slow consumer), shedding",
+                                subscriber
+                            );
+                            q.disconnected
+                                .store(true, std::sync::atomic::Ordering::Relaxed);
+                            failed.push(subscriber);
+                        }
+                        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                            warn!("subscriber {} writer thread gone, shedding", subscriber);
+                            failed.push(subscriber);
+                        }
+                    }
                 }
             }
         }
@@ -1707,6 +1879,11 @@ impl EngineState {
                     // reconnects rather than re-using a half-open socket.
                     if let Some(s) = hd.shutdown_handle.as_ref() {
                         let _ = s.shutdown(std::net::Shutdown::Both);
+                    }
+                    // M-2 Stage 2b: stop the queued writer thread.
+                    if let Some(q) = hd.queued.as_ref() {
+                        q.disconnected
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
             }
@@ -1739,7 +1916,7 @@ impl EngineState {
         // lock, then DROP it so the blocking EOD writes run only under each
         // per-handle mutex (one slow subscriber no longer serializes the rest).
         #[allow(clippy::type_complexity)]
-        let mut targets: Vec<(i64, Arc<Mutex<Box<dyn ReadWrite>>>)> = Vec::new();
+        let mut targets: Vec<(i64, WriteTarget)> = Vec::new();
         let mut failed: Vec<i64> = Vec::new();
         {
             let handle = self.handle.read();
@@ -1747,24 +1924,56 @@ impl EngineState {
                 if v.conn_type != ConnType::Publishing {
                     continue;
                 }
-                match v.rw.as_ref() {
-                    Some(rw) => targets.push((*h, Arc::clone(rw))),
-                    None => {
-                        warn!("handle {} is disconnected (no rw), removing", h);
+                // M-2 Stage 2b: prefer the bounded-channel path for a Queued
+                // subscriber; else the Direct blocking-write path (pre-2b).
+                if let Some(q) = v.queued.as_ref() {
+                    if q.disconnected.load(std::sync::atomic::Ordering::Relaxed) {
                         failed.push(*h);
+                    } else {
+                        targets.push((*h, WriteTarget::Queued(q.clone())));
+                    }
+                } else {
+                    match v.rw.as_ref() {
+                        Some(rw) => targets.push((*h, WriteTarget::Direct(Arc::clone(rw)))),
+                        None => {
+                            warn!("handle {} is disconnected (no rw), removing", h);
+                            failed.push(*h);
+                        }
                     }
                 }
             }
         } // GLOBAL HANDLE LOCK DROPPED HERE
-        for (h, rw_arc) in targets {
-            let mut rw = rw_arc.lock();
-            if let Err(e) = utils::write_chili_ipc_msg(&mut **rw, &bytes, MessageType::Async) {
-                warn!(
-                    "failed to signal EOD to handle {} - err {}, disconnecting...",
-                    h, e
-                );
-                drop(rw);
-                failed.push(h);
+        for (h, target) in targets {
+            match target {
+                WriteTarget::Direct(rw_arc) => {
+                    let mut rw = rw_arc.lock();
+                    if let Err(e) =
+                        utils::write_chili_ipc_msg(&mut **rw, &bytes, MessageType::Async)
+                    {
+                        warn!(
+                            "failed to signal EOD to handle {} - err {}, disconnecting...",
+                            h, e
+                        );
+                        drop(rw);
+                        failed.push(h);
+                    }
+                }
+                WriteTarget::Queued(q) => match q.sender.try_send(bytes.clone()) {
+                    Ok(()) => (),
+                    Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                        warn!(
+                            "subscriber {} outbound queue full on EOD (slow consumer), shedding",
+                            h
+                        );
+                        q.disconnected
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                        failed.push(h);
+                    }
+                    Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                        warn!("subscriber {} writer thread gone on EOD, shedding", h);
+                        failed.push(h);
+                    }
+                },
             }
         }
         // Mark every failed handle disconnected under ONE brief global write lock
@@ -1779,6 +1988,11 @@ impl EngineState {
                     if let Some(s) = hd.shutdown_handle.as_ref() {
                         let _ = s.shutdown(std::net::Shutdown::Both);
                     }
+                    // M-2 Stage 2b: stop the queued writer thread.
+                    if let Some(q) = hd.queued.as_ref() {
+                        q.disconnected
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
                 }
             }
         }
@@ -1786,6 +2000,9 @@ impl EngineState {
     }
 
     pub fn handle_subscriber(&self, h: &i64) -> SpicyResult<()> {
+        let queue_max = self
+            .subscriber_queue_max
+            .load(std::sync::atomic::Ordering::Relaxed);
         let mut handles = self.handle.write();
         let handle = handles.get_mut(h).ok_or(SpicyError::InvalidHandleErr(*h))?;
 
@@ -1793,15 +2010,84 @@ impl EngineState {
             return Ok(());
         }
 
-        if handle.conn_type == ConnType::Incoming {
-            handle.conn_type = ConnType::Publishing;
-            Ok(())
-        } else {
-            Err(SpicyError::Err(format!(
+        if handle.conn_type != ConnType::Incoming {
+            return Err(SpicyError::Err(format!(
                 "requires an incoming connection for publishing, got {:?}",
                 handle.conn_type
-            )))
+            )));
         }
+
+        handle.conn_type = ConnType::Publishing;
+
+        // M-2 Stage 2b (TorQ `subscribercutoff.q` faithful queue-depth shed):
+        // when the queue bound is enabled, move this subscriber's write socket
+        // into a dedicated writer thread fed by a BOUNDED channel. The publisher
+        // (`publish`/`signal_eod`) then `try_send`s a whole frame and returns
+        // instantly; a full channel = the subscriber stopped draining = SHED.
+        // OFF (`queue_max == 0`) leaves `queued = None` → the Direct
+        // blocking-write path (pre-2b behaviour), so only the new opt-in path
+        // changes anything.
+        if queue_max > 0 {
+            // The map's `rw` Arc refcount is 1 here (no publish has run against
+            // this still-Incoming handle), so we can extract the Box to hand the
+            // socket to the writer thread exclusively (torn-frame safety: one
+            // owner ⇒ no interleaving).
+            let rw_arc = handle.rw.take().ok_or_else(|| {
+                SpicyError::Err("subscriber handle has no write socket to queue".into())
+            })?;
+            let rw_box = Arc::try_unwrap(rw_arc)
+                .map_err(|arc| {
+                    // Restore so we don't drop the socket on the error path.
+                    handle.rw = Some(arc);
+                    SpicyError::Err("handle rw still shared; cannot start writer thread".into())
+                })?
+                .into_inner();
+            // Dup the shutdown fd for the writer thread so it can tear the
+            // whole socket down on a write error; the engine keeps its own dup
+            // in `shutdown_handle` for the disconnect-sweep path.
+            let shutdown_dup = handle
+                .shutdown_handle
+                .as_ref()
+                .and_then(|s| s.try_clone().ok());
+            let disconnected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (sender, receiver) =
+                std::sync::mpsc::sync_channel::<Vec<Vec<u8>>>(queue_max as usize);
+            let writer_disc = Arc::clone(&disconnected);
+            let writer_h = *h;
+            // The writer thread EXCLUSIVELY owns the socket box (`rw_box`) and the
+            // shutdown dup; it is the only thing that ever writes this socket, so
+            // each `write_chili_ipc_msg` of a WHOLE frame is atomic w.r.t. other
+            // frames (no interleaving possible → framing preserved).
+            thread::spawn(move || {
+                let mut rw_box = rw_box;
+                while let Ok(frame) = receiver.recv() {
+                    if writer_disc.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    if let Err(e) =
+                        crate::write_chili_ipc_msg(&mut *rw_box, &frame, MessageType::Async)
+                    {
+                        warn!(
+                            "subscriber-queue writer for handle {} failed to write ({}), shedding",
+                            writer_h, e
+                        );
+                        writer_disc.store(true, std::sync::atomic::Ordering::Relaxed);
+                        if let Some(s) = shutdown_dup.as_ref() {
+                            let _ = s.shutdown(std::net::Shutdown::Both);
+                        }
+                        break;
+                    }
+                }
+                // Channel closed (handle shed/removed) or write failed: the
+                // socket box drops here, closing the write fd.
+            });
+            handle.queued = Some(QueuedWriter {
+                sender,
+                disconnected,
+            });
+        }
+
+        Ok(())
     }
 
     pub fn list_topic_map(&self) -> SpicyResult<DataFrame> {
@@ -2896,24 +3182,21 @@ impl EngineState {
                     continue;
                 }
             };
-            // M-2 Stage 2 (slow-subscriber shed): if a write-timeout is enabled,
-            // install it on the map's write fd so a subscriber that fills its TCP
-            // send buffer times out instead of hanging the publish loop. Also dup
-            // a THIRD fd used only to `shutdown(Both)` the whole socket on shed
-            // (the incoming socket is dual-fd; dropping the write fd leaves it
-            // half-open). INCOMING only — the OUTGOING connect path is untouched.
-            let write_timeout_ms = state_tcp
-                .write_timeout_ms
+            // M-2 Stage 2b (TorQ `subscribercutoff.q` faithful queue-depth shed):
+            // when the queue bound is enabled, dup a THIRD fd used only to
+            // `shutdown(Both)` the whole socket on shed (the incoming socket is
+            // dual-fd: a reader-thread fd + the map's write fd, so dropping the
+            // write fd leaves it half-open). The bounded channel + writer thread
+            // are set up later, at `handle_subscriber` promotion (when the
+            // handle becomes Publishing). INCOMING only — OUTGOING is untouched.
+            // No `set_write_timeout` is installed anymore: 2b is a DEPTH bound,
+            // not a time bound, so the writer thread's blocking `write_all` is
+            // fine (it owns the socket exclusively and only sheds on a full
+            // queue or a socket error).
+            let subscriber_queue_max = state_tcp
+                .subscriber_queue_max
                 .load(std::sync::atomic::Ordering::Relaxed);
-            let shutdown_dup = if write_timeout_ms > 0 {
-                if let Err(e) = cloned_stream
-                    .set_write_timeout(Some(Duration::from_millis(write_timeout_ms as u64)))
-                {
-                    warn!(
-                        "set_write_timeout failed on incoming handle (continuing): {}",
-                        e
-                    );
-                }
+            let shutdown_dup = if subscriber_queue_max > 0 {
                 stream.try_clone().ok()
             } else {
                 None

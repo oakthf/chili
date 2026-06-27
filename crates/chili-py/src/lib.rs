@@ -388,15 +388,46 @@ impl PyEngineState {
         Ok(())
     }
 
-    /// M-2 Stage 2 (slow-subscriber shed): set the opt-in per-write timeout in
-    /// milliseconds for INCOMING subscriber sockets accepted after this call.
-    /// `0` (default) disables it. A subscriber that stops reading fills its TCP
-    /// send buffer; with the timeout set, the tp's blocking write times out
-    /// instead of hanging the publish loop, and the handle is shed
-    /// (Disconnected + socket `shutdown(Both)`) so the peer reconnects/replays.
-    fn set_write_timeout_ms(&self, ms: i64) -> PyResult<()> {
+    /// FR-2b (TorQ `logusage.q` `logAfter`/`logError`): register a post-eval
+    /// audit hook fired AFTER every inbound IPC request with
+    /// `(user; handle; query; result; error)` — the symmetric counterpart to the
+    /// pre-eval hook. `result` is the evaluated value (Null on error); `error`
+    /// is the error string symbol (Null on success). Fired for side effects
+    /// only — the return value is ignored and a hook error is logged + swallowed
+    /// (audit logging must never break the request path). Local/REPL eval is NOT
+    /// hooked, matching TorQ.
+    fn set_post_eval_hook(&self, name: &str) -> PyResult<()> {
         self.check_fork()?;
-        self.inner.set_write_timeout_ms(ms);
+        self.inner.set_post_eval_hook(Some(name.to_string()));
+        Ok(())
+    }
+
+    /// FR-2b: clear any registered post-eval hook (no audit hook fires).
+    fn clear_post_eval_hook(&self) -> PyResult<()> {
+        self.check_fork()?;
+        self.inner.set_post_eval_hook(None);
+        Ok(())
+    }
+
+    /// FR-2b: name of the currently registered post-eval hook, or `None`.
+    fn get_post_eval_hook(&self) -> PyResult<Option<String>> {
+        self.check_fork()?;
+        Ok(self.inner.get_post_eval_hook())
+    }
+
+    /// M-2 Stage 2b (TorQ `subscribercutoff.q` faithful queue-depth shed): set
+    /// the opt-in OUTBOUND-queue bound for Publishing subscribers promoted after
+    /// this call. `0` (default) disables it (subscribers use the Direct
+    /// blocking-write path). When `> 0`, each Publishing subscriber gets a
+    /// bounded `sync_channel(n)` + a dedicated writer thread; `publish`/EOD
+    /// `try_send` a whole frame and return instantly. A full queue (the chili
+    /// analog of TorQ's `sum .z.W > maxsize`) = the subscriber stopped draining
+    /// → it is shed (Disconnected + socket `shutdown(Both)`) so the peer
+    /// reconnects/replays. Depth bound, not time bound — replaces the old
+    /// `set_write_timeout_ms`.
+    fn set_subscriber_queue_max(&self, n: i64) -> PyResult<()> {
+        self.check_fork()?;
+        self.inner.set_subscriber_queue_max(n);
         Ok(())
     }
 
