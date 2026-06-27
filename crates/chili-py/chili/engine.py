@@ -309,15 +309,14 @@ class ChiliEngine:
             sort_columns: Optional columns to sort by before writing.
             rechunk: Re-chunk the data into a single contiguous allocation.
             overwrite: If ``True``, overwrite an existing partition.
-            compression: Optional Parquet compression codec name. One of
-                ``"snappy"`` (default if omitted), ``"zstd"``, ``"lz4_raw"``,
-                ``"uncompressed"``, ``"gzip"``, ``"brotli"``. Case-insensitive.
-                ``None`` preserves the default codec for byte-equivalence
-                with pre-Sprint-15 output (ADR 0005). Sprint 15 / 0.8.3.
-            row_group_size: Optional row group size override. ``None``
-                preserves chili's existing auto-sizing logic (auto-computed
-                clamp 1024..32768 when ``sort_columns`` is non-empty,
-                else polars default 262144). Sprint 15 / 0.8.3.
+
+        Note:
+            The Parquet codec is the polars default (**zstd**, verified
+            2026-06-27 — NOT snappy as an earlier docstring claimed) and the
+            row-group size is auto-sized (clamped when ``sort_columns`` is set,
+            else the polars default 262144). A per-table ``compression`` /
+            ``row_group_size`` override is a pending feature request (FR-4); the
+            two params were documented prematurely and never wired through.
 
         Returns:
             The number of rows written.
