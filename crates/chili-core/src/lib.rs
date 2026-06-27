@@ -24,6 +24,7 @@ pub use engine_state::{ConnType, IpcType, SubFilter, Subscriber};
 pub use errors::{SpicyError, SpicyResult};
 pub use eval::at;
 pub use func::{Func, FuncType};
+pub use job::{Job, get_local_now_ns};
 pub use obj::SpicyObj;
 pub use parser::parse;
 pub use stack::Stack;

@@ -394,6 +394,25 @@ impl PyEngineState {
         Ok(self.inner.get_pre_eval_hook())
     }
 
+    /// FR-3: enable/disable quarantine-on-error for scheduled `.job`s.
+    ///
+    /// When enabled, a job whose fire returns an error is DEACTIVATED instead
+    /// of being left to re-fire every interval forever (the TorQ timer
+    /// `runandreschedule` safety; the in-engine-timer guard against a silent
+    /// repeated failure). Default disabled (log-and-keep-firing). Set once at
+    /// daemon boot.
+    fn set_jobs_deactivate_on_error(&self, enabled: bool) -> PyResult<()> {
+        self.check_fork()?;
+        self.inner.set_jobs_deactivate_on_error(enabled);
+        Ok(())
+    }
+
+    /// FR-3: is quarantine-on-error enabled?
+    fn jobs_deactivate_on_error(&self) -> PyResult<bool> {
+        self.check_fork()?;
+        Ok(self.inner.jobs_deactivate_on_error())
+    }
+
     /// Atomically take the accumulated DataFrame for a variable and reset it
     /// to a 0-row frame with the same schema.
     ///

@@ -158,6 +158,12 @@ pub struct EngineState {
     /// (`handle_q_conn`/`handle_chili_conn`) consult it — local/REPL eval
     /// bypasses it, matching TorQ (`.z.pg` gates remote handles, not `.z.pi`).
     pre_eval_hook: RwLock<Option<String>>,
+    /// FR-3 (TorQ timer `runandreschedule` quarantine): when true, a scheduled
+    /// `.job` whose fire returns an error is DEACTIVATED instead of being left
+    /// to re-fire every interval forever. Default false preserves the existing
+    /// log-and-keep-firing behaviour. This is the in-engine-timer safety knob
+    /// (the 2026-06-18 silent-repeated-failure shape); set once at daemon boot.
+    jobs_deactivate_on_error: RwLock<bool>,
 }
 
 impl Default for EngineState {
@@ -216,6 +222,7 @@ impl EngineState {
             interval: 0,
             memory_limit: 0.0,
             pre_eval_hook: RwLock::new(None),
+            jobs_deactivate_on_error: RwLock::new(false),
         }
     }
 
@@ -2275,6 +2282,16 @@ impl EngineState {
         )))
     }
 
+    /// FR-3: enable/disable quarantine-on-error for scheduled jobs.
+    pub fn set_jobs_deactivate_on_error(&self, enabled: bool) {
+        *self.jobs_deactivate_on_error.write() = enabled;
+    }
+
+    /// FR-3: is quarantine-on-error enabled?
+    pub fn jobs_deactivate_on_error(&self) -> bool {
+        *self.jobs_deactivate_on_error.read()
+    }
+
     pub fn execute_jobs(&self) {
         let mut active_jobs: HashMap<i64, Job> = HashMap::new();
         {
@@ -2287,6 +2304,7 @@ impl EngineState {
         }
 
         if !active_jobs.is_empty() {
+            let quarantine = self.jobs_deactivate_on_error();
             for (id, job) in active_jobs.iter_mut() {
                 let src_path = if self.repl_lang == Language::Chili {
                     format!("job{}.chi", id)
@@ -2298,13 +2316,22 @@ impl EngineState {
                     &SpicyObj::String(self.repl_lang.format_call(&job.fn_name, &[])),
                     &src_path,
                 );
+                let errored = obj.is_err();
                 if let Err(e) = obj {
                     error!(
                         "failed to execute job id '{}' , fn_name '{}', err - {}\n",
                         id, job.fn_name, e
                     );
                 };
-                if job.next_run_time + job.interval < job.end_time {
+                // FR-3: quarantine a failing job (TorQ `runandreschedule`
+                // safety) so a broken in-engine timer cannot re-fire forever.
+                if errored && quarantine {
+                    warn!(
+                        "quarantining job id '{}' fn_name '{}' after error (deactivate_on_error)",
+                        id, job.fn_name
+                    );
+                    job.is_active = false;
+                } else if job.next_run_time + job.interval < job.end_time {
                     job.next_run_time += job.interval;
                 } else {
                     job.is_active = false;

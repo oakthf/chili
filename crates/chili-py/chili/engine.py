@@ -135,6 +135,20 @@ class ChiliEngine:
         """Return the registered pre-eval hook name, or ``None``."""
         return self.engine.get_pre_eval_hook()
 
+    def set_jobs_deactivate_on_error(self, enabled: bool) -> None:
+        """Enable/disable quarantine-on-error for scheduled ``.job``s (FR-3).
+
+        When enabled, a job whose fire raises is DEACTIVATED instead of
+        re-firing every interval forever (the TorQ timer ``runandreschedule``
+        safety — guards an in-engine timer against a silent repeated failure).
+        Default disabled (log-and-keep-firing). Set once at daemon boot.
+        """
+        return self.engine.set_jobs_deactivate_on_error(enabled)
+
+    def jobs_deactivate_on_error(self) -> bool:
+        """Return whether quarantine-on-error is enabled for ``.job``s."""
+        return self.engine.jobs_deactivate_on_error()
+
     def drain(self, id: str) -> Any:
         """Atomically take the accumulated DataFrame and reset the variable.
 
