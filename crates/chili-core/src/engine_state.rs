@@ -64,7 +64,19 @@ pub trait ReadWrite: Read + Write + Send + Sync {}
 impl<T: Read + Write + Send + Sync> ReadWrite for T {}
 
 pub struct Handle {
-    pub rw: Option<Box<dyn ReadWrite>>,
+    // FR (2026-06-28) per-handle non-blocking I/O: the write socket is wrapped in
+    // an `Arc<Mutex<…>>` so the blocking socket syscall is done under the
+    // PER-HANDLE mutex, not the global `EngineState.handle` RwLock. The I/O paths
+    // (sync/async_/reply/publish/signal_eod) clone this Arc under a brief global
+    // lock, DROP the global lock, then lock this mutex for the syscall — so one
+    // slow/blocked handle no longer serializes the whole engine (D-14 gw query
+    // concurrency + the engine-wide half of M-2 slow-subscriber). `conn_type`
+    // stays in `Handle` (only ever read/written under the global lock, so no data
+    // race); the disconnect-on-error mark re-acquires the global lock briefly —
+    // the stale window is benign (a concurrent write to the dead socket just
+    // errors + re-marks, idempotent). INVARIANT: never hold the global handle
+    // RwLock and a per-handle `rw` Mutex at the same time.
+    pub rw: Option<Arc<Mutex<Box<dyn ReadWrite>>>>,
     pub socket: String,
     pub uri: String,
     pub is_local: bool,
@@ -907,10 +919,12 @@ impl EngineState {
 
     pub fn close_handle(&self, handle_num: &i64) -> SpicyResult<SpicyObj> {
         let mut handle = self.handle.write();
-        // Flush (fdatasync) the writer before dropping the handle
+        // Flush (fdatasync) the writer before dropping the handle. The in-flight
+        // I/O thread (if any) holds its own Arc clone, so dropping the map entry
+        // here doesn't free the socket out from under it (review W-1).
         if let Some(h) = handle.get_mut(handle_num) {
-            if let Some(ref mut rw) = h.rw {
-                if let Err(e) = rw.flush() {
+            if let Some(rw) = h.rw.as_ref() {
+                if let Err(e) = rw.lock().flush() {
                     warn!("close_handle flush failed on handle {}: {}", handle_num, e);
                 }
             }
@@ -938,8 +952,10 @@ impl EngineState {
                 {
                     let mut handles = self.handle.write();
                     if let Some(h) = handles.get_mut(handle_num) {
-                        if let Some(ref mut rw) = h.rw {
-                            rw.flush().map_err(|e| SpicyError::Err(e.to_string()))?;
+                        if let Some(rw) = h.rw.as_ref() {
+                            rw.lock()
+                                .flush()
+                                .map_err(|e| SpicyError::Err(e.to_string()))?;
                         }
                     }
                 }
@@ -977,8 +993,10 @@ impl EngineState {
         let mut handles = self.handle.write();
         match handles.get_mut(handle_num) {
             Some(h) => {
-                if let Some(ref mut rw) = h.rw {
-                    rw.flush().map_err(|e| SpicyError::Err(e.to_string()))?;
+                if let Some(rw) = h.rw.as_ref() {
+                    rw.lock()
+                        .flush()
+                        .map_err(|e| SpicyError::Err(e.to_string()))?;
                 }
                 Ok(SpicyObj::Null)
             }
@@ -1045,7 +1063,7 @@ impl EngineState {
         handle.insert(
             h,
             Handle {
-                rw,
+                rw: rw.map(|b| Arc::new(Mutex::new(b))),
                 socket: socket.to_owned(),
                 uri: uri.to_owned(),
                 is_local,
@@ -1092,37 +1110,41 @@ impl EngineState {
                     )));
                 }
                 let h = *h;
+                // The handle was just `shift_remove`d from the map, so its `rw`
+                // Arc refcount is 1 — extract the Box back out for the reader
+                // thread (the writer half lives in the map under a fresh `rw: None`).
+                let is_local = handle.is_local;
+                let ipc_type = handle.ipc_type;
+                let mut rw_box = Arc::try_unwrap(handle.rw.unwrap())
+                    .map_err(|_| {
+                        SpicyError::Err("handle rw still shared; cannot start reader".into())
+                    })?
+                    .into_inner();
                 handles.insert(
                     h,
                     Handle {
                         rw: None,
                         socket: handle.socket,
                         uri: handle.uri,
-                        is_local: handle.is_local,
-                        ipc_type: handle.ipc_type,
+                        is_local,
+                        ipc_type,
                         conn_type: ConnType::Subscribing,
                         on_disconnected: handle.on_disconnected,
                     },
                 );
                 let user = self.user.clone();
-                if handle.ipc_type == IpcType::Q {
+                if ipc_type == IpcType::Q {
                     thread::spawn(move || {
-                        handle_q_conn(&mut handle.rw.unwrap(), handle.is_local, h, arc_self, &user);
+                        handle_q_conn(&mut rw_box, is_local, h, arc_self, &user);
                     });
-                } else if handle.ipc_type == IpcType::Chili {
+                } else if ipc_type == IpcType::Chili {
                     thread::spawn(move || {
-                        handle_chili_conn(
-                            &mut handle.rw.unwrap(),
-                            handle.is_local,
-                            h,
-                            arc_self,
-                            &user,
-                        );
+                        handle_chili_conn(&mut rw_box, is_local, h, arc_self, &user);
                     });
                 } else {
                     return Err(SpicyError::EvalErr(format!(
                         "invalid ipc type: {:?}, requires q or chili",
-                        handle.ipc_type
+                        ipc_type
                     )));
                 }
                 Ok(())
@@ -1131,16 +1153,47 @@ impl EngineState {
         }
     }
 
+    /// Mark a handle disconnected under a brief global write lock. MUST be
+    /// called only when NO per-handle `rw` mutex is held (lock-order invariant:
+    /// never hold the global handle lock and a per-handle mutex simultaneously).
+    fn mark_disconnected(&self, h: &i64) {
+        if let Some(hd) = self.handle.write().get_mut(h) {
+            hd.conn_type = ConnType::Disconnected;
+        }
+    }
+
+    /// Write a new `conn_type` back to a handle under a brief global write lock.
+    /// Same lock-order invariant as `mark_disconnected`.
+    fn set_conn_type(&self, h: &i64, conn_type: ConnType) {
+        if let Some(hd) = self.handle.write().get_mut(h) {
+            hd.conn_type = conn_type;
+        }
+    }
+
     pub fn sync(&self, h: &i64, msg: &SpicyObj) -> SpicyResult<SpicyObj> {
-        let mut handle = self.handle.write();
-        match handle.get_mut(h) {
-            Some(Handle {
-                rw: Some(rw),
-                is_local,
-                ipc_type,
-                conn_type,
-                ..
-            }) => {
+        // Snapshot under a brief global READ lock: clone the per-handle `rw` Arc
+        // + copy the Copy fields, then DROP the global lock so the blocking
+        // socket/file I/O below runs only under the per-handle mutex.
+        let (rw_arc, is_local, ipc_type, mut conn_type) = {
+            let handle = self.handle.read();
+            match handle.get(h) {
+                Some(hd) => match hd.rw.as_ref() {
+                    Some(rw) => (Arc::clone(rw), hd.is_local, hd.ipc_type, hd.conn_type),
+                    None => return Err(SpicyError::InvalidHandleErr(*h)),
+                },
+                None => return Err(SpicyError::InvalidHandleErr(*h)),
+            }
+        }; // GLOBAL LOCK DROPPED HERE
+        let is_local = &is_local;
+        let ipc_type = &ipc_type;
+        // The blocking I/O runs under the per-handle mutex only. `conn_type` is a
+        // local copy; any transition (New→File/Sequence) or disconnect is written
+        // back to the map at the end under a brief re-acquire of the global lock.
+        let conn_type = &mut conn_type;
+        let mut rw_guard = rw_arc.lock();
+        let rw: &mut Box<dyn ReadWrite> = &mut rw_guard;
+        let result: SpicyResult<SpicyObj> = (|| {
+            {
                 if *conn_type == ConnType::Outgoing {
                     match msg {
                         SpicyObj::Symbol(_) | SpicyObj::String(_) | SpicyObj::MixedList(_) => {
@@ -1277,21 +1330,34 @@ impl EngineState {
                     )))
                 }
             }
-            _ => Err(SpicyError::InvalidHandleErr(*h)),
-        }
+        })();
+        // I/O done — release the per-handle mutex BEFORE touching the global lock
+        // (lock-order invariant), then persist any conn_type transition/disconnect.
+        drop(rw_guard);
+        self.set_conn_type(h, *conn_type);
+        result
     }
 
     pub fn async_(&self, h: &i64, msg: &SpicyObj) -> SpicyResult<SpicyObj> {
-        let mut handle = self.handle.write();
-        match handle.get_mut(h) {
-            Some(Handle {
-                rw: Some(rw),
-                is_local,
-                ipc_type,
-                conn_type,
-                ..
-            }) => {
-                if *conn_type == ConnType::Outgoing {
+        // Snapshot under a brief global READ lock, then DROP it (see `sync`).
+        let (rw_arc, is_local, ipc_type, conn_type) = {
+            let handle = self.handle.read();
+            match handle.get(h) {
+                Some(hd) => match hd.rw.as_ref() {
+                    Some(rw) => (Arc::clone(rw), hd.is_local, hd.ipc_type, hd.conn_type),
+                    None => return Err(SpicyError::InvalidHandleErr(*h)),
+                },
+                None => return Err(SpicyError::InvalidHandleErr(*h)),
+            }
+        }; // GLOBAL LOCK DROPPED HERE
+        let is_local = &is_local;
+        let ipc_type = &ipc_type;
+        let mut disconnected = false;
+        let mut rw_guard = rw_arc.lock();
+        let rw: &mut Box<dyn ReadWrite> = &mut rw_guard;
+        let result: SpicyResult<SpicyObj> = (|| {
+            {
+                if conn_type == ConnType::Outgoing {
                     match msg {
                         SpicyObj::Symbol(_) | SpicyObj::String(_) | SpicyObj::MixedList(_) => {
                             if *ipc_type == IpcType::Q {
@@ -1299,7 +1365,7 @@ impl EngineState {
                                 let v8 = if !*is_local { serde6::compress(v8) } else { v8 };
                                 if let Err(e) = utils::write_q_ipc_msg(rw, &v8, MessageType::Async)
                                 {
-                                    *conn_type = ConnType::Disconnected;
+                                    disconnected = true;
                                     return Err(SpicyError::Err(e.to_string()));
                                 }
                                 return Ok(SpicyObj::Null);
@@ -1308,7 +1374,7 @@ impl EngineState {
                                 if let Err(e) =
                                     utils::write_chili_ipc_msg(rw, &v8, MessageType::Async)
                                 {
-                                    *conn_type = ConnType::Disconnected;
+                                    disconnected = true;
                                     return Err(SpicyError::Err(e.to_string()));
                                 }
                                 return Ok(SpicyObj::Null);
@@ -1326,8 +1392,12 @@ impl EngineState {
                     )))
                 }
             }
-            _ => Err(SpicyError::InvalidHandleErr(*h)),
+        })();
+        drop(rw_guard);
+        if disconnected {
+            self.mark_disconnected(h);
         }
+        result
     }
 
     pub fn execute(&self, h: &i64, msg: &SpicyObj) -> SpicyResult<SpicyObj> {
@@ -1346,45 +1416,56 @@ impl EngineState {
     /// This is what lets a query handler reply to its caller's inbound
     /// connection, the missing primitive for an async query-router (gw).
     pub fn reply(&self, h: &i64, msg: &SpicyObj) -> SpicyResult<SpicyObj> {
-        let mut handle = self.handle.write();
-        match handle.get_mut(h) {
-            Some(Handle {
-                rw: Some(rw),
-                is_local,
-                ipc_type,
-                conn_type,
-                ..
-            }) => {
-                if *conn_type == ConnType::Disconnected {
-                    return Err(SpicyError::Err(format!("handle {h} is disconnected")));
-                }
-                match msg {
-                    SpicyObj::Symbol(_) | SpicyObj::String(_) | SpicyObj::MixedList(_) => {
-                        if *ipc_type == IpcType::Q {
-                            let v8 = serde6::serialize(msg)?;
-                            let v8 = if !*is_local { serde6::compress(v8) } else { v8 };
-                            if let Err(e) = utils::write_q_ipc_msg(rw, &v8, MessageType::Async) {
-                                *conn_type = ConnType::Disconnected;
-                                return Err(SpicyError::Err(e.to_string()));
-                            }
-                            Ok(SpicyObj::Null)
-                        } else {
-                            let v8 = serde9::serialize(msg, !*is_local)?;
-                            if let Err(e) = utils::write_chili_ipc_msg(rw, &v8, MessageType::Async) {
-                                *conn_type = ConnType::Disconnected;
-                                return Err(SpicyError::Err(e.to_string()));
-                            }
-                            Ok(SpicyObj::Null)
-                        }
-                    }
-                    _ => Err(SpicyError::MismatchedTypeErr(
-                        "sym|str|mixedList".to_owned(),
-                        msg.get_type_name(),
-                    )),
-                }
+        // Snapshot under a brief global READ lock, then DROP it (see `sync`).
+        let (rw_arc, is_local, ipc_type, conn_type) = {
+            let handle = self.handle.read();
+            match handle.get(h) {
+                Some(hd) => match hd.rw.as_ref() {
+                    Some(rw) => (Arc::clone(rw), hd.is_local, hd.ipc_type, hd.conn_type),
+                    None => return Err(SpicyError::InvalidHandleErr(*h)),
+                },
+                None => return Err(SpicyError::InvalidHandleErr(*h)),
             }
-            _ => Err(SpicyError::InvalidHandleErr(*h)),
+        }; // GLOBAL LOCK DROPPED HERE
+        if conn_type == ConnType::Disconnected {
+            return Err(SpicyError::Err(format!("handle {h} is disconnected")));
         }
+        let is_local = &is_local;
+        let ipc_type = &ipc_type;
+        let mut disconnected = false;
+        let mut rw_guard = rw_arc.lock();
+        let rw: &mut Box<dyn ReadWrite> = &mut rw_guard;
+        let result: SpicyResult<SpicyObj> = (|| {
+            match msg {
+                SpicyObj::Symbol(_) | SpicyObj::String(_) | SpicyObj::MixedList(_) => {
+                    if *ipc_type == IpcType::Q {
+                        let v8 = serde6::serialize(msg)?;
+                        let v8 = if !*is_local { serde6::compress(v8) } else { v8 };
+                        if let Err(e) = utils::write_q_ipc_msg(rw, &v8, MessageType::Async) {
+                            disconnected = true;
+                            return Err(SpicyError::Err(e.to_string()));
+                        }
+                        Ok(SpicyObj::Null)
+                    } else {
+                        let v8 = serde9::serialize(msg, !*is_local)?;
+                        if let Err(e) = utils::write_chili_ipc_msg(rw, &v8, MessageType::Async) {
+                            disconnected = true;
+                            return Err(SpicyError::Err(e.to_string()));
+                        }
+                        Ok(SpicyObj::Null)
+                    }
+                }
+                _ => Err(SpicyError::MismatchedTypeErr(
+                    "sym|str|mixedList".to_owned(),
+                    msg.get_type_name(),
+                )),
+            }
+        })();
+        drop(rw_guard);
+        if disconnected {
+            self.mark_disconnected(h);
+        }
+        result
     }
 
     pub fn add_subscriber(&self, topic: &str, h: i64) -> SpicyResult<()> {
@@ -1514,40 +1595,68 @@ impl EngineState {
             }
         }
 
-        let mut handle = self.handle.write();
-        for sub in subscribers {
-            let subscriber = sub.handle;
-            let cache_key = sub.filter.as_ref().map(|f| f.key.clone());
-            let bytes = payload_cache.get(&cache_key).expect("payload cached above");
-            if let Some(v) = handle.get_mut(&subscriber) {
-                if v.conn_type == ConnType::Disconnected {
-                    continue;
-                }
-                match &mut v.rw {
-                    Some(rw) => match crate::write_chili_ipc_msg(rw, bytes, MessageType::Async) {
-                        Ok(_) => (),
-                        Err(e) => {
-                            warn!(
-                                "failed to write to handle {} - err {}, disconnecting...",
-                                subscriber, e
-                            );
-                            v.conn_type = ConnType::Disconnected;
-                        }
-                    },
-                    None => {
-                        warn!("handle {} is disconnected", subscriber);
-                        v.conn_type = ConnType::Disconnected;
+        // Snapshot the write targets (handle id, per-handle `rw` Arc, cache_key)
+        // under a brief global READ lock, then DROP it so the blocking writes run
+        // only under each per-handle mutex (one slow subscriber no longer
+        // serializes the whole engine). Subscribers that are disconnected /
+        // missing-rw / not-in-map are handled inline as the original did (the
+        // not-found case still retains the topic_map entry, under the topic_map
+        // write lock we already hold).
+        #[allow(clippy::type_complexity)]
+        let mut targets: Vec<(i64, Arc<Mutex<Box<dyn ReadWrite>>>, Option<String>)> = Vec::new();
+        let mut failed: Vec<i64> = Vec::new();
+        {
+            let handle = self.handle.read();
+            for sub in &subscribers {
+                let subscriber = sub.handle;
+                let cache_key = sub.filter.as_ref().map(|f| f.key.clone());
+                if let Some(v) = handle.get(&subscriber) {
+                    if v.conn_type == ConnType::Disconnected {
+                        continue;
                     }
+                    match v.rw.as_ref() {
+                        Some(rw) => targets.push((subscriber, Arc::clone(rw), cache_key)),
+                        None => {
+                            warn!("handle {} is disconnected", subscriber);
+                            failed.push(subscriber);
+                        }
+                    }
+                } else {
+                    warn!(
+                        "subscriber {} is not found, removing from topic map",
+                        subscriber
+                    );
+                    topic_map
+                        .get_mut(table)
+                        .unwrap()
+                        .retain(|s| s.handle != subscriber);
                 }
-            } else {
-                warn!(
-                    "subscriber {} is not found, removing from topic map",
-                    subscriber
-                );
-                topic_map
-                    .get_mut(table)
-                    .unwrap()
-                    .retain(|s| s.handle != subscriber);
+            }
+        } // GLOBAL HANDLE LOCK DROPPED HERE
+        // (topic_map write lock is unrelated to the handle lock-order invariant.)
+        for (subscriber, rw_arc, cache_key) in targets {
+            let bytes = payload_cache.get(&cache_key).expect("payload cached above");
+            let mut rw = rw_arc.lock();
+            match crate::write_chili_ipc_msg(&mut **rw, bytes, MessageType::Async) {
+                Ok(_) => (),
+                Err(e) => {
+                    warn!(
+                        "failed to write to handle {} - err {}, disconnecting...",
+                        subscriber, e
+                    );
+                    drop(rw);
+                    failed.push(subscriber);
+                }
+            }
+        }
+        // Mark every failed subscriber disconnected under ONE brief global write
+        // lock (never while a per-handle mutex is held — lock-order invariant).
+        if !failed.is_empty() {
+            let mut handle = self.handle.write();
+            for subscriber in failed {
+                if let Some(hd) = handle.get_mut(&subscriber) {
+                    hd.conn_type = ConnType::Disconnected;
+                }
             }
         }
         Ok(())
@@ -1574,24 +1683,45 @@ impl EngineState {
         // `state.eval` → `eval_op` → looks up the symbol head (`eod`)
         // and invokes it as a function.
         let bytes = serde9::serialize(args, false)?;
-        let mut handle = self.handle.write();
-        for (h, v) in handle.iter_mut() {
-            if v.conn_type != ConnType::Publishing {
-                continue;
-            }
-            match &mut v.rw {
-                Some(rw) => {
-                    if let Err(e) = utils::write_chili_ipc_msg(rw, &bytes, MessageType::Async) {
-                        warn!(
-                            "failed to signal EOD to handle {} - err {}, disconnecting...",
-                            h, e
-                        );
-                        v.conn_type = ConnType::Disconnected;
+        // Snapshot every Publishing handle's `rw` Arc under a brief global READ
+        // lock, then DROP it so the blocking EOD writes run only under each
+        // per-handle mutex (one slow subscriber no longer serializes the rest).
+        #[allow(clippy::type_complexity)]
+        let mut targets: Vec<(i64, Arc<Mutex<Box<dyn ReadWrite>>>)> = Vec::new();
+        let mut failed: Vec<i64> = Vec::new();
+        {
+            let handle = self.handle.read();
+            for (h, v) in handle.iter() {
+                if v.conn_type != ConnType::Publishing {
+                    continue;
+                }
+                match v.rw.as_ref() {
+                    Some(rw) => targets.push((*h, Arc::clone(rw))),
+                    None => {
+                        warn!("handle {} is disconnected (no rw), removing", h);
+                        failed.push(*h);
                     }
                 }
-                None => {
-                    warn!("handle {} is disconnected (no rw), removing", h);
-                    v.conn_type = ConnType::Disconnected;
+            }
+        } // GLOBAL HANDLE LOCK DROPPED HERE
+        for (h, rw_arc) in targets {
+            let mut rw = rw_arc.lock();
+            if let Err(e) = utils::write_chili_ipc_msg(&mut **rw, &bytes, MessageType::Async) {
+                warn!(
+                    "failed to signal EOD to handle {} - err {}, disconnecting...",
+                    h, e
+                );
+                drop(rw);
+                failed.push(h);
+            }
+        }
+        // Mark every failed handle disconnected under ONE brief global write lock
+        // (never while a per-handle mutex is held — lock-order invariant).
+        if !failed.is_empty() {
+            let mut handle = self.handle.write();
+            for h in failed {
+                if let Some(hd) = handle.get_mut(&h) {
+                    hd.conn_type = ConnType::Disconnected;
                 }
             }
         }
