@@ -84,6 +84,9 @@ socket2 = "0.5"
 criterion = { version = "0.8", features = ["html_reports"] }
 tempfile = "3"
 serial_test = "3"
+# Dev-only: tests register the operator/built-in fns the Python ctor loads.
+# A dev-dep cycle (chili-op -> chili-core) is permitted by cargo for tests.
+chili-op = { path = "../chili-op" }
 
 [[bench]]
 name = "parse_cache"

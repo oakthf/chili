@@ -366,6 +366,34 @@ impl PyEngineState {
         spicy_to_py(py, obj)
     }
 
+    /// FR-2 (TorQ `.z.pg`/`.z.ps` request pipeline): register a pre-eval hook.
+    ///
+    /// `name` must be a function `(user; handle; query) -> query'` already
+    /// defined in the engine. Every INBOUND IPC request is routed through it
+    /// before evaluation: the return value REPLACES the query that runs (Allow
+    /// = return unchanged, Rewrite = return a modified query), and a hook
+    /// `raise` DENIES the request (the error is sent back to the client). The
+    /// query arg is the raw request object (string / bytes / fn-call tuple),
+    /// bound without re-evaluation. Local/REPL eval is NOT gated, matching TorQ.
+    fn set_pre_eval_hook(&self, name: &str) -> PyResult<()> {
+        self.check_fork()?;
+        self.inner.set_pre_eval_hook(Some(name.to_string()));
+        Ok(())
+    }
+
+    /// FR-2: clear any registered pre-eval hook (requests run unchanged).
+    fn clear_pre_eval_hook(&self) -> PyResult<()> {
+        self.check_fork()?;
+        self.inner.set_pre_eval_hook(None);
+        Ok(())
+    }
+
+    /// FR-2: name of the currently registered pre-eval hook, or `None`.
+    fn get_pre_eval_hook(&self) -> PyResult<Option<String>> {
+        self.check_fork()?;
+        Ok(self.inner.get_pre_eval_hook())
+    }
+
     /// Atomically take the accumulated DataFrame for a variable and reset it
     /// to a 0-row frame with the same schema.
     ///

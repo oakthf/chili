@@ -110,6 +110,31 @@ class ChiliEngine:
         """
         return self.engine.del_var(id)
 
+    def set_pre_eval_hook(self, name: str) -> None:
+        """Register a pre-eval request hook (FR-2; TorQ ``.z.pg``/``.z.ps``).
+
+        Every INBOUND IPC request is routed through ``name(user; handle;
+        query)`` before evaluation. The hook's return value REPLACES the query
+        that runs (Allow = return unchanged, Rewrite = return a modified
+        query); a hook ``raise`` DENIES the request and the error is sent back
+        to the client. ``query`` is the raw request object (string / bytes /
+        fn-call tuple), bound without re-evaluation. Local/REPL ``eval`` is NOT
+        gated, matching TorQ.
+
+        Args:
+            name: Name of a function ``(user; handle; query) -> query'`` already
+                defined in the engine.
+        """
+        return self.engine.set_pre_eval_hook(name)
+
+    def clear_pre_eval_hook(self) -> None:
+        """Clear any registered pre-eval hook (requests run unchanged)."""
+        return self.engine.clear_pre_eval_hook()
+
+    def get_pre_eval_hook(self) -> "str | None":
+        """Return the registered pre-eval hook name, or ``None``."""
+        return self.engine.get_pre_eval_hook()
+
     def drain(self, id: str) -> Any:
         """Atomically take the accumulated DataFrame and reset the variable.
 

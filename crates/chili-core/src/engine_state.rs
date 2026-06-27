@@ -148,6 +148,16 @@ pub struct EngineState {
     interval: u64,
     /// Memory limit in MB. 0.0 means unlimited.
     memory_limit: f64,
+    /// FR-2 (TorQ `.z.pg`/`.z.ps` request pipeline): optional name of a
+    /// registered engine function `(user; handle; query) -> query'` that every
+    /// INBOUND IPC request is routed through before evaluation. The hook's
+    /// return value REPLACES the query that gets evaluated (Allow = return
+    /// as-is, Rewrite = return a modified query); a hook error (`raise`) DENIES
+    /// the request and is propagated to the client. `None` => requests are
+    /// evaluated unchanged (zero overhead). Only the network conn handlers
+    /// (`handle_q_conn`/`handle_chili_conn`) consult it — local/REPL eval
+    /// bypasses it, matching TorQ (`.z.pg` gates remote handles, not `.z.pi`).
+    pre_eval_hook: RwLock<Option<String>>,
 }
 
 impl Default for EngineState {
@@ -205,6 +215,7 @@ impl EngineState {
             repl_lang: Language::Chili,
             interval: 0,
             memory_limit: 0.0,
+            pre_eval_hook: RwLock::new(None),
         }
     }
 
@@ -311,6 +322,57 @@ impl EngineState {
     pub fn del_var(&self, id: &str) -> SpicyResult<SpicyObj> {
         let mut vars = self.vars.write();
         Ok(vars.remove(id).unwrap_or(SpicyObj::Null))
+    }
+
+    /// FR-2: register (`Some`) or clear (`None`) the pre-eval request hook.
+    /// See the `pre_eval_hook` field docs for the contract.
+    pub fn set_pre_eval_hook(&self, name: Option<String>) {
+        *self.pre_eval_hook.write() = name.filter(|n| !n.is_empty());
+    }
+
+    /// FR-2: name of the currently registered pre-eval hook, if any.
+    pub fn get_pre_eval_hook(&self) -> Option<String> {
+        self.pre_eval_hook.read().clone()
+    }
+
+    /// FR-2 (TorQ `.z.pg`/`.z.ps`): evaluate an INBOUND IPC `query` after
+    /// passing it through the registered pre-eval hook, if one is set.
+    ///
+    /// With a hook `H` registered, this evaluates `H(user; handle; query)` and
+    /// then evaluates `H`'s return value — so the hook may Allow (return the
+    /// query unchanged), Rewrite (return a modified query), or Deny (`raise`,
+    /// whose error propagates back to the client). The hook's args are bound
+    /// DIRECTLY (no re-evaluation of `query`), so the hook receives the raw
+    /// request object — a string (var lookup), bytes (source), or a fn-call
+    /// tuple — exactly as it arrived on the wire.
+    ///
+    /// With no hook, this is identical to `eval` (zero overhead).
+    pub fn eval_with_pre_hook(
+        &self,
+        stack: &mut Stack,
+        query: &SpicyObj,
+        src: &str,
+    ) -> SpicyResult<SpicyObj> {
+        let hook = self.pre_eval_hook.read().clone();
+        match hook {
+            Some(name) => {
+                let f = self.get_var(&name).map_err(|_| {
+                    SpicyError::EvalErr(format!("pre-eval hook '{}' is not defined", name))
+                })?;
+                if !matches!(f, SpicyObj::Fn(_)) {
+                    return Err(SpicyError::EvalErr(format!(
+                        "pre-eval hook '{}' is not a function",
+                        name
+                    )));
+                }
+                let user_obj = SpicyObj::Symbol(stack.user.clone());
+                let handle_obj = SpicyObj::I64(stack.h);
+                let args: Vec<&SpicyObj> = vec![&user_obj, &handle_obj, query];
+                let rewritten = crate::eval::eval_call(self, stack, &f, &args, &None, src)?;
+                self.eval(stack, &rewritten, src)
+            }
+            None => self.eval(stack, query, src),
+        }
     }
 
     /// Atomically take the accumulated DataFrame for `id` and replace it with
@@ -680,7 +742,10 @@ impl EngineState {
                 let utc_time = u64::from_le_bytes(header[8..16].try_into().unwrap()) as i64;
                 if (start_time > 0 && utc_time < start_time) || i < start {
                     if let Err(e) = file.seek(SeekFrom::Current(size as i64)) {
-                        warn!("torn skip-seek at index {}: {} — stopping replay at last good frame", i, e);
+                        warn!(
+                            "torn skip-seek at index {}: {} — stopping replay at last good frame",
+                            i, e
+                        );
                         break;
                     }
                     i += 1;
@@ -690,19 +755,26 @@ impl EngineState {
                 read_msg_count += 1;
                 let mut buffer = vec![0u8; size as usize];
                 if let Err(e) = file.read_exact(&mut buffer) {
-                    warn!("torn frame at index {}: {} — stopping replay at last good frame", i, e);
+                    warn!(
+                        "torn frame at index {}: {} — stopping replay at last good frame",
+                        i, e
+                    );
                     break;
                 }
-                let list = match std::panic::catch_unwind(|| {
-                    serde9::deserialize(&buffer, &mut 0)
-                }) {
+                let list = match std::panic::catch_unwind(|| serde9::deserialize(&buffer, &mut 0)) {
                     Ok(Ok(l)) => l,
                     Ok(Err(e)) => {
-                        warn!("corrupt frame at index {}: {} — stopping replay at last good frame", i, e);
+                        warn!(
+                            "corrupt frame at index {}: {} — stopping replay at last good frame",
+                            i, e
+                        );
                         break;
                     }
                     Err(_) => {
-                        warn!("corrupt frame at index {} caused panic — stopping replay at last good frame", i);
+                        warn!(
+                            "corrupt frame at index {} caused panic — stopping replay at last good frame",
+                            i
+                        );
                         break;
                     }
                 };
@@ -1373,7 +1445,9 @@ impl EngineState {
         for sub in &subscribers {
             let cache_key = sub.filter.as_ref().map(|f| f.key.clone());
             if let Some(f) = &sub.filter {
-                filter_by_key.entry(f.key.clone()).or_insert_with(|| f.clone());
+                filter_by_key
+                    .entry(f.key.clone())
+                    .or_insert_with(|| f.clone());
             }
             if !payload_cache.contains_key(&cache_key) {
                 let frame_msg = match &sub.filter {
@@ -2438,16 +2512,18 @@ impl EngineState {
         use std::net::SocketAddr;
 
         let ip = if remote { "0.0.0.0" } else { "127.0.0.1" };
-        let addr: SocketAddr = format!("{}:{}", ip, port)
-            .parse()
-            .map_err(|e| SpicyError::OsErr(format!("invalid listen addr {}:{} - {}", ip, port, e)))?;
+        let addr: SocketAddr = format!("{}:{}", ip, port).parse().map_err(|e| {
+            SpicyError::OsErr(format!("invalid listen addr {}:{} - {}", ip, port, e))
+        })?;
 
         let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))
-            .map_err(|e| SpicyError::OsErr(format!("socket create failed on port {} - {}", port, e)))?;
+            .map_err(|e| {
+                SpicyError::OsErr(format!("socket create failed on port {} - {}", port, e))
+            })?;
         // SO_REUSEADDR: survive a peer's TIME_WAIT on restart.
-        socket
-            .set_reuse_address(true)
-            .map_err(|e| SpicyError::OsErr(format!("set SO_REUSEADDR failed on port {} - {}", port, e)))?;
+        socket.set_reuse_address(true).map_err(|e| {
+            SpicyError::OsErr(format!("set SO_REUSEADDR failed on port {} - {}", port, e))
+        })?;
         socket
             .bind(&addr.into())
             .map_err(|e| SpicyError::OsErr(format!("bind failed on port {} - {}", port, e)))?;
