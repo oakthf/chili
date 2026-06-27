@@ -83,6 +83,14 @@ pub struct Handle {
     pub ipc_type: IpcType,
     pub conn_type: ConnType,
     pub on_disconnected: Option<String>,
+    // M-2 Stage 2 (slow-subscriber shed): an extra dup of the INCOMING socket
+    // used ONLY to `shutdown(Both)` the whole connection when the handle is
+    // marked disconnected (e.g. a write timed out). The incoming socket is
+    // dual-fd — a reader-thread fd plus the map's `rw` write fd — so dropping
+    // the write half alone leaves the socket half-open; this dup lets the shed
+    // path tear down both directions so the peer gets a reset and reconnects.
+    // `None` for OUTGOING / file / non-timeout handles (the pre-Stage-2 shape).
+    pub shutdown_handle: Option<std::net::TcpStream>,
 }
 
 /// FR-1 — a per-handle row-filter for a topic. TorQ `.u.sub[t;syms]`:
@@ -176,6 +184,15 @@ pub struct EngineState {
     /// log-and-keep-firing behaviour. This is the in-engine-timer safety knob
     /// (the 2026-06-18 silent-repeated-failure shape); set once at daemon boot.
     jobs_deactivate_on_error: RwLock<bool>,
+    /// M-2 Stage 2 (slow-subscriber shed): OPT-IN per-write timeout, in
+    /// milliseconds, applied to INCOMING (subscriber) sockets at accept time.
+    /// `0` (the default) = OFF — no `set_write_timeout` is installed, exactly
+    /// reproducing the pre-Stage-2 blocking-write behaviour. When `> 0`, a
+    /// subscriber whose TCP send buffer fills (it stopped reading) makes the
+    /// tp's blocking `write_all` time out instead of hanging the publish loop;
+    /// the timed-out handle is then marked Disconnected AND its socket is
+    /// `shutdown(Both)` so the peer's reconnect/replay logic re-subscribes.
+    write_timeout_ms: std::sync::atomic::AtomicI64,
 }
 
 impl Default for EngineState {
@@ -235,6 +252,7 @@ impl EngineState {
             memory_limit: 0.0,
             pre_eval_hook: RwLock::new(None),
             jobs_deactivate_on_error: RwLock::new(false),
+            write_timeout_ms: std::sync::atomic::AtomicI64::new(0),
         }
     }
 
@@ -1043,6 +1061,24 @@ impl EngineState {
         }
         Ok(SpicyObj::Null)
     }
+    /// M-2 Stage 2: set the opt-in per-write timeout (ms) for INCOMING
+    /// subscriber sockets accepted AFTER this call. `0` disables it. Read with
+    /// `write_timeout_ms.load(Relaxed)` in the accept loop.
+    pub fn set_write_timeout_ms(&self, ms: i64) {
+        self.write_timeout_ms
+            .store(ms, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// M-2 Stage 2: attach the shutdown-dup `TcpStream` to an already-registered
+    /// handle, so a later `mark_disconnected` can `shutdown(Both)` the whole
+    /// socket (the incoming socket is dual-fd: a reader-thread fd + the map's
+    /// write fd, so dropping the write fd alone leaves the socket half-open).
+    pub fn set_shutdown_handle(&self, h: &i64, s: std::net::TcpStream) {
+        if let Some(hd) = self.handle.write().get_mut(h) {
+            hd.shutdown_handle = Some(s);
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn set_handle(
         &self,
@@ -1070,6 +1106,7 @@ impl EngineState {
                 ipc_type,
                 conn_type,
                 on_disconnected: None,
+                shutdown_handle: None,
             },
         );
         Ok(SpicyObj::I64(h))
@@ -1130,6 +1167,8 @@ impl EngineState {
                         ipc_type,
                         conn_type: ConnType::Subscribing,
                         on_disconnected: handle.on_disconnected,
+                        // Outgoing/subscribing handle — no incoming shutdown dup.
+                        shutdown_handle: None,
                     },
                 );
                 let user = self.user.clone();
@@ -1159,6 +1198,13 @@ impl EngineState {
     fn mark_disconnected(&self, h: &i64) {
         if let Some(hd) = self.handle.write().get_mut(h) {
             hd.conn_type = ConnType::Disconnected;
+            // M-2 Stage 2: if this is a shed-capable INCOMING handle, tear the
+            // whole socket down so the peer gets a reset (not a stuck read) and
+            // its reconnect/replay logic re-subscribes. Best-effort — an
+            // already-broken socket just returns Err, which we ignore.
+            if let Some(s) = hd.shutdown_handle.as_ref() {
+                let _ = s.shutdown(std::net::Shutdown::Both);
+            }
         }
     }
 
@@ -1656,6 +1702,12 @@ impl EngineState {
             for subscriber in failed {
                 if let Some(hd) = handle.get_mut(&subscriber) {
                     hd.conn_type = ConnType::Disconnected;
+                    // M-2 Stage 2: shed-capable handles also get their socket
+                    // torn down (see `mark_disconnected`) so the peer resets +
+                    // reconnects rather than re-using a half-open socket.
+                    if let Some(s) = hd.shutdown_handle.as_ref() {
+                        let _ = s.shutdown(std::net::Shutdown::Both);
+                    }
                 }
             }
         }
@@ -1722,6 +1774,11 @@ impl EngineState {
             for h in failed {
                 if let Some(hd) = handle.get_mut(&h) {
                     hd.conn_type = ConnType::Disconnected;
+                    // M-2 Stage 2: shed-capable handles also get their socket
+                    // torn down (see `mark_disconnected`).
+                    if let Some(s) = hd.shutdown_handle.as_ref() {
+                        let _ = s.shutdown(std::net::Shutdown::Both);
+                    }
                 }
             }
         }
@@ -2839,6 +2896,28 @@ impl EngineState {
                     continue;
                 }
             };
+            // M-2 Stage 2 (slow-subscriber shed): if a write-timeout is enabled,
+            // install it on the map's write fd so a subscriber that fills its TCP
+            // send buffer times out instead of hanging the publish loop. Also dup
+            // a THIRD fd used only to `shutdown(Both)` the whole socket on shed
+            // (the incoming socket is dual-fd; dropping the write fd leaves it
+            // half-open). INCOMING only — the OUTGOING connect path is untouched.
+            let write_timeout_ms = state_tcp
+                .write_timeout_ms
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let shutdown_dup = if write_timeout_ms > 0 {
+                if let Err(e) = cloned_stream
+                    .set_write_timeout(Some(Duration::from_millis(write_timeout_ms as u64)))
+                {
+                    warn!(
+                        "set_write_timeout failed on incoming handle (continuing): {}",
+                        e
+                    );
+                }
+                stream.try_clone().ok()
+            } else {
+                None
+            };
             let h = match state_tcp.set_handle(
                 Some(Box::new(cloned_stream)),
                 &peer_addr,
@@ -2866,6 +2945,12 @@ impl EngineState {
                     continue;
                 }
             };
+            // M-2 Stage 2: attach the shutdown dup so a future shed can tear the
+            // whole socket down. `shutdown_dup` is Some only when the
+            // write-timeout is enabled (INCOMING handle).
+            if let Some(s) = shutdown_dup {
+                state_tcp.set_shutdown_handle(&h_i64, s);
+            }
             if auth_info.version <= 6 {
                 let mut stream = Box::new(stream);
                 thread::spawn(move || {

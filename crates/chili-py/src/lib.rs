@@ -388,6 +388,18 @@ impl PyEngineState {
         Ok(())
     }
 
+    /// M-2 Stage 2 (slow-subscriber shed): set the opt-in per-write timeout in
+    /// milliseconds for INCOMING subscriber sockets accepted after this call.
+    /// `0` (default) disables it. A subscriber that stops reading fills its TCP
+    /// send buffer; with the timeout set, the tp's blocking write times out
+    /// instead of hanging the publish loop, and the handle is shed
+    /// (Disconnected + socket `shutdown(Both)`) so the peer reconnects/replays.
+    fn set_write_timeout_ms(&self, ms: i64) -> PyResult<()> {
+        self.check_fork()?;
+        self.inner.set_write_timeout_ms(ms);
+        Ok(())
+    }
+
     /// FR-2: name of the currently registered pre-eval hook, or `None`.
     fn get_pre_eval_hook(&self) -> PyResult<Option<String>> {
         self.check_fork()?;
