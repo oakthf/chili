@@ -345,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "chili-core"
-version = "0.9.6"
+version = "0.9.7"
 dependencies = [
  "anyhow",
  "ariadne",
@@ -374,7 +374,7 @@ dependencies = [
 
 [[package]]
 name = "chili-op"
-version = "0.9.6"
+version = "0.9.7"
 dependencies = [
  "chili-core",
  "chrono",
@@ -396,7 +396,7 @@ dependencies = [
 
 [[package]]
 name = "chili-parser"
-version = "0.9.6"
+version = "0.9.7"
 dependencies = [
  "ariadne",
  "chumsky",
@@ -405,7 +405,7 @@ dependencies = [
 
 [[package]]
 name = "chili-py"
-version = "0.9.6"
+version = "0.9.7"
 dependencies = [
  "chili-core",
  "chili-op",
