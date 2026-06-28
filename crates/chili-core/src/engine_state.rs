@@ -120,6 +120,13 @@ pub struct QueuedWriter {
     /// Set true by the writer thread on a socket write error, or by the engine
     /// on a `try_send` `Full` shed. Polled by the disconnect path.
     pub disconnected: Arc<std::sync::atomic::AtomicBool>,
+    /// FR-B (v1-63) — the TorQ `.z.W` analog: live count of frames sitting in
+    /// the bounded channel (enqueued-but-not-yet-written). `fetch_add(1)` on a
+    /// successful `try_send`, `fetch_sub(1)` in the writer thread after each
+    /// frame is written. Lock-free; read by `stats()`/`handle_queue_depths()`
+    /// for slow-subscriber monitoring (the M-2 monitor half). Never gates the
+    /// hot path — purely observational.
+    pub depth: Arc<std::sync::atomic::AtomicI64>,
 }
 
 /// M-2 Stage 2b — a snapshotted write target for the publish/EOD broadcast.
@@ -1849,7 +1856,10 @@ impl EngineState {
                     // the subscriber stopped draining (TorQ `.z.W > maxsize`) →
                     // SHED. `Disconnected` (writer thread already gone) also sheds.
                     match q.sender.try_send(bytes.clone()) {
-                        Ok(()) => (),
+                        Ok(()) => {
+                            // FR-B — frame enqueued; bump the `.z.W` depth.
+                            q.depth.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
                         Err(std::sync::mpsc::TrySendError::Full(_)) => {
                             warn!(
                                 "subscriber {} outbound queue full (slow consumer), shedding",
@@ -1959,7 +1969,10 @@ impl EngineState {
                     }
                 }
                 WriteTarget::Queued(q) => match q.sender.try_send(bytes.clone()) {
-                    Ok(()) => (),
+                    Ok(()) => {
+                        // FR-B — frame enqueued; bump the `.z.W` depth.
+                        q.depth.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                     Err(std::sync::mpsc::TrySendError::Full(_)) => {
                         warn!(
                             "subscriber {} outbound queue full on EOD (slow consumer), shedding",
@@ -2050,9 +2063,12 @@ impl EngineState {
                 .as_ref()
                 .and_then(|s| s.try_clone().ok());
             let disconnected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            // FR-B — live outbound queue-depth counter (the `.z.W` analog).
+            let depth = Arc::new(std::sync::atomic::AtomicI64::new(0));
             let (sender, receiver) =
                 std::sync::mpsc::sync_channel::<Vec<Vec<u8>>>(queue_max as usize);
             let writer_disc = Arc::clone(&disconnected);
+            let writer_depth = Arc::clone(&depth);
             let writer_h = *h;
             // The writer thread EXCLUSIVELY owns the socket box (`rw_box`) and the
             // shutdown dup; it is the only thing that ever writes this socket, so
@@ -2064,9 +2080,12 @@ impl EngineState {
                     if writer_disc.load(std::sync::atomic::Ordering::Relaxed) {
                         break;
                     }
-                    if let Err(e) =
-                        crate::write_chili_ipc_msg(&mut *rw_box, &frame, MessageType::Async)
-                    {
+                    let write_res =
+                        crate::write_chili_ipc_msg(&mut *rw_box, &frame, MessageType::Async);
+                    // FR-B — frame has left the queue (written or about to shed):
+                    // decrement the depth counter either way so it can't leak.
+                    writer_depth.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    if let Err(e) = write_res {
                         warn!(
                             "subscriber-queue writer for handle {} failed to write ({}), shedding",
                             writer_h, e
@@ -2084,6 +2103,7 @@ impl EngineState {
             handle.queued = Some(QueuedWriter {
                 sender,
                 disconnected,
+                depth,
             });
         }
 
@@ -3041,6 +3061,68 @@ impl EngineState {
                     .collect::<Vec<String>>(),
             )),
         );
+
+        // FR-B (v1-63) — engine introspection for DQ/mon (the TorQ `.Q.w` /
+        // `.z.W` analog). All read-only; the per-handle queue read uses the
+        // SAME global handle read-lock `list_handle` uses (no new contention).
+
+        // `.z.W` analog — per-handle OUTBOUND queue depth + the total. Handles
+        // without a bounded queue (Direct path) contribute 0.
+        let (handle_nums, queue_depths, total_queue_depth) = {
+            let handles = self.handle.read();
+            let mut nums = Vec::with_capacity(handles.len());
+            let mut depths = Vec::with_capacity(handles.len());
+            let mut total: i64 = 0;
+            for (k, v) in handles.iter() {
+                let d = v
+                    .queued
+                    .as_ref()
+                    .map(|q| q.depth.load(std::sync::atomic::Ordering::Relaxed).max(0))
+                    .unwrap_or(0);
+                nums.push(*k);
+                depths.push(d);
+                total += d;
+            }
+            (nums, depths, total)
+        };
+        status.insert("handle_count".into(), SpicyObj::I64(handle_nums.len() as i64));
+        status.insert(
+            "handle_nums".into(),
+            SpicyObj::Series(Series::new("handle".into(), handle_nums)),
+        );
+        status.insert(
+            "queue_depth_by_handle".into(),
+            SpicyObj::Series(Series::new("queue_depth".into(), queue_depths)),
+        );
+        status.insert(
+            "queue_depth_total".into(),
+            SpicyObj::I64(total_queue_depth),
+        );
+
+        // `.Q.w` analog — process RSS memory (bytes), via the already-present
+        // `sysinfo` dep. `-1` if the current process can't be read (the caller
+        // treats a negative value as unavailable rather than a real measure).
+        let rss_bytes: i64 = match sysinfo::get_current_pid() {
+            Ok(pid) => {
+                let mut sys = sysinfo::System::new();
+                sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+                sys.process(pid).map(|p| p.memory() as i64).unwrap_or(-1)
+            }
+            Err(_) => -1,
+        };
+        status.insert("process_memory_rss_bytes".into(), SpicyObj::I64(rss_bytes));
+
+        // Symbol / cache width — the count of bound vars + topics (the
+        // engine's symbol-table width) and the parse-cache width.
+        status.insert(
+            "vars_len".into(),
+            SpicyObj::I64(self.vars.read().len() as i64),
+        );
+        status.insert(
+            "topic_count".into(),
+            SpicyObj::I64(self.topic_map.read().len() as i64),
+        );
+
         Ok(SpicyObj::Dict(status))
     }
 
