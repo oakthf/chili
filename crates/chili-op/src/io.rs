@@ -288,6 +288,11 @@ pub fn write_parquet(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
 
 // hdb_path, partition, table, df, columns, rechunk
 pub fn write_partition(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
+    // Args 1-7 are the original `wpar` contract. Args 8 (`atomic`, FR-A) and
+    // 9 (`compression`, FR-C) are v1-63 additions; both are tolerant of being
+    // absent (callers older than v1-63 pass 7 args → default behaviour) and
+    // `validate_args` `.zip`s the shorter slice so trailing args are checked
+    // only when present.
     validate_args(
         args,
         &[
@@ -298,6 +303,8 @@ pub fn write_partition(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
             ArgType::SymOrSyms,
             ArgType::Boolean,
             ArgType::Boolean,
+            ArgType::Boolean,
+            ArgType::Any,
         ],
     )?;
     let hdb_path = args[0].str().unwrap();
@@ -308,8 +315,26 @@ pub fn write_partition(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
     // rechunk | append
     let rechunk = *args[5].bool().unwrap();
     let overwrite = *args[6].bool().unwrap();
-    write_partition_native(
-        hdb_path, partition, table_name, df, &columns, rechunk, overwrite,
+    // FR-A — atomic write-then-swap (single-shard overwrite only). Default
+    // false → the existing in-place delete-then-write path is unchanged.
+    let atomic = args.get(7).and_then(|a| a.bool().ok()).copied().unwrap_or(false);
+    // FR-C — optional per-call parquet codec override. A null/absent arg
+    // keeps the default (zstd); a string maps to the matching codec.
+    let compression: Option<String> = match args.get(8) {
+        None => None,
+        Some(SpicyObj::Null) => None,
+        Some(o) => o.str().ok().map(|s| s.to_string()),
+    };
+    write_partition_native_full(
+        hdb_path,
+        partition,
+        table_name,
+        df,
+        &columns,
+        rechunk,
+        overwrite,
+        atomic,
+        compression.as_deref(),
     )
 }
 
@@ -322,6 +347,44 @@ pub fn write_partition_native(
     rechunk: bool,
     overwrite: bool,
 ) -> SpicyResult<SpicyObj> {
+    write_partition_native_full(
+        hdb_path,
+        partition,
+        table_name,
+        df,
+        sort_columns,
+        rechunk,
+        overwrite,
+        false,
+        None,
+    )
+}
+
+/// FR-A + FR-C (v1-63) full-knob partition write.
+///
+/// `atomic` (FR-A): on the OVERWRITE path, write the new single shard to a
+/// temp file FIRST, then `fs::rename` it into `<date>_0000`, then drop any
+/// other old shards — so a concurrent reader sees either the complete old
+/// partition or the complete new one, never an empty/torn dir. This lifts the
+/// exact `write tmp → fs::rename` mechanism the rechunk branch already uses.
+/// **Atomic ONLY for single-shard output** — the overwrite path always emits
+/// a single `_0000`, which is the repair-runner use case. Multi-shard atomicity
+/// is NOT provided (a multi-file partition cannot be swapped by one rename).
+///
+/// `compression` (FR-C): optional codec name override; `None` keeps zstd.
+#[allow(clippy::too_many_arguments)]
+pub fn write_partition_native_full(
+    hdb_path: &str,
+    partition: &SpicyObj,
+    table_name: &str,
+    df: &polars::prelude::DataFrame,
+    sort_columns: &[&str],
+    rechunk: bool,
+    overwrite: bool,
+    atomic: bool,
+    compression: Option<&str>,
+) -> SpicyResult<SpicyObj> {
+    let codec = util::parse_parquet_compression(compression)?;
     let sort_options = SortMultipleOptions::default();
     // Proposal O — same canonicalize cache as the public `write_partition`.
     let hdb_path = canon_cached(hdb_path)?;
@@ -395,8 +458,13 @@ pub fn write_partition_native(
                         table_name
                     )));
                 }
-                return util::write_parquet_to_filepath(table_path.to_string_lossy().as_ref(), df)
-                    .map(|size| SpicyObj::I64(size as i64));
+                return util::write_parquet_to_filepath_full(
+                    table_path.to_string_lossy().as_ref(),
+                    df,
+                    None,
+                    codec.clone(),
+                )
+                .map(|size| SpicyObj::I64(size as i64));
             }
         }
         _ => {
@@ -468,6 +536,35 @@ pub fn write_partition_native(
         .map(|p| p.map_err(|e| SpicyError::Err(e.to_string())))
         .collect::<SpicyResult<Vec<_>>>()?;
 
+    // FR-A — atomic overwrite (write-then-swap). The new single shard is
+    // written to a temp file FIRST, then `fs::rename`d into `<date>_0000`
+    // (atomic on the same filesystem), then ALL other old shards are dropped.
+    // A concurrent reader therefore always sees a complete partition — the
+    // old one until the rename, the new one after — never an empty dir.
+    // Single-shard ONLY (the overwrite path always emits one `_0000`); this
+    // is the v1-62 repair-runner unblock. The non-atomic path below is
+    // untouched (default behaviour: delete-then-write, brief torn window).
+    if atomic && overwrite {
+        let final_path = format!("{}_0000", par_path.display());
+        let tmp_path = format!("{}_0000.tmp", par_path.display());
+        let size = util::write_parquet_to_filepath_full(
+            &tmp_path,
+            &df,
+            row_group_size,
+            codec.clone(),
+        )?;
+        // Atomic swap: the new complete shard replaces (or creates) _0000.
+        fs::rename(&tmp_path, &final_path).map_err(|e| SpicyError::Err(e.to_string()))?;
+        // Drop any OTHER stale shards (_0001, _0002, ...) now that the new
+        // _0000 is the live, complete partition. Never touches _0000 itself.
+        for path in &existing_sub_parts {
+            if path.to_string_lossy() != final_path {
+                fs::remove_file(path).map_err(|e| SpicyError::Err(e.to_string()))?;
+            }
+        }
+        return Ok(SpicyObj::I64(size as i64));
+    }
+
     if overwrite && !existing_sub_parts.is_empty() {
         for path in &existing_sub_parts {
             fs::remove_file(path).map_err(|e| SpicyError::Err(e.to_string()))?;
@@ -476,7 +573,7 @@ pub fn write_partition_native(
 
     if existing_sub_parts.is_empty() || overwrite {
         let sub_par_path = format!("{}_0000", par_path.display());
-        util::write_parquet_to_filepath_with_row_group_size(&sub_par_path, &df, row_group_size)
+        util::write_parquet_to_filepath_full(&sub_par_path, &df, row_group_size, codec.clone())
             .map(|size| SpicyObj::I64(size as i64))
     } else {
         let mut par = existing_sub_parts.len();
@@ -490,10 +587,11 @@ pub fn write_partition_native(
                 "Exceed maximum sub partition number 9999".to_string(),
             ))
         } else {
-            let size = util::write_parquet_to_filepath_with_row_group_size(
+            let size = util::write_parquet_to_filepath_full(
                 &sub_par_path,
                 &df,
                 row_group_size,
+                codec.clone(),
             )?;
             if rechunk {
                 let tmp_path = table_path.join("tmp");

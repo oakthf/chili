@@ -141,6 +141,29 @@ pub(crate) fn write_parquet_to_filepath(filepath: &str, df: &DataFrame) -> Spicy
     write_parquet_to_filepath_with_row_group_size(filepath, df, None)
 }
 
+// FR-C (v1-63) — map a string codec name to a `ParquetCompression`. The
+// TorQ analog is `compressionconfig.csv`'s per-table codec column. `None`
+// (default) keeps the polars default (zstd), preserving the prior behaviour.
+// Returns `Err` on an unknown codec so a typo in a config surfaces loudly
+// rather than silently falling back to zstd.
+pub(crate) fn parse_parquet_compression(name: Option<&str>) -> SpicyResult<ParquetCompression> {
+    match name {
+        None => Ok(ParquetCompression::default()),
+        Some(s) => match s.to_ascii_lowercase().as_str() {
+            "zstd" => Ok(ParquetCompression::default()),
+            "snappy" => Ok(ParquetCompression::Snappy),
+            "gzip" => Ok(ParquetCompression::Gzip(None)),
+            "lz4" => Ok(ParquetCompression::Lz4Raw),
+            "uncompressed" | "none" => Ok(ParquetCompression::Uncompressed),
+            other => Err(SpicyError::Err(format!(
+                "Unknown parquet compression codec '{}' \
+                 (valid: zstd, snappy, gzip, lz4, uncompressed)",
+                other
+            ))),
+        },
+    }
+}
+
 // Variant of `write_parquet_to_filepath` that lets the caller pin a
 // `row_group_size`. — when a partition is written sorted by symbol, a smaller row group size lets
 // polars later prune row groups via parquet column statistics during
@@ -150,6 +173,18 @@ pub(crate) fn write_parquet_to_filepath_with_row_group_size(
     filepath: &str,
     df: &DataFrame,
     row_group_size: Option<usize>,
+) -> SpicyResult<u64> {
+    write_parquet_to_filepath_full(filepath, df, row_group_size, ParquetCompression::default())
+}
+
+// FR-C (v1-63) — full-knob variant: caller pins both row-group size AND the
+// parquet codec. The two existing entry points delegate here so the codec
+// default (zstd) is unchanged for every legacy caller.
+pub(crate) fn write_parquet_to_filepath_full(
+    filepath: &str,
+    df: &DataFrame,
+    row_group_size: Option<usize>,
+    compression: ParquetCompression,
 ) -> SpicyResult<u64> {
     let mut file = match File::create(filepath) {
         Ok(f) => f,
@@ -161,7 +196,7 @@ pub(crate) fn write_parquet_to_filepath_with_row_group_size(
         }
     };
 
-    let mut writer = ParquetWriter::new(&mut file).with_compression(ParquetCompression::default());
+    let mut writer = ParquetWriter::new(&mut file).with_compression(compression);
     if let Some(rgs) = row_group_size {
         writer = writer.with_row_group_size(Some(rgs));
     }
