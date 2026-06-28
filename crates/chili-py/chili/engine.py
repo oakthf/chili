@@ -337,6 +337,8 @@ class ChiliEngine:
         sort_columns: Optional[list[str]] = None,
         rechunk: bool = False,
         overwrite: bool = False,
+        atomic: bool = False,
+        compression: Optional[str] = None,
     ) -> int:
         """Write a DataFrame as a date-partitioned Parquet table.
 
@@ -349,14 +351,24 @@ class ChiliEngine:
             sort_columns: Optional columns to sort by before writing.
             rechunk: Re-chunk the data into a single contiguous allocation.
             overwrite: If ``True``, overwrite an existing partition.
+            atomic: **FR-A (v1-63).** If ``True`` AND ``overwrite`` is set,
+                the new single shard is written to a temp file then
+                ``fs::rename``d into ``<date>_0000`` (atomic on the same
+                filesystem), and the old shards are dropped only AFTER the
+                new one is in place. A concurrent reader therefore never sees
+                an empty/torn partition. **Single-shard ONLY** — the overwrite
+                path always emits one ``_0000`` (the repair-runner case); this
+                does NOT provide multi-shard atomicity. Default ``False`` keeps
+                the legacy in-place delete-then-write behaviour.
+            compression: **FR-C (v1-63).** Optional per-call parquet codec
+                override — one of ``"zstd"``/``"snappy"``/``"gzip"``/``"lz4"``/
+                ``"uncompressed"``. ``None`` (default) keeps the polars default
+                (**zstd**, verified 2026-06-27).
 
         Note:
-            The Parquet codec is the polars default (**zstd**, verified
-            2026-06-27 — NOT snappy as an earlier docstring claimed) and the
-            row-group size is auto-sized (clamped when ``sort_columns`` is set,
-            else the polars default 262144). A per-table ``compression`` /
-            ``row_group_size`` override is a pending feature request (FR-4); the
-            two params were documented prematurely and never wired through.
+            The default Parquet codec is zstd and the row-group size is
+            auto-sized (clamped when ``sort_columns`` is set, else the polars
+            default 262144).
 
         Returns:
             The number of rows written.
@@ -383,6 +395,8 @@ class ChiliEngine:
                 sort_cols_arg,
                 rechunk,
                 overwrite,
+                atomic,
+                compression,
             ],
         )
 
@@ -478,6 +492,17 @@ class ChiliEngine:
 
         Includes lazy mode status, REPL language, partitioned DataFrame
         count, parse cache size, and partition paths.
+
+        **FR-B (v1-63)** adds introspection fields (the TorQ ``.Q.w``/``.z.W``
+        analog) for DQ/mon:
+
+        - ``process_memory_rss_bytes``: process RSS in bytes (``-1`` if
+          unavailable).
+        - ``queue_depth_total``: sum of all per-handle outbound queue depths.
+        - ``queue_depth_by_handle`` / ``handle_nums``: per-handle outbound
+          queue depth (the ``.z.W`` analog) and the matching handle numbers.
+        - ``handle_count``: number of active handles.
+        - ``vars_len`` / ``topic_count``: engine symbol-table width.
         """
         return self.engine.stats()
 
