@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.5] - 2026-07-10
+
+### Added
+
+- `set_eval_timeout_ms` and `eval_timeout_ms` on `EngineState` and Python `ChiliEngine` — optional wall-clock limit for inbound IPC eval; on timeout the client gets an error and the connection closes (`0` disables)
+- Integration test for IPC eval timeout (`eval_ipc_timeout_test.rs`)
+- `set_on_conn_open_hook`, `set_on_conn_close_hook`, and matching `get_` / `clear_` on `EngineState` and Python `ChiliEngine` — engine-wide `(user; handle)` hooks when inbound IPC conn handlers start and exit (errors logged and ignored; distinct from per-handle `.handle.onDisconnected`)
+- Integration test for conn lifecycle hooks (`conn_lifecycle_hook_test.rs`)
+- `replay` / `replay_chili_msgs_log` accepts whole-file gzip (`.seq.gz` or gzip magic); skip uses read-and-discard so non-seekable streams work
+
 ## [0.9.4] - 2026-06-29
 
 ### Added

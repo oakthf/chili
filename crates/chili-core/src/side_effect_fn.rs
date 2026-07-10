@@ -210,7 +210,7 @@ fn replay_q(state: &EngineState, _stack: &mut Stack, args: &[&SpicyObj]) -> Spic
     state.replay_q_msgs_log(file, start, end, &table_names, handle)
 }
 
-// replay9[file; start; end; table_names; eval]
+// replay[file; start; end; table_names; eval]
 fn replay_chili(
     state: &EngineState,
     _stack: &mut Stack,

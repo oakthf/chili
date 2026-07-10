@@ -400,11 +400,64 @@ impl PyEngineState {
         Ok(self.inner.get_post_eval_hook())
     }
 
+    /// Register an inbound IPC conn-open hook.
+    fn set_on_conn_open_hook(&self, name: &str) -> PyResult<()> {
+        self.check_fork()?;
+        self.inner.set_on_conn_open_hook(Some(name.to_string()));
+        Ok(())
+    }
+
+    /// Clear the inbound IPC conn-open hook.
+    fn clear_on_conn_open_hook(&self) -> PyResult<()> {
+        self.check_fork()?;
+        self.inner.set_on_conn_open_hook(None);
+        Ok(())
+    }
+
+    /// Return the registered conn-open hook name, if any.
+    fn get_on_conn_open_hook(&self) -> PyResult<Option<String>> {
+        self.check_fork()?;
+        Ok(self.inner.get_on_conn_open_hook())
+    }
+
+    /// Register an inbound IPC conn-close hook.
+    fn set_on_conn_close_hook(&self, name: &str) -> PyResult<()> {
+        self.check_fork()?;
+        self.inner.set_on_conn_close_hook(Some(name.to_string()));
+        Ok(())
+    }
+
+    /// Clear the inbound IPC conn-close hook.
+    fn clear_on_conn_close_hook(&self) -> PyResult<()> {
+        self.check_fork()?;
+        self.inner.set_on_conn_close_hook(None);
+        Ok(())
+    }
+
+    /// Return the registered conn-close hook name, if any.
+    fn get_on_conn_close_hook(&self) -> PyResult<Option<String>> {
+        self.check_fork()?;
+        Ok(self.inner.get_on_conn_close_hook())
+    }
+
     /// Set max outbound queue depth for Publishing subscribers (`0` = off).
     fn set_subscriber_queue_max(&self, n: i64) -> PyResult<()> {
         self.check_fork()?;
         self.inner.set_subscriber_queue_max(n);
         Ok(())
+    }
+
+    /// Set inbound IPC eval wall-clock timeout in milliseconds (`0` = off).
+    fn set_eval_timeout_ms(&self, ms: i64) -> PyResult<()> {
+        self.check_fork()?;
+        self.inner.set_eval_timeout_ms(ms);
+        Ok(())
+    }
+
+    /// Return the inbound IPC eval timeout in milliseconds (`0` = off).
+    fn eval_timeout_ms(&self) -> PyResult<i64> {
+        self.check_fork()?;
+        Ok(self.inner.eval_timeout_ms())
     }
 
     /// Return the registered pre-eval hook name, if any.

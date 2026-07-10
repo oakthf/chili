@@ -151,6 +151,38 @@ class ChiliEngine:
         """Return the registered post-eval hook name, or ``None``."""
         return self.engine.get_post_eval_hook()
 
+    def set_on_conn_open_hook(self, name: str) -> None:
+        """Register a conn-open hook on inbound IPC connections.
+
+        ``name(user; handle)`` runs when a conn handler starts (before the first
+        message). Hook errors are logged and ignored. Local ``eval`` is not gated.
+        """
+        return self.engine.set_on_conn_open_hook(name)
+
+    def clear_on_conn_open_hook(self) -> None:
+        """Clear any registered conn-open hook."""
+        return self.engine.clear_on_conn_open_hook()
+
+    def get_on_conn_open_hook(self) -> "str | None":
+        """Return the registered conn-open hook name, or ``None``."""
+        return self.engine.get_on_conn_open_hook()
+
+    def set_on_conn_close_hook(self, name: str) -> None:
+        """Register a conn-close hook on inbound IPC connections.
+
+        ``name(user; handle)`` runs when a conn handler exits (before
+        ``.handle.onDisconnected``). Hook errors are logged and ignored.
+        """
+        return self.engine.set_on_conn_close_hook(name)
+
+    def clear_on_conn_close_hook(self) -> None:
+        """Clear any registered conn-close hook."""
+        return self.engine.clear_on_conn_close_hook()
+
+    def get_on_conn_close_hook(self) -> "str | None":
+        """Return the registered conn-close hook name, or ``None``."""
+        return self.engine.get_on_conn_close_hook()
+
     def set_jobs_deactivate_on_error(self, enabled: bool) -> None:
         """Enable or disable deactivating scheduled jobs after a fire error.
 
@@ -499,6 +531,19 @@ class ChiliEngine:
         disconnects the subscriber. ``0`` (default) disables queue shedding.
         """
         self.engine.set_subscriber_queue_max(n)
+
+    def set_eval_timeout_ms(self, ms: int) -> None:
+        """Wall-clock limit for inbound IPC eval in milliseconds.
+
+        When ``ms > 0``, each IPC request runs on a worker thread; if it does
+        not finish in time the connection receives a timeout error and is
+        closed. ``0`` (default) disables the limit.
+        """
+        self.engine.set_eval_timeout_ms(ms)
+
+    def eval_timeout_ms(self) -> int:
+        """Return the inbound IPC eval timeout in milliseconds (``0`` = off)."""
+        return self.engine.eval_timeout_ms()
 
     def list_handle(self) -> pl.DataFrame:
         """Return a DataFrame listing all active handles."""

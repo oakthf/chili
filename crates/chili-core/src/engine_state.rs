@@ -169,11 +169,19 @@ pub struct EngineState {
     /// after inbound IPC evaluation for audit logging. Hook errors are logged
     /// and ignored. `None` skips the hook. Only IPC conn handlers consult this.
     post_eval_hook: RwLock<Option<String>>,
+    /// Optional name of a function `(user; handle)` fired when an inbound IPC
+    /// conn handler starts. Hook errors are logged and ignored.
+    on_conn_open_hook: RwLock<Option<String>>,
+    /// Optional name of a function `(user; handle)` fired when an inbound IPC
+    /// conn handler exits. Hook errors are logged and ignored.
+    on_conn_close_hook: RwLock<Option<String>>,
     /// When true, a scheduled job that errors on fire is deactivated instead of
     /// rescheduling. Default false preserves log-and-keep-firing behaviour.
     jobs_deactivate_on_error: RwLock<bool>,
     /// Max outbound frames queued per Publishing subscriber; `0` disables shedding.
     subscriber_queue_max: std::sync::atomic::AtomicI64,
+    /// Wall-clock limit for inbound IPC eval (`0` = disabled).
+    eval_timeout_ms: std::sync::atomic::AtomicI64,
 }
 
 impl Default for EngineState {
@@ -233,8 +241,11 @@ impl EngineState {
             memory_limit: 0.0,
             pre_eval_hook: RwLock::new(None),
             post_eval_hook: RwLock::new(None),
+            on_conn_open_hook: RwLock::new(None),
+            on_conn_close_hook: RwLock::new(None),
             jobs_deactivate_on_error: RwLock::new(false),
             subscriber_queue_max: std::sync::atomic::AtomicI64::new(0),
+            eval_timeout_ms: std::sync::atomic::AtomicI64::new(0),
         }
     }
 
@@ -363,6 +374,24 @@ impl EngineState {
         self.post_eval_hook.read().clone()
     }
 
+    /// Register or clear the inbound IPC conn-open hook name.
+    pub fn set_on_conn_open_hook(&self, name: Option<String>) {
+        *self.on_conn_open_hook.write() = name.filter(|n| !n.is_empty());
+    }
+
+    pub fn get_on_conn_open_hook(&self) -> Option<String> {
+        self.on_conn_open_hook.read().clone()
+    }
+
+    /// Register or clear the inbound IPC conn-close hook name.
+    pub fn set_on_conn_close_hook(&self, name: Option<String>) {
+        *self.on_conn_close_hook.write() = name.filter(|n| !n.is_empty());
+    }
+
+    pub fn get_on_conn_close_hook(&self) -> Option<String> {
+        self.on_conn_close_hook.read().clone()
+    }
+
     /// Fire the post-eval hook for audit logging; errors are logged and ignored.
     fn fire_post_eval_hook(
         &self,
@@ -395,6 +424,47 @@ impl EngineState {
         let args: Vec<&SpicyObj> = vec![&user_obj, &handle_obj, query, &result_obj, &error_obj];
         if let Err(e) = crate::eval::eval_call(self, stack, &f, &args, &None, src) {
             warn!("post-eval hook '{}' failed (ignored): {}", name, e);
+        }
+    }
+
+    /// Fire the conn-open hook when an inbound IPC reader starts.
+    pub fn fire_on_conn_open_hook(&self, user: &str, handle: i64) {
+        self.fire_conn_lifecycle_hook(&self.on_conn_open_hook, "conn-open", user, handle);
+    }
+
+    /// Fire the conn-close hook when an inbound IPC reader exits.
+    pub fn fire_on_conn_close_hook(&self, user: &str, handle: i64) {
+        self.fire_conn_lifecycle_hook(&self.on_conn_close_hook, "conn-close", user, handle);
+    }
+
+    fn fire_conn_lifecycle_hook(
+        &self,
+        hook_slot: &RwLock<Option<String>>,
+        label: &str,
+        user: &str,
+        handle: i64,
+    ) {
+        let hook = hook_slot.read().clone();
+        let Some(name) = hook else {
+            return;
+        };
+        let f = match self.get_var(&name) {
+            Ok(f) if matches!(f, SpicyObj::Fn(_)) => f,
+            Ok(_) => {
+                warn!("{} hook '{}' is not a function; skipping", label, name);
+                return;
+            }
+            Err(_) => {
+                warn!("{} hook '{}' is not defined; skipping", label, name);
+                return;
+            }
+        };
+        let user_obj = SpicyObj::Symbol(user.to_owned());
+        let handle_obj = SpicyObj::I64(handle);
+        let args: Vec<&SpicyObj> = vec![&user_obj, &handle_obj];
+        let mut stack = Stack::new(None, 0, handle, user);
+        if let Err(e) = crate::eval::eval_call(self, &mut stack, &f, &args, &None, "") {
+            warn!("{} hook '{}' failed (ignored): {}", label, name, e);
         }
     }
 
@@ -780,105 +850,131 @@ impl EngineState {
         {
             return Ok(SpicyObj::I64(0));
         }
+
+        // Gzip whole-file archives (`.seq.gz` or gzip magic `1f 8b`).
+        let mut magic = [0u8; 2];
+        file.read_exact(&mut magic)
+            .map_err(|e| SpicyError::Err(e.to_string()))?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|e| SpicyError::Err(e.to_string()))?;
+        let mut reader: Box<dyn Read> = if magic == [0x1f, 0x8b] {
+            Box::new(flate2::read::GzDecoder::new(file))
+        } else {
+            Box::new(file)
+        };
+
         let mut file_header = [0u8; 8];
-        file.read_exact(&mut file_header)
+        reader
+            .read_exact(&mut file_header)
             .map_err(|e| SpicyError::Err(e.to_string()))?;
         if file_header != [255, 0, 0, 0, 0, 0, 0, 0] {
-            Err(SpicyError::Err("not a sequence file".to_string()))
-        } else {
-            let mut header = [0u8; 16];
-            let mut read_msg_count = 0;
-            let mut i = 0;
-            let mut any = vec![];
+            return Err(SpicyError::Err("not a sequence file".to_string()));
+        }
 
-            let pb = ProgressBar::new(end as u64);
-            let style = ProgressStyle::with_template(
-                "[{elapsed_precise}] {spinner:.green} [{bar:100.cyan/blue}] {pos:>7}/{len:>7}",
-            )
-            .unwrap();
-            pb.set_style(style);
+        let mut header = [0u8; 16];
+        let mut read_msg_count = 0;
+        let mut i = 0;
+        let mut any = vec![];
 
-            while i < end {
-                let res = file.read_exact(&mut header);
-                if res.is_err() {
-                    break;
-                }
-                let size = u64::from_le_bytes(header[..8].try_into().unwrap());
-                if size == 0 {
-                    break;
-                }
-                let utc_time = u64::from_le_bytes(header[8..16].try_into().unwrap()) as i64;
-                if (start_time > 0 && utc_time < start_time) || i < start {
-                    if let Err(e) = file.seek(SeekFrom::Current(size as i64)) {
+        let pb = ProgressBar::new(end as u64);
+        let style = ProgressStyle::with_template(
+            "[{elapsed_precise}] {spinner:.green} [{bar:100.cyan/blue}] {pos:>7}/{len:>7}",
+        )
+        .unwrap();
+        pb.set_style(style);
+
+        while i < end {
+            let res = reader.read_exact(&mut header);
+            if res.is_err() {
+                break;
+            }
+            let size = u64::from_le_bytes(header[..8].try_into().unwrap());
+            if size == 0 {
+                break;
+            }
+            let utc_time = u64::from_le_bytes(header[8..16].try_into().unwrap()) as i64;
+            if (start_time > 0 && utc_time < start_time) || i < start {
+                // Read-and-discard so gzip streams (non-seekable) can skip.
+                let mut discard = reader.by_ref().take(size);
+                match std::io::copy(&mut discard, &mut std::io::sink()) {
+                    Ok(n) if n == size => {}
+                    Ok(_) => {
                         warn!(
-                            "torn skip-seek at index {}: {} — stopping replay at last good frame",
-                            i, e
-                        );
-                        break;
-                    }
-                    i += 1;
-                    pb.inc(1);
-                    continue;
-                }
-                read_msg_count += 1;
-                let mut buffer = vec![0u8; size as usize];
-                if let Err(e) = file.read_exact(&mut buffer) {
-                    warn!(
-                        "torn frame at index {}: {} — stopping replay at last good frame",
-                        i, e
-                    );
-                    break;
-                }
-                let list = match std::panic::catch_unwind(|| serde9::deserialize(&buffer, &mut 0)) {
-                    Ok(Ok(l)) => l,
-                    Ok(Err(e)) => {
-                        warn!(
-                            "corrupt frame at index {}: {} — stopping replay at last good frame",
-                            i, e
-                        );
-                        break;
-                    }
-                    Err(_) => {
-                        warn!(
-                            "corrupt frame at index {} caused panic — stopping replay at last good frame",
+                            "torn skip at index {} — stopping replay at last good frame",
                             i
                         );
                         break;
                     }
-                };
-                if eval {
-                    if table_names.is_empty()
-                        || table_names.contains(
-                            &list
-                                .as_vec()?
-                                .get(1)
-                                .unwrap_or(&SpicyObj::String("".to_string()))
-                                .str()?,
-                        )
-                    {
-                        let res = self.eval(&mut Stack::with_handle(handle), &list, "");
-                        if res.is_err() {
-                            let err = res.err().unwrap();
-                            error!(
-                                "failed to replay {} message, error: {}",
-                                read_msg_count, err
-                            );
-                            return Err(err);
-                        }
+                    Err(e) => {
+                        warn!(
+                            "torn skip at index {}: {} — stopping replay at last good frame",
+                            i, e
+                        );
+                        break;
                     }
-                } else {
-                    any.push(list);
                 }
                 i += 1;
                 pb.inc(1);
+                continue;
             }
-            pb.set_length(i as u64);
-            pb.finish();
+            read_msg_count += 1;
+            let mut buffer = vec![0u8; size as usize];
+            if let Err(e) = reader.read_exact(&mut buffer) {
+                warn!(
+                    "torn frame at index {}: {} — stopping replay at last good frame",
+                    i, e
+                );
+                break;
+            }
+            let list = match std::panic::catch_unwind(|| serde9::deserialize(&buffer, &mut 0)) {
+                Ok(Ok(l)) => l,
+                Ok(Err(e)) => {
+                    warn!(
+                        "corrupt frame at index {}: {} — stopping replay at last good frame",
+                        i, e
+                    );
+                    break;
+                }
+                Err(_) => {
+                    warn!(
+                        "corrupt frame at index {} caused panic — stopping replay at last good frame",
+                        i
+                    );
+                    break;
+                }
+            };
             if eval {
-                Ok(SpicyObj::I64(read_msg_count))
+                if table_names.is_empty()
+                    || table_names.contains(
+                        &list
+                            .as_vec()?
+                            .get(1)
+                            .unwrap_or(&SpicyObj::String("".to_string()))
+                            .str()?,
+                    )
+                {
+                    let res = self.eval(&mut Stack::with_handle(handle), &list, "");
+                    if res.is_err() {
+                        let err = res.err().unwrap();
+                        error!(
+                            "failed to replay {} message, error: {}",
+                            read_msg_count, err
+                        );
+                        return Err(err);
+                    }
+                }
             } else {
-                Ok(SpicyObj::MixedList(any))
+                any.push(list);
             }
+            i += 1;
+            pb.inc(1);
+        }
+        pb.set_length(i as u64);
+        pb.finish();
+        if eval {
+            Ok(SpicyObj::I64(read_msg_count))
+        } else {
+            Ok(SpicyObj::MixedList(any))
         }
     }
 
@@ -1094,6 +1190,17 @@ impl EngineState {
     pub fn set_subscriber_queue_max(&self, n: i64) {
         self.subscriber_queue_max
             .store(n, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Set inbound IPC eval wall-clock timeout in milliseconds (`0` = off).
+    pub fn set_eval_timeout_ms(&self, ms: i64) {
+        self.eval_timeout_ms
+            .store(ms.max(0), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn eval_timeout_ms(&self) -> i64 {
+        self.eval_timeout_ms
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn set_shutdown_handle(&self, h: &i64, s: std::net::TcpStream) {

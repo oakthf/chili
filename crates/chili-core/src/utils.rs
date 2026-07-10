@@ -3,11 +3,11 @@ use std::{
     io::{Read, Write},
     net::TcpStream,
     path::PathBuf,
-    sync::{Arc, LazyLock},
+    sync::{Arc, LazyLock, mpsc},
     time::Duration,
 };
 
-use crate::{errors::SpicyError, obj::SpicyObj};
+use crate::{errors::SpicyError, errors::SpicyResult, obj::SpicyObj};
 use log::{debug, error, info, warn};
 use polars::{
     frame::DataFrame,
@@ -521,6 +521,46 @@ pub fn coerce_extend_tz(target: &DataFrame, incoming: &DataFrame) -> DataFrame {
 
 static RE_STYLE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\x1B\[[0-9;]*m").unwrap());
 
+/// Result of an inbound IPC eval, including a wall-clock timeout (`0` = off).
+#[derive(Debug)]
+pub enum IpcEvalResult {
+    Finished(SpicyResult<SpicyObj>),
+    TimedOut,
+}
+
+/// Run `eval_with_pre_hook` on a worker thread when `eval_timeout_ms` is set.
+pub fn eval_ipc_with_timeout(
+    state: &Arc<EngineState>,
+    user: &str,
+    handle: i64,
+    query: &SpicyObj,
+    src: &str,
+) -> IpcEvalResult {
+    let timeout_ms = state.eval_timeout_ms();
+    if timeout_ms <= 0 {
+        let mut stack = Stack::new(None, 0, handle, user);
+        return IpcEvalResult::Finished(state.eval_with_pre_hook(&mut stack, query, src));
+    }
+
+    let (tx, rx) = mpsc::sync_channel(1);
+    let state = Arc::clone(state);
+    let query = query.clone();
+    let src = src.to_owned();
+    let user = user.to_owned();
+    std::thread::spawn(move || {
+        let mut stack = Stack::new(None, 0, handle, &user);
+        let _ = tx.send(state.eval_with_pre_hook(&mut stack, &query, &src));
+    });
+
+    match rx.recv_timeout(Duration::from_millis(timeout_ms as u64)) {
+        Ok(result) => IpcEvalResult::Finished(result),
+        Err(mpsc::RecvTimeoutError::Timeout) => IpcEvalResult::TimedOut,
+        Err(mpsc::RecvTimeoutError::Disconnected) => IpcEvalResult::Finished(Err(
+            SpicyError::EvalErr("eval worker exited before returning".into()),
+        )),
+    }
+}
+
 pub fn handle_q_conn(
     rw: &mut dyn ReadWrite,
     is_local: bool,
@@ -528,8 +568,8 @@ pub fn handle_q_conn(
     state: Arc<EngineState>,
     user: &str,
 ) {
+    state.fire_on_conn_open_hook(user, handle);
     let mut header = [0u8; 8];
-    let mut stack = Stack::new(None, 0, handle, user);
     loop {
         // little endian, msg type()
         if let Err(e) = rw.read_exact(&mut header) {
@@ -559,13 +599,30 @@ pub fn handle_q_conn(
         };
 
         debug!("evaluate q IPC message: {:?}", obj);
-        stack.clear_vars();
         let src_path = if state.is_repl_use_chili_syntax() {
             format!("ipc{}.chi", handle)
         } else {
             format!("ipc{}.pep", handle)
         };
-        let res = state.eval_with_pre_hook(&mut stack, &obj, &src_path);
+        let res = match eval_ipc_with_timeout(&state, user, handle, &obj, &src_path) {
+            IpcEvalResult::Finished(res) => res,
+            IpcEvalResult::TimedOut => {
+                let err = SpicyError::EvalErr(format!(
+                    "eval timed out after {}ms",
+                    state.eval_timeout_ms()
+                ));
+                if message_type == MessageType::Sync {
+                    let err_msg = RE_STYLE.replace_all(&err.to_string(), "").to_string();
+                    let err = serde6::serialize(&SpicyObj::Err(err_msg)).unwrap();
+                    let _ = rw.write_all(&[1, 2, 0, 0]);
+                    let _ = rw.write_all(&(err.len() as u32 + 8).to_le_bytes());
+                    let _ = rw.write_all(&err);
+                } else {
+                    error!("{}", err);
+                }
+                break;
+            }
+        };
         debug!("evaluated result: {:?}", res);
 
         if message_type == MessageType::Sync {
@@ -599,6 +656,11 @@ pub fn handle_q_conn(
         }
     }
 
+    finish_ipc_conn(&state, user, handle);
+}
+
+fn finish_ipc_conn(state: &EngineState, user: &str, handle: i64) {
+    state.fire_on_conn_close_hook(user, handle);
     let _ = state.disconnect_handle(&handle);
     if let Ok(callback) = state.get_callback(&handle)
         && !callback.is_empty()
@@ -635,8 +697,8 @@ pub fn handle_chili_conn(
     state: Arc<EngineState>,
     user: &str,
 ) {
+    state.fire_on_conn_open_hook(user, handle);
     let mut header = [0u8; 16];
-    let mut stack = Stack::new(None, 0, handle, user);
     loop {
         // little endian, msg type()
         if let Err(e) = rw.read_exact(&mut header) {
@@ -671,8 +733,23 @@ pub fn handle_chili_conn(
             format!("ipc{}.pep", handle)
         };
         debug!("eval chili IPC message: {:?}", any);
-        stack.clear_vars();
-        let res = state.eval_with_pre_hook(&mut stack, &any, &src_path);
+        let res = match eval_ipc_with_timeout(&state, user, handle, &any, &src_path) {
+            IpcEvalResult::Finished(res) => res,
+            IpcEvalResult::TimedOut => {
+                let err = SpicyError::EvalErr(format!(
+                    "eval timed out after {}ms",
+                    state.eval_timeout_ms()
+                ));
+                if message_type == MessageType::Sync {
+                    let err_msg = RE_STYLE.replace_all(&err.to_string(), "").to_string();
+                    let err = serde9::serialize_err(&err_msg);
+                    let _ = rw.write_all(&err);
+                } else {
+                    error!("{}", err);
+                }
+                break;
+            }
+        };
 
         if message_type == MessageType::Sync {
             match res {
@@ -697,33 +774,7 @@ pub fn handle_chili_conn(
         }
     }
 
-    let _ = state.disconnect_handle(&handle);
-    if let Ok(callback) = state.get_callback(&handle)
-        && !callback.is_empty()
-    {
-        info!("calling '{}' function for handle {}", &callback, handle);
-        let f = SpicyObj::MixedList(vec![
-            SpicyObj::Symbol(callback.clone()),
-            SpicyObj::I64(handle),
-        ]);
-        let mut res = state.eval(&mut Stack::default(), &f, "");
-        let mut retry = 1;
-        while res.is_err() {
-            let delay = 2_u64.pow(retry);
-            error!(
-                "failed to call '{}' function for handle {}, retrying in {} seconds\n{}",
-                &callback,
-                handle,
-                delay,
-                res.err().unwrap(),
-            );
-            std::thread::sleep(Duration::from_secs(delay));
-            res = state.eval(&mut Stack::default(), &f, "");
-            if retry < 6 {
-                retry += 1;
-            }
-        }
-    }
+    finish_ipc_conn(&state, user, handle);
 }
 
 pub fn convert_list_to_df(list: &[SpicyObj], df: &DataFrame) -> Result<DataFrame, SpicyError> {

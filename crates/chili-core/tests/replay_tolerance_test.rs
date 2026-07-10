@@ -242,9 +242,49 @@ fn replay_skip_path_seek_overshoot() {
             assert_eq!(
                 list.len(),
                 3,
-                "should replay the 3 valid messages, stopping at skip-path seek overshoot"
+                "should replay the 3 valid messages, stopping at skip-path overshoot"
             );
         }
         _ => panic!("expected MixedList, got {:?}", result),
+    }
+}
+
+#[test]
+fn replay_gzip_tplog() {
+    let dir = tempfile::tempdir().unwrap();
+    let plain = write_valid_tplog(&dir, "plain.seq", 5);
+    let gz_path = dir.path().join("plain.seq.gz");
+
+    {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        let plain_bytes = std::fs::read(&plain).unwrap();
+        let out = std::fs::File::create(&gz_path).unwrap();
+        let mut enc = GzEncoder::new(out, Compression::default());
+        enc.write_all(&plain_bytes).unwrap();
+        enc.finish().unwrap();
+    }
+
+    let engine = new_engine();
+    let path = gz_path.to_str().unwrap();
+    let result = engine
+        .replay_chili_msgs_log(path, 0, 5, 0, &vec![], false, 0)
+        .unwrap();
+    match result {
+        SpicyObj::MixedList(list) => {
+            assert_eq!(list.len(), 5, "should replay all 5 gzipped messages");
+        }
+        _ => panic!("expected MixedList, got {:?}", result),
+    }
+
+    // Skip path must also work on gzip (read-and-discard, not seek).
+    let skipped = engine
+        .replay_chili_msgs_log(path, 2, 5, 0, &vec![], false, 0)
+        .unwrap();
+    match skipped {
+        SpicyObj::MixedList(list) => {
+            assert_eq!(list.len(), 3, "should skip first 2 frames in gzip replay");
+        }
+        _ => panic!("expected MixedList, got {:?}", skipped),
     }
 }

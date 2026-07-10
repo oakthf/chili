@@ -28,6 +28,6 @@ pub use job::{Job, get_local_now_ns};
 pub use obj::SpicyObj;
 pub use parser::parse;
 pub use stack::Stack;
-pub use utils::{MessageType, read_chili_ipc_msg, read_q_msg, write_chili_ipc_msg};
+pub use utils::{IpcEvalResult, MessageType, eval_ipc_with_timeout, read_chili_ipc_msg, read_q_msg, write_chili_ipc_msg};
 pub mod constant;
 pub use arg_type::validate_args;
