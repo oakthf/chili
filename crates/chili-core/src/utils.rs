@@ -18,6 +18,9 @@ use regex::Regex;
 
 use crate::{ConnType, EngineState, Stack, engine_state::ReadWrite, serde6, serde9};
 
+const SEQ_MAGIC: [u8; 8] = [255, 0, 0, 0, 0, 0, 0, 0];
+const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
+
 /// A thin wrapper around [`std::fs::File`] that makes [`Write::flush`] call
 /// [`File::sync_data`] (`fdatasync`), so that an explicit `.flush()` guarantees
 /// data durability on disk.  Normal `write()` calls pass straight through
@@ -87,15 +90,31 @@ impl Read for SyncFile {
     }
 }
 
+/// True when the file starts with gzip magic (`1f 8b`). Rewinds to offset 0.
+pub fn file_starts_with_gzip(file: &mut std::fs::File) -> Result<bool, SpicyError> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    file.seek(SeekFrom::Start(0))
+        .map_err(|e| SpicyError::Err(e.to_string()))?;
+    let mut magic = [0u8; 2];
+    let is_gzip = match file.read_exact(&mut magic) {
+        Ok(()) => magic == GZIP_MAGIC,
+        Err(_) => false,
+    };
+    file.seek(SeekFrom::Start(0))
+        .map_err(|e| SpicyError::Err(e.to_string()))?;
+    Ok(is_gzip)
+}
+
 /// Detect the [`ConnType`] of an already-open file by inspecting its size
-/// and magic header bytes.
+/// and magic header bytes. Supports whole-file gzip sequence archives.
 ///
 /// - Empty file → `ConnType::New`
-/// - Non-empty with `[255, 0, 0, 0]` magic prefix → `ConnType::Sequence`
+/// - Non-empty with `[255, 0, 0, 0]` magic prefix (plain or inside gzip) → `ConnType::Sequence`
 /// - Anything else → `ConnType::File`
 ///
 /// The file cursor is left at the position right after the header read
-/// (byte 4 for `Sequence`/`File` with ≥ 8 bytes, unchanged for `New`).
+/// (byte 4 for plain `Sequence`/`File` with ≥ 8 bytes, unchanged for `New` or gzip).
 pub fn detect_conn_type(file: &mut std::fs::File) -> Result<ConnType, SpicyError> {
     use std::io::Read;
 
@@ -103,19 +122,184 @@ pub fn detect_conn_type(file: &mut std::fs::File) -> Result<ConnType, SpicyError
         .metadata()
         .map_err(|e| SpicyError::Err(e.to_string()))?;
     if metadata.len() == 0 {
-        Ok(ConnType::New)
-    } else if metadata.len() < 8 {
-        Ok(ConnType::File)
-    } else {
-        let mut header = [0u8; 4];
-        file.read_exact(&mut header)
-            .map_err(|e| SpicyError::Err(format!("failed to read header, error: {}", e)))?;
-        if [255, 0, 0, 0] == header {
-            Ok(ConnType::Sequence)
-        } else {
-            Ok(ConnType::File)
-        }
+        return Ok(ConnType::New);
     }
+    if file_starts_with_gzip(file)? {
+        use flate2::read::GzDecoder;
+        let probe = file
+            .try_clone()
+            .map_err(|e| SpicyError::Err(e.to_string()))?;
+        let mut decoder = GzDecoder::new(probe);
+        let mut header = [0u8; 8];
+        return match decoder.read_exact(&mut header) {
+            Ok(()) if header == SEQ_MAGIC => Ok(ConnType::Sequence),
+            Ok(()) => Ok(ConnType::File),
+            Err(_) => Ok(ConnType::File),
+        };
+    }
+    if metadata.len() < 8 {
+        return Ok(ConnType::File);
+    }
+    let mut header = [0u8; 4];
+    file.read_exact(&mut header)
+        .map_err(|e| SpicyError::Err(format!("failed to read header, error: {}", e)))?;
+    if [255, 0, 0, 0] == header {
+        Ok(ConnType::Sequence)
+    } else {
+        Ok(ConnType::File)
+    }
+}
+
+/// Walk sequence frames on any reader positioned after the 8-byte magic header.
+/// `total_size` is the on-disk byte length for plain files (`None` for gzip streams).
+fn count_seq_messages_on_reader(
+    reader: &mut dyn Read,
+    must_deserialize: bool,
+    strict: bool,
+    total_size: Option<u64>,
+) -> Result<(i64, u64), SpicyError> {
+    use std::io::ErrorKind;
+
+    let mut count: i64 = 0;
+    let mut valid_size: u64 = 8;
+    loop {
+        if let Some(total) = total_size
+            && valid_size >= total
+        {
+            break;
+        }
+        let mut header = [0u8; 16];
+        match reader.read_exact(&mut header) {
+            Ok(()) => {}
+            Err(e) if e.kind() == ErrorKind::UnexpectedEof && total_size.is_none() => break,
+            Err(_) if !strict => break,
+            Err(e) => {
+                return Err(SpicyError::Err(format!(
+                    "failed to read frame header at offset {}: {}",
+                    valid_size, e
+                )));
+            }
+        }
+        let msg_size = u64::from_le_bytes(header[..8].try_into().unwrap());
+        if msg_size == 0 {
+            if strict {
+                return Err(SpicyError::Err(format!(
+                    "zero-length frame at offset {}",
+                    valid_size
+                )));
+            }
+            break;
+        }
+        if must_deserialize {
+            let mut buffer = vec![0u8; msg_size as usize];
+            if let Err(e) = reader.read_exact(&mut buffer) {
+                if strict {
+                    return Err(SpicyError::Err(format!(
+                        "truncated frame payload at offset {} (expected {} bytes): {}",
+                        valid_size, msg_size, e
+                    )));
+                }
+                break;
+            }
+            if let Err(e) = crate::serde9::deserialize(&buffer, &mut 0) {
+                if strict {
+                    return Err(SpicyError::Err(format!(
+                        "corrupt frame at offset {} (message #{}): {}",
+                        valid_size, count, e
+                    )));
+                }
+                break;
+            }
+        } else {
+            let mut discard = reader.take(msg_size);
+            match std::io::copy(&mut discard, &mut std::io::sink()) {
+                Ok(n) if n == msg_size => {}
+                Ok(n) if strict => {
+                    return Err(SpicyError::Err(format!(
+                        "truncated frame payload at offset {} (expected {} bytes, got {})",
+                        valid_size, msg_size, n
+                    )));
+                }
+                Ok(_) => break,
+                Err(e) if strict => {
+                    return Err(SpicyError::Err(format!(
+                        "failed to read past frame at offset {}: {}",
+                        valid_size, e
+                    )));
+                }
+                Err(_) => break,
+            }
+        }
+        count += 1;
+        valid_size += msg_size + 16;
+    }
+    Ok((count, valid_size))
+}
+
+/// Open a decompressed sequence reader after the 8-byte magic header.
+fn open_sequence_payload_reader(
+    file: std::fs::File,
+    gzip: bool,
+) -> Result<Box<dyn Read>, SpicyError> {
+    use std::io::Read;
+
+    let mut reader: Box<dyn Read> = if gzip {
+        Box::new(flate2::read::GzDecoder::new(file))
+    } else {
+        Box::new(file)
+    };
+    let mut magic = [0u8; 8];
+    reader
+        .read_exact(&mut magic)
+        .map_err(|e| SpicyError::Err(format!("failed to read sequence header: {}", e)))?;
+    if magic != SEQ_MAGIC {
+        return Err(SpicyError::Err("not a sequence file".to_string()));
+    }
+    Ok(reader)
+}
+
+/// Count valid messages in a plain or gzip whole-file sequence archive.
+pub fn count_sequence_file_messages(
+    path: &str,
+    must_deserialize: bool,
+    strict: bool,
+) -> Result<(i64, u64, bool), SpicyError> {
+    use std::fs;
+    use std::io::{Seek, SeekFrom};
+
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .open(path)
+        .map_err(|e| SpicyError::Err(format!("failed to open file '{}': {}", path, e)))?;
+    if file
+        .metadata()
+        .map_err(|e| SpicyError::Err(e.to_string()))?
+        .len()
+        == 0
+    {
+        return Ok((0, 0, false));
+    }
+    let gzip = file_starts_with_gzip(&mut file)?;
+    let count_file = file
+        .try_clone()
+        .map_err(|e| SpicyError::Err(e.to_string()))?;
+    let mut reader = open_sequence_payload_reader(count_file, gzip)?;
+    let total_size = if gzip {
+        None
+    } else {
+        Some(
+            file.metadata()
+                .map_err(|e| SpicyError::Err(e.to_string()))?
+                .len(),
+        )
+    };
+    let (count, valid_size) =
+        count_seq_messages_on_reader(&mut reader, must_deserialize, strict, total_size)?;
+    if !gzip {
+        file.seek(SeekFrom::Start(0))
+            .map_err(|e| SpicyError::Err(e.to_string()))?;
+    }
+    Ok((count, valid_size, gzip))
 }
 
 /// Walk the frames of a sequence file and count valid messages.
@@ -125,7 +309,7 @@ pub fn detect_conn_type(file: &mut std::fs::File) -> Result<ConnType, SpicyError
 ///
 /// When `must_deserialize` is `true`, every payload is decoded with
 /// `serde9::deserialize`; a decode failure stops the walk (the frame is
-/// considered torn/corrupt). When `false`, payloads are skipped via seek.
+/// considered torn/corrupt). When `false`, payloads are skipped via read.
 ///
 /// Returns `(message_count, valid_byte_size)` where `valid_byte_size`
 /// includes the 8-byte magic header and all complete frames.
@@ -133,47 +317,11 @@ pub fn count_seq_messages(
     file: &mut std::fs::File,
     must_deserialize: bool,
 ) -> Result<(i64, u64), SpicyError> {
-    use std::io::{Read, Seek};
-
     let total_size = file
         .metadata()
         .map_err(|e| SpicyError::Err(e.to_string()))?
         .len();
-    let mut count: i64 = 0;
-    let mut valid_size: u64 = 8; // 8-byte magic header already consumed
-    while valid_size < total_size {
-        let mut header = [0u8; 16];
-        if file.read_exact(&mut header).is_err() {
-            break;
-        }
-        let msg_size = u64::from_le_bytes(header[..8].try_into().unwrap());
-        if msg_size == 0 {
-            break;
-        }
-        if must_deserialize {
-            let mut buffer = vec![0u8; msg_size as usize];
-            if file.read_exact(&mut buffer).is_err() {
-                break;
-            }
-            if crate::serde9::deserialize(&buffer, &mut 0).is_err() {
-                break;
-            }
-            // Defense-in-depth: if deserialize ever panics (e.g. on a torn/truncated
-            // frame), catch it here so the walk stops at the last good frame instead
-            // of killing the thread. The primary fix is in serde9::deserialize itself
-            // (returns Err, never panics), but this guard matches the pattern in
-            // replay_chili_msgs_log for robustness.
-            // Note: the Err-based check above handles the normal case; this comment
-            // documents the rationale for why catch_unwind is NOT needed here after
-            // the serde9 bounds-checking fix. If a future regression reintroduces
-            // panics, add catch_unwind back.
-        } else if file.seek_relative(msg_size as i64).is_err() {
-            break;
-        }
-        count += 1;
-        valid_size += msg_size + 16;
-    }
-    Ok((count, valid_size))
+    count_seq_messages_on_reader(file, must_deserialize, false, Some(total_size))
 }
 
 /// Strict variant of [`count_seq_messages`]: returns `Err` on any corrupt or
@@ -183,55 +331,11 @@ pub fn count_seq_messages_strict(
     file: &mut std::fs::File,
     must_deserialize: bool,
 ) -> Result<(i64, u64), SpicyError> {
-    use std::io::{Read, Seek};
-
     let total_size = file
         .metadata()
         .map_err(|e| SpicyError::Err(e.to_string()))?
         .len();
-    let mut count: i64 = 0;
-    let mut valid_size: u64 = 8; // 8-byte magic header already consumed
-    while valid_size < total_size {
-        let mut header = [0u8; 16];
-        file.read_exact(&mut header).map_err(|e| {
-            SpicyError::Err(format!(
-                "failed to read frame header at offset {}: {}",
-                valid_size, e
-            ))
-        })?;
-        let msg_size = u64::from_le_bytes(header[..8].try_into().unwrap());
-        if msg_size == 0 {
-            return Err(SpicyError::Err(format!(
-                "zero-length frame at offset {}",
-                valid_size
-            )));
-        }
-        if must_deserialize {
-            let mut buffer = vec![0u8; msg_size as usize];
-            file.read_exact(&mut buffer).map_err(|e| {
-                SpicyError::Err(format!(
-                    "truncated frame payload at offset {} (expected {} bytes): {}",
-                    valid_size, msg_size, e
-                ))
-            })?;
-            crate::serde9::deserialize(&buffer, &mut 0).map_err(|e| {
-                SpicyError::Err(format!(
-                    "corrupt frame at offset {} (message #{}): {}",
-                    valid_size, count, e
-                ))
-            })?;
-        } else {
-            file.seek_relative(msg_size as i64).map_err(|e| {
-                SpicyError::Err(format!(
-                    "failed to seek past frame at offset {}: {}",
-                    valid_size, e
-                ))
-            })?;
-        }
-        count += 1;
-        valid_size += msg_size + 16;
-    }
-    Ok((count, valid_size))
+    count_seq_messages_on_reader(file, must_deserialize, true, Some(total_size))
 }
 
 /// Open a `file://` path for writing: open (read+write+create, no truncate),
@@ -254,6 +358,32 @@ pub fn prepare_file_writer(path: &str) -> Result<(Box<dyn ReadWrite>, ConnType, 
         .truncate(false)
         .open(path)
         .map_err(|e| SpicyError::Err(e.to_string()))?;
+    if file
+        .metadata()
+        .map_err(|e| SpicyError::Err(e.to_string()))?
+        .len()
+        == 0
+    {
+        let rw: Box<dyn ReadWrite> = Box::new(SyncFile {
+            file,
+            path: PathBuf::from(path),
+        });
+        return Ok((rw, ConnType::New, 0));
+    }
+
+    if file_starts_with_gzip(&mut file)? {
+        let (count, _, _) = count_sequence_file_messages(path, false, false)?;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .open(path)
+            .map_err(|e| SpicyError::Err(e.to_string()))?;
+        let rw: Box<dyn ReadWrite> = Box::new(SyncFile {
+            file,
+            path: PathBuf::from(path),
+        });
+        return Ok((rw, ConnType::Sequence, count));
+    }
+
     let conn_type = detect_conn_type(&mut file)?;
     let msg_count = if conn_type == ConnType::Sequence {
         // detect_conn_type read 4 bytes; skip the remaining 4 of the 8-byte magic header

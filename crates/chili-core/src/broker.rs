@@ -95,43 +95,41 @@ fn validate_seq(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
         .open(path)
         .map_err(|e| SpicyError::Err(format!("failed to open file '{}': {}", path, e)))?;
 
+    if file
+        .metadata()
+        .map_err(|e| SpicyError::Err(e.to_string()))?
+        .len()
+        == 0
+    {
+        return Ok(SpicyObj::I64(0));
+    }
+
+    if utils::file_starts_with_gzip(&mut file)? {
+        let (count, _, _) = utils::count_sequence_file_messages(path, must_deserialize, false)?;
+        return Ok(SpicyObj::I64(count));
+    }
+
     let conn_type = utils::detect_conn_type(&mut file)?;
     match conn_type {
-        ConnType::New => return Ok(SpicyObj::I64(0)),
+        ConnType::New => Ok(SpicyObj::I64(0)),
         ConnType::Sequence => {
-            // detect_conn_type read 4 bytes; skip the remaining 4 of the 8-byte magic header
             let mut pad = [0u8; 4];
             file.read_exact(&mut pad)
                 .map_err(|e| SpicyError::Err(format!("failed to read header '{}': {}", path, e)))?;
+            let (count, valid_size) = utils::count_seq_messages(&mut file, must_deserialize)?;
+            file.set_len(valid_size)
+                .map_err(|e| SpicyError::Err(format!("failed to set valid size '{}': {}", path, e)))?;
+            Ok(SpicyObj::I64(count))
         }
-        _ => return Err(SpicyError::Err(format!("not a sequence file '{}'", path))),
+        _ => Err(SpicyError::Err(format!("not a sequence file '{}'", path))),
     }
-    let (count, valid_size) = utils::count_seq_messages(&mut file, must_deserialize)?;
-    file.set_len(valid_size)
-        .map_err(|e| SpicyError::Err(format!("failed to set valid size '{}': {}", path, e)))?;
-    Ok(SpicyObj::I64(count))
 }
 
 fn validate_seq_strict(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
     validate_args(args, &[ArgType::StrOrSym, ArgType::Boolean])?;
     let path = args[0].str().unwrap();
     let must_deserialize = args[1].to_bool().unwrap();
-    let mut file = fs::OpenOptions::new()
-        .read(true)
-        .open(path)
-        .map_err(|e| SpicyError::Err(format!("failed to open file '{}': {}", path, e)))?;
-
-    let conn_type = utils::detect_conn_type(&mut file)?;
-    match conn_type {
-        ConnType::New => return Ok(SpicyObj::I64(0)),
-        ConnType::Sequence => {
-            let mut pad = [0u8; 4];
-            file.read_exact(&mut pad)
-                .map_err(|e| SpicyError::Err(format!("failed to read header '{}': {}", path, e)))?;
-        }
-        _ => return Err(SpicyError::Err(format!("not a sequence file '{}'", path))),
-    }
-    let (count, _) = utils::count_seq_messages_strict(&mut file, must_deserialize)?;
+    let (count, _, _) = utils::count_sequence_file_messages(path, must_deserialize, true)?;
     Ok(SpicyObj::I64(count))
 }
 

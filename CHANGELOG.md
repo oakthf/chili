@@ -12,6 +12,7 @@ All notable changes to this project will be documented in this file.
 
 - `shutdown()` now stops the TCP listener and force-closes all IPC connections; previously it only cleared the handle map, leaving the listen socket in `LISTEN` and still accepting/serving traffic (port stayed unusable for re-bind in-process)
 - eval timeout now shuts down the inbound TCP connection when the handler exits; previously the socket stayed `ESTABLISHED` and the client's next `sync` on that handle blocked forever
+- `.broker.validateSeq` / `.broker.validateSeqStrict` and `file://` handle open now accept whole-file gzip sequence logs (`.seq.gz` or gzip magic), so `init_tick` recovery works on compressed tplogs without gunzip-to-temp
 
 ## [0.9.5] - 2026-07-10
 
