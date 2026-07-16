@@ -285,7 +285,11 @@ class ChiliEngine:
         return self.engine.get_source(index)
 
     def shutdown(self):
-        """Shut down the engine and release all IPC handles."""
+        """Stop the TCP listener (if any) and force-close all IPC handles.
+
+        After this returns the listen port is free to re-bind and the engine
+        no longer accepts or serves connections. Idempotent.
+        """
         self.engine.shutdown()
 
     def get_displayed_vars(self) -> dict[str, Any]:
@@ -522,6 +526,14 @@ class ChiliEngine:
             ChiliError: If bind fails.
         """
         self.engine.start_tcp_listener(port, remote, users or [])
+
+    def stop_tcp_listener(self) -> None:
+        """Stop the TCP accept loop and release the listen port.
+
+        Idempotent. Existing connections are left open; use :meth:`shutdown`
+        to force-close them as well.
+        """
+        self.engine.stop_tcp_listener()
 
     def set_subscriber_queue_max(self, n: int) -> None:
         """Shed a subscriber whose outbound write queue exceeds ``n`` frames.

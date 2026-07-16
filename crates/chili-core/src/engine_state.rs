@@ -182,6 +182,10 @@ pub struct EngineState {
     subscriber_queue_max: std::sync::atomic::AtomicI64,
     /// Wall-clock limit for inbound IPC eval (`0` = disabled).
     eval_timeout_ms: std::sync::atomic::AtomicI64,
+    /// Listening socket retained so `stop_tcp_listener` / `shutdown` can close it.
+    tcp_listener: Mutex<Option<TcpListener>>,
+    /// Accept loop checks this and exits when true.
+    listener_stopping: std::sync::atomic::AtomicBool,
 }
 
 impl Default for EngineState {
@@ -246,6 +250,8 @@ impl EngineState {
             jobs_deactivate_on_error: RwLock::new(false),
             subscriber_queue_max: std::sync::atomic::AtomicI64::new(0),
             eval_timeout_ms: std::sync::atomic::AtomicI64::new(0),
+            tcp_listener: Mutex::new(None),
+            listener_stopping: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -308,8 +314,42 @@ impl EngineState {
         Ok(())
     }
 
+    /// Stop the TCP listener (if any) and force-close all IPC handles.
+    ///
+    /// After this returns the listen port is released and the engine no longer
+    /// accepts or serves connections. Idempotent.
     pub fn shutdown(&self) {
-        self.handle.write().clear();
+        self.stop_tcp_listener();
+        self.disconnect_all_handles();
+    }
+
+    /// Close the TCP listener and stop the accept loop. Idempotent.
+    ///
+    /// Does not clear engine vars or tear down non-listener state. Existing
+    /// connections are left alone — use [`shutdown`] to drop those too.
+    pub fn stop_tcp_listener(&self) {
+        self.listener_stopping
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = self.tcp_listener.lock().take();
+    }
+
+    /// Force-close every handle (shutdown streams, clear the map). Idempotent.
+    pub fn disconnect_all_handles(&self) {
+        let mut handles = self.handle.write();
+        for (_, hd) in handles.iter_mut() {
+            hd.conn_type = ConnType::Disconnected;
+            if let Some(s) = hd.shutdown_handle.as_ref() {
+                let _ = s.shutdown(std::net::Shutdown::Both);
+            }
+            if let Some(q) = hd.queued.as_ref() {
+                q.disconnected
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            hd.rw = None;
+            hd.shutdown_handle = None;
+            hd.queued = None;
+        }
+        handles.clear();
     }
 
     pub fn get_displayed_vars(&self) -> SpicyResult<HashMap<String, String>> {
@@ -3045,20 +3085,70 @@ impl EngineState {
                 std::process::exit(1)
             }
         };
-        self.run_accept_loop(listener, users);
+        if let Err(e) = self.install_tcp_listener(listener, users) {
+            eprintln!("{} - {}", e, port);
+            std::process::exit(1)
+        }
     }
 
-    /// Accept incoming connections on `listener` until the process exits.
+    /// Store `listener` and spawn the accept loop on a clone. Resets the stop flag.
+    pub fn install_tcp_listener(
+        self: &Arc<Self>,
+        listener: TcpListener,
+        users: Vec<String>,
+    ) -> SpicyResult<()> {
+        let accept_listener = listener.try_clone().map_err(|e| {
+            SpicyError::OsErr(format!("tcp listener try_clone failed - {}", e))
+        })?;
+        self.listener_stopping
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        *self.tcp_listener.lock() = Some(listener);
+        let state = Arc::clone(self);
+        thread::spawn(move || {
+            state.run_accept_loop(accept_listener, users);
+        });
+        Ok(())
+    }
+
+    /// Accept incoming connections until [`stop_tcp_listener`] / [`shutdown`].
     pub fn run_accept_loop(self: &Arc<Self>, listener: TcpListener, users: Vec<String>) {
-        for stream in listener.incoming() {
-            let state_tcp = Arc::clone(self);
-            let mut stream = match stream {
-                Ok(s) => s,
+        if let Err(e) = listener.set_nonblocking(true) {
+            error!("tcp listener set_nonblocking failed: {}", e);
+            return;
+        }
+        loop {
+            if self
+                .listener_stopping
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                info!("tcp listener stopped");
+                break;
+            }
+            let mut stream = match listener.accept() {
+                Ok((s, _)) => s,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(20));
+                    continue;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(e) => {
+                    if self
+                        .listener_stopping
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                    {
+                        break;
+                    }
                     info!("accept failed, skipping: {}", e);
+                    thread::sleep(Duration::from_millis(20));
                     continue;
                 }
             };
+            if let Err(e) = stream.set_nonblocking(false) {
+                info!("set_nonblocking(false) failed, dropping connection: {}", e);
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+                continue;
+            }
+            let state_tcp = Arc::clone(self);
             let auth_info = state_tcp.validate_auth_token(&mut stream, &users);
             if !auth_info.is_authenticated {
                 info!(
@@ -3102,10 +3192,6 @@ impl EngineState {
             let ipc_type = match IpcType::from_u8(auth_info.version) {
                 Some(t) => t,
                 None => {
-                    // Defensive — validate_auth_token already gates `version < 3`,
-                    // so reaching here means the caller passed a value outside
-                    // the IpcType enum range. Log and drop rather than abort
-                    // the listener (Sprint 22 MC-1).
                     info!(
                         "unsupported ipc version {}, dropping connection from {}",
                         auth_info.version, peer_addr
@@ -3122,14 +3208,8 @@ impl EngineState {
                     continue;
                 }
             };
-            let subscriber_queue_max = state_tcp
-                .subscriber_queue_max
-                .load(std::sync::atomic::Ordering::Relaxed);
-            let shutdown_dup = if subscriber_queue_max > 0 {
-                stream.try_clone().ok()
-            } else {
-                None
-            };
+            // Always keep a dup for force-close on shutdown / stop.
+            let shutdown_dup = stream.try_clone().ok();
             let h = match state_tcp.set_handle(
                 Some(Box::new(cloned_stream)),
                 &peer_addr,
@@ -3149,9 +3229,6 @@ impl EngineState {
             let h_i64 = match h.to_i64() {
                 Ok(i) => i,
                 Err(e) => {
-                    // set_handle returns a SpicyObj::I64 by contract; if this
-                    // ever fails it's a logic bug, not a network error. Log
-                    // and drop the connection rather than panicking the listener.
                     info!("handle slot returned non-i64 (logic bug): {}", e);
                     let _ = stream.shutdown(std::net::Shutdown::Both);
                     continue;

@@ -52,3 +52,74 @@ def test_so_reuseaddr_rebind_after_close():
     p2 = _free_port()
     probe.bind(("127.0.0.1", p2))
     probe.close()
+
+
+def _port_bound(port: int) -> bool:
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        s.bind(("127.0.0.1", port))
+        return False
+    except OSError:
+        return True
+    finally:
+        s.close()
+
+
+def test_shutdown_releases_listen_port():
+    """shutdown() must free the port so a new engine can re-bind."""
+    import time
+
+    port = _free_port()
+    e = ChiliEngine(pepper=True)
+    e.start_tcp_listener(port)
+    time.sleep(0.1)
+    assert _port_bound(port)
+
+    e.shutdown()
+    # Accept loop polls every ~20ms; give it a moment to exit and drop its fd.
+    deadline = time.time() + 2.0
+    while time.time() < deadline and _port_bound(port):
+        time.sleep(0.05)
+    assert not _port_bound(port), "port still bound after shutdown"
+
+    e2 = ChiliEngine(pepper=True)
+    e2.start_tcp_listener(port)
+    e2.shutdown()
+
+
+def test_stop_tcp_listener_releases_port_without_full_shutdown():
+    import time
+
+    port = _free_port()
+    e = ChiliEngine(pepper=True)
+    e.set_var("x", 42)
+    e.start_tcp_listener(port)
+    time.sleep(0.1)
+    e.stop_tcp_listener()
+    deadline = time.time() + 2.0
+    while time.time() < deadline and _port_bound(port):
+        time.sleep(0.05)
+    assert not _port_bound(port)
+    assert e.get_var("x") == 42
+    e.shutdown()
+
+
+def test_shutdown_stops_serving():
+    """After shutdown, the old listener must not accept/serve anymore."""
+    import time
+
+    port = _free_port()
+    e = ChiliEngine(pepper=True)
+    e.set_var("x", 42)
+    e.start_tcp_listener(port)
+    time.sleep(0.1)
+    e.shutdown()
+    deadline = time.time() + 2.0
+    while time.time() < deadline and _port_bound(port):
+        time.sleep(0.05)
+
+    c = ChiliEngine(pepper=True)
+    with pytest.raises(Exception):
+        c.open_handle(f"chili://127.0.0.1:{port}")
+    c.shutdown()

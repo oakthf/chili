@@ -18,11 +18,11 @@ fn install_lifecycle_hooks(state: &EngineState) {
             &mut s,
             &SpicyObj::String(
                 ".conn.open.hook: {[u; h]
-                    `open_user: u;
-                    `open_handle: h; };
+                    `open_user set u;
+                    `open_handle set h; };
                  .conn.close.hook: {[u; h]
-                    `close_user: u;
-                    `close_handle: h; };"
+                    `close_user set u;
+                    `close_handle set h; };"
                     .to_string(),
             ),
             "hooks.pep",
@@ -46,10 +46,7 @@ fn open_hook_records_user_and_handle() {
     let state = new_engine();
     install_lifecycle_hooks(&state);
     state.fire_on_conn_open_hook("alice", 42);
-    assert_eq!(
-        state.get_var("open_user").unwrap().str().unwrap(),
-        "alice"
-    );
+    assert_eq!(state.get_var("open_user").unwrap().str().unwrap(), "alice");
     assert_eq!(state.get_var("open_handle").unwrap().to_i64().unwrap(), 42);
 }
 

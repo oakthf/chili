@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.6] - 2026-07-16
+
+### Added
+
+- `stop_tcp_listener` on `EngineState` and Python `ChiliEngine` — stop the accept loop and release the listen port without tearing down the whole engine
+
+### Fixed
+
+- `shutdown()` now stops the TCP listener and force-closes all IPC connections; previously it only cleared the handle map, leaving the listen socket in `LISTEN` and still accepting/serving traffic (port stayed unusable for re-bind in-process)
+
 ## [0.9.5] - 2026-07-10
 
 ### Added

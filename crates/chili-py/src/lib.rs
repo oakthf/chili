@@ -542,7 +542,7 @@ impl PyEngineState {
         map_spicy_error(self.inner.get_source(index))
     }
 
-    /// Shut down the engine and release all IPC handles.
+    /// Shut down the engine: stop the TCP listener and force-close all handles.
     fn shutdown(&self) {
         // Don't error on shutdown in forked children; just attempt cleanup.
         self.inner.shutdown();
@@ -705,15 +705,20 @@ impl PyEngineState {
     /// Start a TCP listener on `port` in a background thread.
     ///
     /// Binds synchronously and raises on failure; the accept loop runs in the
-    /// background after a successful bind.
+    /// background after a successful bind. Call [`stop_tcp_listener`] or
+    /// [`shutdown`] to release the port.
     #[pyo3(signature = (port, remote=false, users=vec![]))]
     fn start_tcp_listener(&self, port: i32, remote: bool, users: Vec<String>) -> PyResult<()> {
         self.check_fork()?;
         let listener = map_spicy_error(EngineState::bind_tcp_listener(port, remote))?;
-        let state = Arc::clone(&self.inner);
-        std::thread::spawn(move || {
-            state.run_accept_loop(listener, users);
-        });
+        map_spicy_error(self.inner.install_tcp_listener(listener, users))?;
+        Ok(())
+    }
+
+    /// Stop the TCP accept loop and release the listen port. Idempotent.
+    fn stop_tcp_listener(&self) -> PyResult<()> {
+        self.check_fork()?;
+        self.inner.stop_tcp_listener();
         Ok(())
     }
 
