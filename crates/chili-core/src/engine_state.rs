@@ -337,14 +337,7 @@ impl EngineState {
     pub fn disconnect_all_handles(&self) {
         let mut handles = self.handle.write();
         for (_, hd) in handles.iter_mut() {
-            hd.conn_type = ConnType::Disconnected;
-            if let Some(s) = hd.shutdown_handle.as_ref() {
-                let _ = s.shutdown(std::net::Shutdown::Both);
-            }
-            if let Some(q) = hd.queued.as_ref() {
-                q.disconnected
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
-            }
+            Self::shutdown_handle_io(hd);
             hd.rw = None;
             hd.shutdown_handle = None;
             hd.queued = None;
@@ -1221,10 +1214,22 @@ impl EngineState {
     pub fn disconnect_handle(&self, handle_num: &i64) -> SpicyResult<SpicyObj> {
         let mut handle = self.handle.write();
         match handle.get_mut(handle_num) {
-            Some(h) => h.conn_type = ConnType::Disconnected,
+            Some(h) => Self::shutdown_handle_io(h),
             None => return Err(SpicyError::InvalidHandleErr(*handle_num)),
         }
         Ok(SpicyObj::Null)
+    }
+
+    /// Shut down a handle's socket and mark it disconnected. Idempotent.
+    fn shutdown_handle_io(h: &mut Handle) {
+        h.conn_type = ConnType::Disconnected;
+        if let Some(s) = h.shutdown_handle.as_ref() {
+            let _ = s.shutdown(std::net::Shutdown::Both);
+        }
+        if let Some(q) = h.queued.as_ref() {
+            q.disconnected
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     }
     /// Set max outbound queue depth for Publishing subscribers (`0` = off).
     pub fn set_subscriber_queue_max(&self, n: i64) {
@@ -1363,16 +1368,7 @@ impl EngineState {
 
     /// Mark a handle disconnected. Do not call while holding a per-handle `rw` mutex.
     fn mark_disconnected(&self, h: &i64) {
-        if let Some(hd) = self.handle.write().get_mut(h) {
-            hd.conn_type = ConnType::Disconnected;
-            if let Some(s) = hd.shutdown_handle.as_ref() {
-                let _ = s.shutdown(std::net::Shutdown::Both);
-            }
-            if let Some(q) = hd.queued.as_ref() {
-                q.disconnected
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
+        let _ = self.disconnect_handle(h);
     }
 
     /// Persist `conn_type` after I/O. Same lock rule as `mark_disconnected`.
