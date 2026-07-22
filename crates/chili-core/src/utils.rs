@@ -718,9 +718,11 @@ pub fn handle_q_conn(
         let obj = match crate::read_q_msg(rw, len - 8, header[2]) {
             Ok(obj) => obj,
             Err(e) => {
+                let msg = e.to_string();
+                state.fire_on_bad_msg_hook(handle, &msg, None);
                 if message_type == MessageType::Sync
                     && let Err(_) =
-                        rw.write_all(&serde6::serialize(&SpicyObj::Err(e.to_string())).unwrap())
+                        rw.write_all(&serde6::serialize(&SpicyObj::Err(msg)).unwrap())
                 {
                     break;
                 }
@@ -775,6 +777,7 @@ pub fn handle_q_conn(
                 },
                 Err(e) => {
                     let err_msg = RE_STYLE.replace_all(&e.to_string(), "").to_string();
+                    state.fire_on_bad_msg_hook(handle, &err_msg, None);
                     let err = serde6::serialize(&SpicyObj::Err(err_msg)).unwrap();
                     let _ = rw.write_all(&[1, 2, 0, 0]);
                     let _ = rw.write_all(&(err.len() as u32 + 8).to_le_bytes());
@@ -782,6 +785,8 @@ pub fn handle_q_conn(
                 }
             }
         } else if let Err(e) = res {
+            let msg = e.to_string();
+            state.fire_on_bad_msg_hook(handle, &msg, None);
             error!("{}", e);
         }
     }
@@ -846,10 +851,10 @@ pub fn handle_chili_conn(
         let any = match crate::read_chili_ipc_msg(rw, len) {
             Ok(obj) => obj,
             Err(e) => {
+                let msg = e.to_string();
+                state.fire_on_bad_msg_hook(handle, &msg, None);
                 if message_type == MessageType::Sync
-                    && rw
-                        .write_all(&serde9::serialize_err(&e.to_string()))
-                        .is_err()
+                    && rw.write_all(&serde9::serialize_err(&msg)).is_err()
                 {
                     break;
                 }
@@ -895,11 +900,14 @@ pub fn handle_chili_conn(
                 },
                 Err(e) => {
                     let err_msg = RE_STYLE.replace_all(&e.to_string(), "").to_string();
+                    state.fire_on_bad_msg_hook(handle, &err_msg, None);
                     let err = serde9::serialize_err(&err_msg);
                     let _ = rw.write_all(&err);
                 }
             }
         } else if let Err(e) = res {
+            let msg = e.to_string();
+            state.fire_on_bad_msg_hook(handle, &msg, None);
             error!("{}", e);
         }
     }

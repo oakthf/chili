@@ -173,7 +173,7 @@ fn replay_corrupt_frame_payload() {
             assert_eq!(
                 list.len(),
                 4,
-                "should replay exactly the 4 valid messages, stopping at corrupt frame"
+                "should replay the 4 valid messages, skipping the trailing corrupt frame"
             );
         }
         _ => panic!("expected MixedList, got {:?}", result),

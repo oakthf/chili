@@ -175,6 +175,12 @@ pub struct EngineState {
     /// Optional name of a function `(user; handle)` fired when an inbound IPC
     /// conn handler exits. Hook errors are logged and ignored.
     on_conn_close_hook: RwLock<Option<String>>,
+    /// Optional name of a function `(index; error; bytes)` fired when a tplog /
+    /// apply-path frame fails deserialize or apply. Hook errors are logged and
+    /// ignored. When set, replay continues past bad frames (TorQ `.u.badmsg`
+    /// style); when unset, corrupt deserialize still continues but apply
+    /// failures during eval-replay still return `Err`.
+    on_bad_msg_hook: RwLock<Option<String>>,
     /// When true, a scheduled job that errors on fire is deactivated instead of
     /// rescheduling. Default false preserves log-and-keep-firing behaviour.
     jobs_deactivate_on_error: RwLock<bool>,
@@ -247,6 +253,7 @@ impl EngineState {
             post_eval_hook: RwLock::new(None),
             on_conn_open_hook: RwLock::new(None),
             on_conn_close_hook: RwLock::new(None),
+            on_bad_msg_hook: RwLock::new(None),
             jobs_deactivate_on_error: RwLock::new(false),
             subscriber_queue_max: std::sync::atomic::AtomicI64::new(0),
             eval_timeout_ms: std::sync::atomic::AtomicI64::new(0),
@@ -425,6 +432,20 @@ impl EngineState {
         self.on_conn_close_hook.read().clone()
     }
 
+    /// Register or clear the bad-message hook name.
+    ///
+    /// Invoked as `name(index; error; bytes)` when a frame fails deserialize or
+    /// apply during tplog replay (and optionally on live IPC read errors).
+    /// `bytes` is a u8 series of the offending payload when available, else Null.
+    /// Hook errors are logged and ignored.
+    pub fn set_on_bad_msg_hook(&self, name: Option<String>) {
+        *self.on_bad_msg_hook.write() = name.filter(|n| !n.is_empty());
+    }
+
+    pub fn get_on_bad_msg_hook(&self) -> Option<String> {
+        self.on_bad_msg_hook.read().clone()
+    }
+
     /// Fire the post-eval hook for audit logging; errors are logged and ignored.
     fn fire_post_eval_hook(
         &self,
@@ -468,6 +489,38 @@ impl EngineState {
     /// Fire the conn-close hook when an inbound IPC reader exits.
     pub fn fire_on_conn_close_hook(&self, user: &str, handle: i64) {
         self.fire_conn_lifecycle_hook(&self.on_conn_close_hook, "conn-close", user, handle);
+    }
+
+    /// Fire the bad-message hook. Returns true if a hook was registered (caller
+    /// may treat this as "continue after apply failure").
+    pub fn fire_on_bad_msg_hook(&self, index: i64, error: &str, bytes: Option<&[u8]>) -> bool {
+        let hook = self.on_bad_msg_hook.read().clone();
+        let Some(name) = hook else {
+            return false;
+        };
+        let f = match self.get_var(&name) {
+            Ok(f) if matches!(f, SpicyObj::Fn(_)) => f,
+            Ok(_) => {
+                warn!("bad-msg hook '{}' is not a function; skipping", name);
+                return true;
+            }
+            Err(_) => {
+                warn!("bad-msg hook '{}' is not defined; skipping", name);
+                return true;
+            }
+        };
+        let index_obj = SpicyObj::I64(index);
+        let error_obj = SpicyObj::Symbol(error.to_owned());
+        let bytes_obj = match bytes {
+            Some(b) => SpicyObj::Series(Series::new("bytes".into(), b)),
+            None => SpicyObj::Null,
+        };
+        let args: Vec<&SpicyObj> = vec![&index_obj, &error_obj, &bytes_obj];
+        let mut stack = Stack::new(None, 0, 0, "");
+        if let Err(e) = crate::eval::eval_call(self, &mut stack, &f, &args, &None, "") {
+            warn!("bad-msg hook '{}' failed (ignored): {}", name, e);
+        }
+        true
     }
 
     fn fire_conn_lifecycle_hook(
@@ -962,18 +1015,26 @@ impl EngineState {
             let list = match std::panic::catch_unwind(|| serde9::deserialize(&buffer, &mut 0)) {
                 Ok(Ok(l)) => l,
                 Ok(Err(e)) => {
+                    let err = e.to_string();
                     warn!(
-                        "corrupt frame at index {}: {} — stopping replay at last good frame",
-                        i, e
+                        "corrupt frame at index {}: {} — skipping and continuing",
+                        i, err
                     );
-                    break;
+                    self.fire_on_bad_msg_hook(i, &err, Some(&buffer));
+                    i += 1;
+                    pb.inc(1);
+                    continue;
                 }
                 Err(_) => {
+                    let err = "deserialize panic".to_string();
                     warn!(
-                        "corrupt frame at index {} caused panic — stopping replay at last good frame",
+                        "corrupt frame at index {} caused panic — skipping and continuing",
                         i
                     );
-                    break;
+                    self.fire_on_bad_msg_hook(i, &err, Some(&buffer));
+                    i += 1;
+                    pb.inc(1);
+                    continue;
                 }
             };
             if eval {
@@ -987,12 +1048,19 @@ impl EngineState {
                     )
                 {
                     let res = self.eval(&mut Stack::with_handle(handle), &list, "");
-                    if res.is_err() {
-                        let err = res.err().unwrap();
+                    if let Err(err) = res {
+                        let msg = err.to_string();
                         error!(
                             "failed to replay {} message, error: {}",
-                            read_msg_count, err
+                            read_msg_count, msg
                         );
+                        // Continue when a bad-msg hook is registered (TorQ-style);
+                        // otherwise preserve prior halt-on-apply-error behaviour.
+                        if self.fire_on_bad_msg_hook(i, &msg, Some(&buffer)) {
+                            i += 1;
+                            pb.inc(1);
+                            continue;
+                        }
                         return Err(err);
                     }
                 }

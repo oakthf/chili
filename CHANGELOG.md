@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.7] - 2026-07-22
+
+### Added
+
+- `set_on_bad_msg_hook` / `get_on_bad_msg_hook` / `clear_on_bad_msg_hook` on `EngineState` and Python `ChiliEngine` — pepper `name(index; error; bytes)` fired when a tplog frame fails deserialize or apply. Replay continues past corrupt frames; with a hook registered, eval-replay apply failures also continue instead of halting
+- `.tick.createLog` discovers `<date>.gz` when the plain dated tplog path is missing (hk / log-rotation layout)
+
+### Fixed
+
+- `unify_series` only attempts atom-list unification when every element type code is in the atom range (`(-20, 0)`), so mixed lists containing non-atoms (e.g. functions at `-102`) are no longer mis-handled as uniform atom series
+
 ## [0.9.6] - 2026-07-16
 
 ### Added

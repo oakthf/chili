@@ -937,7 +937,7 @@ impl SpicyObj {
                 .filter(|args| !args.is_null())
                 .map(|args| args.get_type_code())
                 .collect();
-            if !codes.is_empty() {
+            if !codes.is_empty() && codes.iter().all(|&c| c < 0 && c > -20) {
                 let min_code = codes.iter().min().unwrap();
                 if *min_code < 0 && codes.iter().all(|c| c == min_code) {
                     if *min_code <= -13 {

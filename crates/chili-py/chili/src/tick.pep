@@ -2,6 +2,10 @@
 
 .tick.createLog: {[logDir; filename]
   .tick.msgLog: logDir + filename;
+  // Recovery: if the plain dated path is missing but <date>.gz exists
+  // (hk / log-rotation layout), use the gzip archive.
+  if[(not exists .tick.msgLog) & exists[.tick.msgLog + ".gz"];
+    .tick.msgLog: .tick.msgLog + ".gz"];
   .tick.logFile: "file://" + .tick.msgLog;
   // tick is using handle 0 for internal tick count
   tick[0; .broker.validateSeq[.tick.msgLog; 0b]];

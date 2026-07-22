@@ -183,6 +183,25 @@ class ChiliEngine:
         """Return the registered conn-close hook name, or ``None``."""
         return self.engine.get_on_conn_close_hook()
 
+    def set_on_bad_msg_hook(self, name: str) -> None:
+        """Register a bad-message hook for corrupt / apply-failed frames.
+
+        ``name(index; error; bytes)`` runs when a tplog frame fails deserialize
+        or apply during ``replay``, and on live IPC read/eval failures.
+        ``bytes`` is a u8 series of the offending payload when available, else
+        Null. Hook errors are logged and ignored. With a hook registered,
+        apply failures during eval-replay continue instead of halting.
+        """
+        return self.engine.set_on_bad_msg_hook(name)
+
+    def clear_on_bad_msg_hook(self) -> None:
+        """Clear any registered bad-message hook."""
+        return self.engine.clear_on_bad_msg_hook()
+
+    def get_on_bad_msg_hook(self) -> "str | None":
+        """Return the registered bad-message hook name, or ``None``."""
+        return self.engine.get_on_bad_msg_hook()
+
     def set_jobs_deactivate_on_error(self, enabled: bool) -> None:
         """Enable or disable deactivating scheduled jobs after a fire error.
 

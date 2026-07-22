@@ -440,6 +440,26 @@ impl PyEngineState {
         Ok(self.inner.get_on_conn_close_hook())
     }
 
+    /// Register a bad-message hook for corrupt/apply-failed frames.
+    fn set_on_bad_msg_hook(&self, name: &str) -> PyResult<()> {
+        self.check_fork()?;
+        self.inner.set_on_bad_msg_hook(Some(name.to_string()));
+        Ok(())
+    }
+
+    /// Clear the bad-message hook.
+    fn clear_on_bad_msg_hook(&self) -> PyResult<()> {
+        self.check_fork()?;
+        self.inner.set_on_bad_msg_hook(None);
+        Ok(())
+    }
+
+    /// Return the registered bad-message hook name, if any.
+    fn get_on_bad_msg_hook(&self) -> PyResult<Option<String>> {
+        self.check_fork()?;
+        Ok(self.inner.get_on_bad_msg_hook())
+    }
+
     /// Set max outbound queue depth for Publishing subscribers (`0` = off).
     fn set_subscriber_queue_max(&self, n: i64) -> PyResult<()> {
         self.check_fork()?;
