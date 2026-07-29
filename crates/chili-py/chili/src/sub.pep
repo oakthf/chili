@@ -32,6 +32,6 @@ upd: {[table; data] table upsert data; tick[this.h; 1]; };
   info: $[null get[`.sub.filterTopic];
     handle (`.tick.subscribe; .sub.topics);
     handle (`.tick.subscribeFiltered; .sub.filterTopic; .sub.filterColumn; .sub.filterValues)];
-  replay[info[0]; tick[0]; info[1]; (); 1b; handle];
+  replay[info[0]; tick[0; 0]; info[1]; (); 1b; handle];
   .handle.subscribing[handle];
 };

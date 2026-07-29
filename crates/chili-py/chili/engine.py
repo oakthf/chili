@@ -351,6 +351,22 @@ class ChiliEngine:
         """
         return self.engine.tick(index, inc)
 
+    def set_tick_count(self, index: int = 0, value: int = 0) -> Any:
+        """Set the tick counter at *index* to an absolute *value*.
+
+        Pepper equivalent: ``tock[index; value]``. Prefer this over the two-step
+        ``tick[0; neg tick[0; 0]]; tick[0; n]`` pattern when reseeding after
+        ``validateSeq``.
+
+        Args:
+            index: Tick stream index (default 0).
+            value: Absolute counter value to store.
+
+        Returns:
+            The stored tick count (same as *value*).
+        """
+        return self.engine.set_tick_count(index, value)
+
     def is_lazy_mode(self) -> bool:
         """Return ``True`` if lazy evaluation mode is enabled."""
         return self.engine.is_lazy_mode()
@@ -391,14 +407,15 @@ class ChiliEngine:
                   a ``"YYYY.MM.DD"`` string.
             sort_columns: Optional columns to sort by before writing.
             rechunk: Re-chunk the data into a single contiguous allocation.
-            overwrite: If ``True``, overwrite an existing partition.
+            overwrite: If ``True``, replace an existing partition via write-then-rename
+                (readers never see an empty partition). Temp shards use
+                ``{date}.tmp_0000`` so they do not match the ``{date}_*`` glob.
 
         Note:
             The Parquet codec is the polars default (**zstd**) and the
             row-group size is auto-sized (clamped when ``sort_columns`` is set,
             else the polars default 262144). Use
-            :meth:`write_partitioned_df_custom` for atomic overwrite and a
-            per-call compression codec.
+            :meth:`write_partitioned_df_custom` for a per-call compression codec.
 
         Returns:
             The number of rows written.
@@ -437,7 +454,6 @@ class ChiliEngine:
         sort_columns: Optional[list[str]] = None,
         rechunk: bool = False,
         overwrite: bool = False,
-        atomic: bool = False,
         compression: Optional[str] = None,
     ) -> int:
         """Write a date-partitioned Parquet table with customized write options.
@@ -445,9 +461,6 @@ class ChiliEngine:
         Same as :meth:`write_partitioned_df`, plus:
 
         Args:
-            atomic: On overwrite, write the new single shard to a temp file
-                and rename it into place so readers never see an empty
-                partition directory.
             compression: Optional Parquet codec name (e.g. ``"zstd"``,
                 ``"snappy"``); ``None`` keeps the default (**zstd**).
 
@@ -476,7 +489,6 @@ class ChiliEngine:
                 sort_cols_arg,
                 rechunk,
                 overwrite,
-                atomic,
                 compression,
             ],
         )

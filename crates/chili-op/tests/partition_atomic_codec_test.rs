@@ -100,15 +100,19 @@ fn test_atomic_overwrite_roundtrips_and_never_empties() {
         &[],
         false,
         true,
-        true,
         None,
     )
     .unwrap();
 
     assert_eq!(read_value(hdb.path(), table), 200);
     assert_eq!(shard_count(hdb.path(), table), 1);
-    let tmp = format!("{}/{}/2026.01.01_0000.tmp", hdb.path(), table);
+    let tmp = format!("{}/{}/2026.01.01.tmp_0000", hdb.path(), table);
     assert!(!PathBuf::from(&tmp).exists(), "temp file must be renamed away");
+    let legacy_tmp = format!("{}/{}/2026.01.01_0000.tmp", hdb.path(), table);
+    assert!(
+        !PathBuf::from(&legacy_tmp).exists(),
+        "legacy glob-matching temp name must not be used"
+    );
 
     let dir = partition_dir(hdb.path(), table);
     let entries: Vec<_> = fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).collect();
@@ -145,7 +149,6 @@ fn test_atomic_overwrite_collapses_multishard() {
         &[],
         false,
         true,
-        true,
         None,
     )
     .unwrap();
@@ -166,7 +169,6 @@ fn test_codec_snappy_roundtrips_and_differs_from_zstd() {
         &[],
         false,
         true,
-        false,
         Some("snappy"),
     )
     .unwrap();
@@ -180,7 +182,6 @@ fn test_codec_snappy_roundtrips_and_differs_from_zstd() {
         &[],
         false,
         true,
-        false,
         Some("zstd"),
     )
     .unwrap();
@@ -210,7 +211,6 @@ fn test_codec_unknown_errors() {
         &[],
         false,
         true,
-        false,
         Some("brotli-typo"),
     );
     assert!(res.is_err(), "unknown codec must error");
@@ -228,7 +228,6 @@ fn test_codec_default_and_zstd_equivalent() {
         &[],
         false,
         true,
-        false,
         Some("zstd"),
     )
     .unwrap();

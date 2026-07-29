@@ -3666,7 +3666,7 @@ pub fn fill(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
     let arg0 = args[0];
     let arg1 = args[1];
     if arg0.is_expr() || arg1.is_expr() {
-        return Ok(SpicyObj::Expr(arg0.as_expr()?.fill_null(arg1.as_expr()?)));
+        return Ok(SpicyObj::Expr(arg1.as_expr()?.fill_null(arg0.as_expr()?)));
     }
     let c0 = arg0.get_type_code();
     let err = || SpicyError::UnsupportedUnaryOpErr("fill".to_owned(), arg0.get_type_name());

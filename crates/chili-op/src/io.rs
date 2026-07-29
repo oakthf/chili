@@ -308,12 +308,11 @@ pub fn write_partition(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
         &columns,
         rechunk,
         overwrite,
-        false,
         None,
     )
 }
 
-// hdb_path, partition, table, df, columns, rechunk, overwrite, atomic, compression
+// hdb_path, partition, table, df, columns, rechunk, overwrite, compression
 pub fn write_partition_custom(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
     validate_args(
         args,
@@ -323,7 +322,6 @@ pub fn write_partition_custom(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
             ArgType::Sym,
             ArgType::DataFrame,
             ArgType::SymOrSyms,
-            ArgType::Boolean,
             ArgType::Boolean,
             ArgType::Boolean,
             ArgType::Any,
@@ -336,8 +334,7 @@ pub fn write_partition_custom(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
     let columns = args[4].to_str_vec().unwrap();
     let rechunk = *args[5].bool().unwrap();
     let overwrite = *args[6].bool().unwrap();
-    let atomic = *args[7].bool().unwrap();
-    let compression: Option<String> = match args[8] {
+    let compression: Option<String> = match args[7] {
         SpicyObj::Null => None,
         o => o.str().ok().map(|s| s.to_string()),
     };
@@ -349,7 +346,6 @@ pub fn write_partition_custom(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
         &columns,
         rechunk,
         overwrite,
-        atomic,
         compression.as_deref(),
     )
 }
@@ -371,15 +367,15 @@ pub fn write_partition_native(
         sort_columns,
         rechunk,
         overwrite,
-        false,
         None,
     )
 }
 
-/// `write_partition_native` with optional atomic overwrite and parquet codec (`wparc`).
+/// `write_partition_native` with optional parquet codec (`wparc`).
 ///
-/// `atomic`: on overwrite, write to a temp file then `fs::rename` into `_0000`
-/// (single-shard only). `compression`: codec name; `None` uses zstd.
+/// On overwrite, always write-then-rename (never delete-first). Temp shards use
+/// a `{date}.tmp_0000` name so they do not match the `{date}_*` partition glob.
+/// `compression`: codec name; `None` uses zstd.
 #[allow(clippy::too_many_arguments)]
 pub fn write_partition_native_full(
     hdb_path: &str,
@@ -389,7 +385,6 @@ pub fn write_partition_native_full(
     sort_columns: &[&str],
     rechunk: bool,
     overwrite: bool,
-    atomic: bool,
     compression: Option<&str>,
 ) -> SpicyResult<SpicyObj> {
     let codec = util::parse_parquet_compression(compression)?;
@@ -527,10 +522,12 @@ pub fn write_partition_native_full(
         .map(|p| p.map_err(|e| SpicyError::Err(e.to_string())))
         .collect::<SpicyResult<Vec<_>>>()?;
 
-    // Atomic overwrite: write tmp shard, rename into _0000, then drop other shards.
-    if atomic && overwrite {
+    // Overwrite: write tmp shard, rename into _0000, then drop other shards.
+    // Never delete-first (crash window would leave an empty partition).
+    if overwrite {
         let final_path = format!("{}_0000", par_path.display());
-        let tmp_path = format!("{}_0000.tmp", par_path.display());
+        // Dot (not underscore) after the date stem so `{date}_*` does not match.
+        let tmp_path = format!("{}.tmp_0000", par_path.display());
         let size = util::write_parquet_to_filepath_full(
             &tmp_path,
             &df,
@@ -546,13 +543,7 @@ pub fn write_partition_native_full(
         return Ok(SpicyObj::I64(size as i64));
     }
 
-    if overwrite && !existing_sub_parts.is_empty() {
-        for path in &existing_sub_parts {
-            fs::remove_file(path).map_err(|e| SpicyError::Err(e.to_string()))?;
-        }
-    }
-
-    if existing_sub_parts.is_empty() || overwrite {
+    if existing_sub_parts.is_empty() {
         let sub_par_path = format!("{}_0000", par_path.display());
         util::write_parquet_to_filepath_full(&sub_par_path, &df, row_group_size, codec.clone())
             .map(|size| SpicyObj::I64(size as i64))

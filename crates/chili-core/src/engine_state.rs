@@ -2797,6 +2797,19 @@ impl EngineState {
         Ok(SpicyObj::I64(tick_count[index]))
     }
 
+    /// Set the tick counter at `index` to an absolute `value` (not an increment).
+    pub fn set_tick_count(&self, index: usize, value: i64) -> SpicyResult<SpicyObj> {
+        if index >= MAX_HANDLE_NUM {
+            return Err(SpicyError::HandleOutOfRangeErr(
+                index as i64,
+                MAX_HANDLE_NUM,
+            ));
+        }
+        let mut tick_count = self.tick_count.write();
+        tick_count[index] = value;
+        Ok(SpicyObj::I64(tick_count[index]))
+    }
+
     pub fn get_tick_count(&self, index: usize) -> SpicyResult<i64> {
         if index >= MAX_HANDLE_NUM {
             return Err(SpicyError::HandleOutOfRangeErr(

@@ -8,7 +8,6 @@ use crate::{
 };
 use indexmap::IndexMap;
 use ndarray::{Axis, s};
-use polars::prelude::{Categories, ExplodeOptions, Expr, QuantileMethod, lit};
 use polars::{
     chunked_array::{ChunkedArray, ops::ChunkCast},
     datatypes::{LogicalType, PolarsFloatType},
@@ -19,6 +18,10 @@ use polars::{
     },
     series::{IntoSeries, ops::NullBehavior},
     time::chunkedarray::SeriesOpsTime,
+};
+use polars::{
+    frame::UniqueKeepStrategy,
+    prelude::{Categories, ExplodeOptions, Expr, QuantileMethod, lit},
 };
 
 use polars::{
@@ -1365,6 +1368,10 @@ pub fn unique(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
         | SpicyObj::F32(_)
         | SpicyObj::F64(_)
         | SpicyObj::Null => Ok(arg0.clone()),
+        SpicyObj::DataFrame(df) => Ok(SpicyObj::DataFrame(
+            df.unique_stable(None, UniqueKeepStrategy::First, None)
+                .map_err(|e| SpicyError::Err(e.to_string()))?,
+        )),
         _ => Err(err()),
     }
 }

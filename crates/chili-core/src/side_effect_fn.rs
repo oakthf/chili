@@ -325,6 +325,12 @@ fn tick(state: &EngineState, _stack: &mut Stack, args: &[&SpicyObj]) -> SpicyRes
     state.tick(index, inc)
 }
 
+fn set_tick(state: &EngineState, _stack: &mut Stack, args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
+    let index = args[0].to_i64()? as usize;
+    let value = args[1].to_i64()?;
+    state.set_tick_count(index, value)
+}
+
 fn set(state: &EngineState, _stack: &mut Stack, args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
     let id = args[0].str()?;
     let value = args[1];
@@ -619,6 +625,15 @@ pub static SIDE_EFFECT_FN: LazyLock<HashMap<String, Func>> = LazyLock::new(|| {
         (
             "tick".to_owned(),
             Func::new_side_effect_built_in_fn(Some(Box::new(tick)), 2, "tick", &["index", "inc"]),
+        ),
+        (
+            "tock".to_owned(),
+            Func::new_side_effect_built_in_fn(
+                Some(Box::new(set_tick)),
+                2,
+                "tock",
+                &["index", "value"],
+            ),
         ),
         (
             "set".to_owned(),

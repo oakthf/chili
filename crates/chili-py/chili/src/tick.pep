@@ -7,7 +7,10 @@
   if[(not exists .tick.msgLog) & exists[.tick.msgLog + ".gz"];
     .tick.msgLog: .tick.msgLog + ".gz"];
   .tick.logFile: "file://" + .tick.msgLog;
-  // tick is using handle 0 for internal tick count
+  // tick is using handle 0 for internal tick count (message count from validateSeq).
+  // To set an absolute counter after init (e.g. a per-row high-water), use:
+  //   tock[0; n]
+  // or: tick[0; neg tick[0; 0]]; tick[0; n]
   tick[0; .broker.validateSeq[.tick.msgLog; 0b]];
   // close existing handle
   if[not null get[`.tick.msgHandle];.handle.close get[`.tick.msgHandle]];

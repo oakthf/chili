@@ -608,6 +608,14 @@ impl PyEngineState {
         spicy_to_py(py, obj)
     }
 
+    /// Set the tick counter at `index` to an absolute `value` and return it.
+    #[pyo3(signature = (index=0, value=0))]
+    fn set_tick_count(&self, py: Python<'_>, index: usize, value: i64) -> PyResult<Py<PyAny>> {
+        self.check_fork()?;
+        let obj = map_spicy_error(self.inner.set_tick_count(index, value))?;
+        spicy_to_py(py, obj)
+    }
+
     /// Return `True` if lazy evaluation mode is enabled.
     fn is_lazy_mode(&self) -> bool {
         let _ = self.check_fork();

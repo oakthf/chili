@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.8] - 2026-07-29
+
+### Added
+
+- `tock[index; value]` / `EngineState::set_tick_count` / Python `ChiliEngine.set_tick_count` — set a tick counter to an absolute value (for reseeding after `validateSeq` without the increment workaround)
+- `unique` on DataFrames — stable row dedup keeping the first occurrence of each duplicate row
+
+### Fixed
+
+- expression-mode `fill` / `^` argument order — `fill[value; x]` now fills nulls in `x` with `value` (matching the non-expression path); previously the expression path swapped the operands
+- `.sub.recover` now passes `tick[0; 0]` (message counter) into `replay` instead of projecting unary `tick[0]`, so backlog replay starts at the correct offset
+- partition overwrite (`wpar` / `wparc`) always write-then-rename; temp shards use `{date}.tmp_0000` so they do not match the `{date}_*` partition glob (avoids empty-partition crash windows and accidental glob pickup of temps). The unused `atomic` arg was removed from `wparc` / `write_partitioned_df_custom` / `write_partition_native_full` (now 8 args: … overwrite, compression)
+
 ## [0.9.7] - 2026-07-22
 
 ### Added
