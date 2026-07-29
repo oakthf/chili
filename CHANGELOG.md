@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.9] - 2026-07-29
+
+### Added
+
+- Linux aarch64 wheels (`manylinux_2_28_aarch64`, `musllinux_1_2_aarch64`) for `chili-sauce` and `chili-pie` release CI
+
 ## [0.9.8] - 2026-07-29
 
 ### Added
