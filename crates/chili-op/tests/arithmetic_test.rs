@@ -120,14 +120,6 @@ fn add() {
         (vec![&e, &p], SpicyObj::F32(7.677595e17)),
         (vec![&e, &n], SpicyObj::F32(131696000000000.0)),
         (vec![&d, &t], SpicyObj::Date(19843)),
-        (
-            vec![&d, &si],
-            SpicyObj::Series(
-                Series::new("".into(), vec![Some(19814), Some(19874), None])
-                    .cast(&DataType::Date)
-                    .unwrap(),
-            ),
-        ),
         (vec![&t, &t], SpicyObj::Duration(18136220000000)),
         (vec![&z, &t], SpicyObj::Datetime(767768589233)),
         (
@@ -210,7 +202,7 @@ fn add() {
         }
     }
 
-    for args in [[&d, &d], [&d, &z], [&d, &p]].iter() {
+    for args in [[&d, &d], [&d, &z], [&d, &p], [&d, &si]].iter() {
         assert!(operator::add(args).is_err(), "error case - {:?}", args)
     }
 }
@@ -352,14 +344,6 @@ fn minus() {
         (vec![&e, &n], SpicyObj::F32(-131696000000000.0)),
         // date
         (vec![&d, &t], SpicyObj::Date(19843)),
-        (
-            vec![&d, &si],
-            SpicyObj::Series(
-                Series::new("".into(), vec![Some(19872), Some(19812), None])
-                    .cast(&DataType::Date)
-                    .unwrap(),
-            ),
-        ),
         (vec![&t, &n], SpicyObj::Duration(-122627890000000)),
         (vec![&z, &t], SpicyObj::Datetime(767750453013)),
         (
@@ -418,7 +402,15 @@ fn minus() {
         }
     }
 
-    for args in [vec![&c, &sd], vec![&c, &sz], vec![&c, &sp], vec![&sh, &sd]].iter() {
+    for args in [
+        vec![&c, &sd],
+        vec![&c, &sz],
+        vec![&c, &sp],
+        vec![&sh, &sd],
+        vec![&d, &si],
+    ]
+    .iter()
+    {
         assert!(operator::minus(args).is_err(), "error case - {:?}", args)
     }
 }

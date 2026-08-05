@@ -2981,7 +2981,7 @@ pub fn rand(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
                     Ok(SpicyObj::Series(series))
                 }
                 SpicyObj::Series(s) => Ok(SpicyObj::Series(
-                    s.sample_n(i, true, false, Some(get_global_random_u64()))
+                    s.sample_n(i, true, Some(false), Some(get_global_random_u64()))
                         .map_err(|e| SpicyError::Err(e.to_string()))?,
                 )),
                 SpicyObj::MixedList(l) => {
@@ -3007,7 +3007,7 @@ pub fn rand(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
                     Ok(SpicyObj::Matrix(m.select(Axis(0), &arr).to_shared()))
                 }
                 SpicyObj::DataFrame(df) => Ok(SpicyObj::DataFrame(
-                    df.sample_n_literal(i, true, false, Some(get_global_random_u64()))
+                    df.sample_n_literal(i, true, Some(false), Some(get_global_random_u64()))
                         .map_err(|e| SpicyError::Err(e.to_string()))?,
                 )),
                 _ => Err(SpicyError::Err(format!(
@@ -3065,7 +3065,7 @@ pub fn rand(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
                         ))
                     }
                     SpicyObj::Series(s) => Ok(SpicyObj::Series(
-                        s.sample_n(i0, false, true, Some(get_global_random_u64()))
+                        s.sample_n(i0, false, Some(true), Some(get_global_random_u64()))
                             .map_err(|e| SpicyError::Err(e.to_string()))?,
                     )),
                     SpicyObj::MixedList(l) => {
@@ -3087,7 +3087,7 @@ pub fn rand(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
                         Ok(SpicyObj::Matrix(m.select(Axis(0), &indices).to_shared()))
                     }
                     SpicyObj::DataFrame(df) => Ok(SpicyObj::DataFrame(
-                        df.sample_n_literal(i0, false, true, Some(get_global_random_u64()))
+                        df.sample_n_literal(i0, false, Some(true), Some(get_global_random_u64()))
                             .map_err(|e| SpicyError::Err(e.to_string()))?,
                     )),
                     _ => Err(SpicyError::Err(format!(
@@ -3120,8 +3120,13 @@ pub fn rand(args: &[&SpicyObj]) -> SpicyResult<SpicyObj> {
                 Ok(SpicyObj::Matrix(m.select(Axis(0), &indices).to_shared()))
             }
             SpicyObj::DataFrame(df) => Ok(SpicyObj::DataFrame(
-                df.sample_n_literal(df.height(), false, true, Some(get_global_random_u64()))
-                    .map_err(|e| SpicyError::Err(e.to_string()))?,
+                df.sample_n_literal(
+                    df.height(),
+                    false,
+                    Some(true),
+                    Some(get_global_random_u64()),
+                )
+                .map_err(|e| SpicyError::Err(e.to_string()))?,
             )),
             _ => Err(SpicyError::Err(format!(
                 "Unsupported permute rand(?) for '{}'",

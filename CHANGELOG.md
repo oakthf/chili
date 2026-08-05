@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.0] - 2026-08-05
+
+### Changed
+
+- Polars **0.54.4 → 0.55.1** (patched `polars-core` tag `v0.55.1`)
+- Python bindings: **pyo3 0.29.1**, **pyo3-polars 0.28.0**
+- `date` arithmetic with an integer **series** (`date +/- i64` series) now **errors** instead of broadcasting element-wise (Polars 0.55 no longer supports that path)
+- CLI: reedline **0.48 → 0.49**
+
+### Fixed
+
+- Python `Date` → `datetime.date` conversion updated for pyo3 0.29 (`from_timestamp` day count via `f64`)
+
 ## [0.9.9] - 2026-07-29
 
 ### Added

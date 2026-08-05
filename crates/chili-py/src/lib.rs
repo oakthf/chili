@@ -186,7 +186,7 @@ fn spicy_to_py(py: Python<'_>, obj: SpicyObj) -> PyResult<Py<PyAny>> {
         SpicyObj::String(v) => Ok(v.as_bytes().into_pyobject(py)?.into_any().unbind()),
         SpicyObj::Symbol(v) => Ok(v.into_pyobject(py)?.into_any().unbind()),
         // Date => Python datetime.date
-        SpicyObj::Date(v) => Ok(PyDate::from_timestamp(py, v as i64 * 86400)?
+        SpicyObj::Date(v) => Ok(PyDate::from_timestamp(py, v as f64 * 86400.0)?
             .into_any()
             .unbind()),
         // Time => Python datetime.time

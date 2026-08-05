@@ -84,7 +84,7 @@ flate2 = "1"
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
 tempfile = "3"
-serial_test = "3"
+serial_test = "4.0.1"
 chili-op = { path = "../chili-op" }
 
 [[bench]]
